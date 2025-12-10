@@ -3,7 +3,7 @@ import torch.nn as nn
 
 import math
 
-from dpm_solver_pytorch import NoiseScheduleVP, model_wrapper, DPM_Solver
+from dpm_solver_pytorch import model_wrapper, model_wrapper_hierarchical_cond, NoiseScheduleVP, DPM_Solver
 
 noise_schedule = NoiseScheduleVP(schedule="linear")
 
@@ -250,102 +250,3 @@ def p_sample_loop_with_rq(model, all_level_vectors, iid_input, device):
     cur_x, iid_emb_out = p_sample_with_rq(model, all_level_vectors, cur_x, iid_input, device)
 
     return cur_x, iid_emb_out
-
-
-def model_wrapper_hierarchical_cond(
-    model,
-    noise_schedule,
-    is_cond_classifier=True,
-    classifier_scale=1.0,
-    time_input_type="1",
-    total_N=1000,
-    model_kwargs=None,
-):
-    """
-    model_kwargs:
-        - "all_level_vectors": [L, B, D]
-        - "cond_mask": [B]
-    """
-    if model_kwargs is None:
-        model_kwargs = {}
-
-    all_level_vectors = model_kwargs.get("all_level_vectors", None)  # [L, B, D]
-    base_cond_mask = model_kwargs.get("cond_mask", None)  # [B]
-
-    def get_model_input_time(t_continuous):
-        if time_input_type == "0":
-            return t_continuous
-        elif time_input_type == "1":
-            return 1000.0 * torch.max(
-                t_continuous - 1.0 / total_N,
-                torch.zeros_like(t_continuous).to(t_continuous),
-            )
-        elif time_input_type == "2":
-            max_N = (total_N - 1) / total_N * 1000.0
-            return max_N * t_continuous
-        else:
-            raise ValueError
-
-    def model_fn(x, t_continuous):
-        if is_cond_classifier:
-            t_discrete = get_model_input_time(t_continuous)
-
-            # 🔥 여기서 time-step별 cond_emb(t) 생성
-            cond_emb_t = hierarchical_cond_from_levels(all_level_vectors, t_continuous, noise_schedule)  # [B, D]
-
-            cond_mask = base_cond_mask  # [B]
-            noise_uncond = model(x, t_discrete, cond_emb_t, cond_mask)
-
-            cond_mask_c = torch.ones_like(cond_mask, device=cond_mask.device)
-            noise_cond = model(x, t_discrete, cond_emb_t, cond_mask_c)
-
-            return noise_uncond + classifier_scale * (noise_cond - noise_uncond)
-        else:
-            t_discrete = get_model_input_time(t_continuous)
-            cond_emb_t = hierarchical_cond_from_levels(all_level_vectors, t_continuous, noise_schedule)
-            cond_mask = base_cond_mask
-            return model(x, t_discrete, cond_emb_t, cond_mask)
-
-    return model_fn
-
-
-def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous: torch.Tensor, noise_schedule):
-    """
-    all_level_vectors: [L, B, D]  (RQ-VAE 코드북 레벨별 벡터)
-    t_continuous: [B]  (DPM-Solver가 넘겨주는 연속 시간)
-    noise_schedule: NoiseScheduleVP (T 값을 쓰기 위해)
-
-    초기 타임스텝: 추상 레벨 위주
-    후기 타임스텝: 구체 레벨까지 모두 포함
-    """
-    L, B, D = all_level_vectors.shape
-    device = all_level_vectors.device
-
-    if t_continuous.dim() == 2:
-        t_continuous = t_continuous.squeeze(-1)
-
-    T = noise_schedule.T
-    # t_norm: 0(초기) ~ 1(마지막)
-    t_norm = 1.0 - t_continuous / T
-    t_norm = torch.clamp(t_norm, 0.0, 1.0)  # [B]
-
-    t_norm_exp = t_norm.view(B, 1, 1)  # [B, 1, 1]
-
-    # 레벨 인덱스 0~L-1 → 0~1 정규화 (0=추상, 1=구체)
-    level_ids = torch.arange(L, device=device).float().view(1, L, 1)  # [1, L, 1]
-    level_norm = level_ids / max(L - 1, 1)  # [1, L, 1]
-
-    # t_norm이 작을 때는 level_norm 작은 것(상위 레벨)만, 클수록 더 많은 레벨
-    # mask: [B, L, 1]
-    mask = (t_norm_exp >= (1.0 - level_norm)).float()
-    # [L, B, 1]
-    mask = mask.permute(1, 0, 2)
-
-    # 마스킹 후 합
-    weighted = all_level_vectors * mask  # [L, B, D]
-    cond_emb = weighted.sum(dim=0)  # [B, D]
-
-    denom = mask.sum(dim=0)  # [B, 1]
-    cond_emb = cond_emb / torch.clamp(denom, min=1.0)
-
-    return cond_emb

@@ -3,103 +3,103 @@ import torch.nn.functional as F
 import math
 
 
-class NoiseScheduleVP:
-    def __init__(self, schedule="linear"):
-        """Create a wrapper class for the forward SDE (VP type).
+def model_wrapper_hierarchical_cond(
+    model,
+    noise_schedule,
+    is_cond_classifier=True,
+    classifier_scale=1.0,
+    time_input_type="1",
+    total_N=1000,
+    model_kwargs=None,
+):
+    """
+    model_kwargs:
+        - "all_level_vectors": [L, B, D]
+        - "cond_mask": [B]
+    """
+    if model_kwargs is None:
+        model_kwargs = {}
 
-        The forward SDE ensures that the condition distribution q_{t|0}(x_t | x_0) = N ( alpha_t * x_0, sigma_t^2 * I ).
-        We further define lambda_t = log(alpha_t) - log(sigma_t), which is the half-logSNR (described in the DPM-Solver paper).
-        Therefore, we implement the functions for computing alpha_t, sigma_t and lambda_t. For t in [0, T], we have:
+    all_level_vectors = model_kwargs.get("all_level_vectors", None)  # [L, B, D]
+    base_cond_mask = model_kwargs.get("cond_mask", None)  # [B]
 
-            log_alpha_t = self.marginal_log_mean_coeff(t)
-            sigma_t = self.marginal_std(t)
-            lambda_t = self.marginal_lambda(t)
-
-        Moreover, as lambda(t) is an invertible function, we also support its inverse function:
-
-            t = self.inverse_lambda(lambda_t)
-
-        ===============================================================
-
-        We support two types of VPSDEs: linear (DDPM) and cosine (improved-DDPM). The hyperparameters for the noise
-        schedule are the default settings in DDPM and improved-DDPM:
-
-            beta_min: A `float` number. The smallest beta for the linear schedule.
-            beta_max: A `float` number. The largest beta for the linear schedule.
-            cosine_s: A `float` number. The hyperparameter in the cosine schedule.
-            cosine_beta_max: A `float` number. The hyperparameter in the cosine schedule.
-            T: A `float` number. The ending time of the forward process.
-
-        Note that the original DDPM (linear schedule) used the discrete-time label (0 to 999). We convert the discrete-time
-        label to the continuous-time time (followed Song et al., 2021), so the beta here is 1000x larger than those in DDPM.
-
-        ===============================================================
-
-        Args:
-            schedule: A `str`. The noise schedule of the forward SDE ('linear' or 'cosine').
-
-        Returns:
-            A wrapper object of the forward SDE (VP type).
-        """
-        if schedule not in ["linear", "cosine"]:
-            raise ValueError("Unsupported noise schedule {}. The schedule needs to be 'linear' or 'cosine'".format(schedule))
-        self.beta_0 = 0.1
-        self.beta_1 = 20
-        self.cosine_s = 0.008
-        self.cosine_beta_max = 999.0
-        self.cosine_t_max = math.atan(self.cosine_beta_max * (1.0 + self.cosine_s) / math.pi) * 2.0 * (1.0 + self.cosine_s) / math.pi - self.cosine_s
-        self.cosine_log_alpha_0 = math.log(math.cos(self.cosine_s / (1.0 + self.cosine_s) * math.pi / 2.0))
-        self.schedule = schedule
-        if schedule == "cosine":
-            # For the cosine schedule, T = 1 will have numerical issues. So we manually set the ending time T.
-            # Note that T = 0.9946 may be not the optimal setting. However, we find it works well.
-            self.T = 0.9946
-        else:
-            self.T = 1.0
-
-    def marginal_log_mean_coeff(self, t):
-        """
-        Compute log(alpha_t) of a given continuous-time label t in [0, T].
-        """
-        if self.schedule == "linear":
-            return -0.25 * t**2 * (self.beta_1 - self.beta_0) - 0.5 * t * self.beta_0
-        elif self.schedule == "cosine":
-            log_alpha_fn = lambda s: torch.log(torch.cos((s + self.cosine_s) / (1.0 + self.cosine_s) * math.pi / 2.0))
-            log_alpha_t = log_alpha_fn(t) - self.cosine_log_alpha_0
-            return log_alpha_t
-        else:
-            raise ValueError("Unsupported ")
-
-    def marginal_std(self, t):
-        """
-        Compute sigma_t of a given continuous-time label t in [0, T].
-        """
-        return torch.sqrt(1.0 - torch.exp(2.0 * self.marginal_log_mean_coeff(t)))
-
-    def marginal_lambda(self, t):
-        """
-        Compute lambda_t = log(alpha_t) - log(sigma_t) of a given continuous-time label t in [0, T].
-        """
-        log_mean_coeff = self.marginal_log_mean_coeff(t)
-        log_std = 0.5 * torch.log(1.0 - torch.exp(2.0 * log_mean_coeff))
-        return log_mean_coeff - log_std
-
-    def inverse_lambda(self, lamb):
-        """
-        Compute the continuous-time label t in [0, T] of a given half-logSNR lambda_t.
-        """
-        if self.schedule == "linear":
-            tmp = 2.0 * (self.beta_1 - self.beta_0) * torch.logaddexp(-2.0 * lamb, torch.zeros((1,)).to(lamb))
-            Delta = self.beta_0**2 + tmp
-            return tmp / (torch.sqrt(Delta) + self.beta_0) / (self.beta_1 - self.beta_0)
-        else:
-            log_alpha = -0.5 * torch.logaddexp(-2.0 * lamb, torch.zeros((1,)).to(lamb))
-            t_fn = (
-                lambda log_alpha_t: torch.arccos(torch.exp(log_alpha_t + self.cosine_log_alpha_0)) * 2.0 * (1.0 + self.cosine_s) / math.pi
-                - self.cosine_s
+    def get_model_input_time(t_continuous):
+        if time_input_type == "0":
+            return t_continuous
+        elif time_input_type == "1":
+            return 1000.0 * torch.max(
+                t_continuous - 1.0 / total_N,
+                torch.zeros_like(t_continuous).to(t_continuous),
             )
-            t = t_fn(log_alpha)
-            return t
+        elif time_input_type == "2":
+            max_N = (total_N - 1) / total_N * 1000.0
+            return max_N * t_continuous
+        else:
+            raise ValueError
+
+    def model_fn(x, t_continuous):
+        if is_cond_classifier:
+            t_discrete = get_model_input_time(t_continuous)
+
+            # 🔥 여기서 time-step별 cond_emb(t) 생성
+            cond_emb_t = hierarchical_cond_from_levels(all_level_vectors, t_continuous, noise_schedule)  # [B, D]
+
+            cond_mask = base_cond_mask  # [B]
+            noise_uncond = model(x, t_discrete, cond_emb_t, cond_mask)
+
+            cond_mask_c = torch.ones_like(cond_mask, device=cond_mask.device)
+            noise_cond = model(x, t_discrete, cond_emb_t, cond_mask_c)
+
+            return noise_uncond + classifier_scale * (noise_cond - noise_uncond)
+        else:
+            t_discrete = get_model_input_time(t_continuous)
+            cond_emb_t = hierarchical_cond_from_levels(all_level_vectors, t_continuous, noise_schedule)
+            cond_mask = base_cond_mask
+            return model(x, t_discrete, cond_emb_t, cond_mask)
+
+    return model_fn
+
+
+def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous: torch.Tensor, noise_schedule):
+    """
+    all_level_vectors: [L, B, D]  (RQ-VAE 코드북 레벨별 벡터)
+    t_continuous: [B]  (DPM-Solver가 넘겨주는 연속 시간)
+    noise_schedule: NoiseScheduleVP (T 값을 쓰기 위해)
+
+    초기 타임스텝: 추상 레벨 위주
+    후기 타임스텝: 구체 레벨까지 모두 포함
+    """
+    L, B, D = all_level_vectors.shape
+    device = all_level_vectors.device
+
+    if t_continuous.dim() == 2:
+        t_continuous = t_continuous.squeeze(-1)
+
+    T = noise_schedule.T
+    # t_norm: 0(초기) ~ 1(마지막)
+    t_norm = 1.0 - t_continuous / T
+    t_norm = torch.clamp(t_norm, 0.0, 1.0)  # [B]
+
+    t_norm_exp = t_norm.view(B, 1, 1)  # [B, 1, 1]
+
+    # 레벨 인덱스 0~L-1 → 0~1 정규화 (0=추상, 1=구체)
+    level_ids = torch.arange(L, device=device).float().view(1, L, 1)  # [1, L, 1]
+    level_norm = level_ids / max(L - 1, 1)  # [1, L, 1]
+
+    # t_norm이 작을 때는 level_norm 작은 것(상위 레벨)만, 클수록 더 많은 레벨
+    # mask: [B, L, 1]
+    mask = (t_norm_exp >= (1.0 - level_norm)).float()
+    # [L, B, 1]
+    mask = mask.permute(1, 0, 2)
+
+    # 마스킹 후 합
+    weighted = all_level_vectors * mask  # [L, B, D]
+    cond_emb = weighted.sum(dim=0)  # [B, D]
+
+    denom = mask.sum(dim=0)  # [B, 1]
+    cond_emb = cond_emb / torch.clamp(denom, min=1.0)
+
+    return cond_emb
 
 
 def model_wrapper(
@@ -236,6 +236,105 @@ def model_wrapper(
             return model(x, t_discrete, **model_kwargs)
 
     return model_fn
+
+
+class NoiseScheduleVP:
+    def __init__(self, schedule="linear"):
+        """Create a wrapper class for the forward SDE (VP type).
+
+        The forward SDE ensures that the condition distribution q_{t|0}(x_t | x_0) = N ( alpha_t * x_0, sigma_t^2 * I ).
+        We further define lambda_t = log(alpha_t) - log(sigma_t), which is the half-logSNR (described in the DPM-Solver paper).
+        Therefore, we implement the functions for computing alpha_t, sigma_t and lambda_t. For t in [0, T], we have:
+
+            log_alpha_t = self.marginal_log_mean_coeff(t)
+            sigma_t = self.marginal_std(t)
+            lambda_t = self.marginal_lambda(t)
+
+        Moreover, as lambda(t) is an invertible function, we also support its inverse function:
+
+            t = self.inverse_lambda(lambda_t)
+
+        ===============================================================
+
+        We support two types of VPSDEs: linear (DDPM) and cosine (improved-DDPM). The hyperparameters for the noise
+        schedule are the default settings in DDPM and improved-DDPM:
+
+            beta_min: A `float` number. The smallest beta for the linear schedule.
+            beta_max: A `float` number. The largest beta for the linear schedule.
+            cosine_s: A `float` number. The hyperparameter in the cosine schedule.
+            cosine_beta_max: A `float` number. The hyperparameter in the cosine schedule.
+            T: A `float` number. The ending time of the forward process.
+
+        Note that the original DDPM (linear schedule) used the discrete-time label (0 to 999). We convert the discrete-time
+        label to the continuous-time time (followed Song et al., 2021), so the beta here is 1000x larger than those in DDPM.
+
+        ===============================================================
+
+        Args:
+            schedule: A `str`. The noise schedule of the forward SDE ('linear' or 'cosine').
+
+        Returns:
+            A wrapper object of the forward SDE (VP type).
+        """
+        if schedule not in ["linear", "cosine"]:
+            raise ValueError("Unsupported noise schedule {}. The schedule needs to be 'linear' or 'cosine'".format(schedule))
+        self.beta_0 = 0.1
+        self.beta_1 = 20
+        self.cosine_s = 0.008
+        self.cosine_beta_max = 999.0
+        self.cosine_t_max = math.atan(self.cosine_beta_max * (1.0 + self.cosine_s) / math.pi) * 2.0 * (1.0 + self.cosine_s) / math.pi - self.cosine_s
+        self.cosine_log_alpha_0 = math.log(math.cos(self.cosine_s / (1.0 + self.cosine_s) * math.pi / 2.0))
+        self.schedule = schedule
+        if schedule == "cosine":
+            # For the cosine schedule, T = 1 will have numerical issues. So we manually set the ending time T.
+            # Note that T = 0.9946 may be not the optimal setting. However, we find it works well.
+            self.T = 0.9946
+        else:
+            self.T = 1.0
+
+    def marginal_log_mean_coeff(self, t):
+        """
+        Compute log(alpha_t) of a given continuous-time label t in [0, T].
+        """
+        if self.schedule == "linear":
+            return -0.25 * t**2 * (self.beta_1 - self.beta_0) - 0.5 * t * self.beta_0
+        elif self.schedule == "cosine":
+            log_alpha_fn = lambda s: torch.log(torch.cos((s + self.cosine_s) / (1.0 + self.cosine_s) * math.pi / 2.0))
+            log_alpha_t = log_alpha_fn(t) - self.cosine_log_alpha_0
+            return log_alpha_t
+        else:
+            raise ValueError("Unsupported ")
+
+    def marginal_std(self, t):
+        """
+        Compute sigma_t of a given continuous-time label t in [0, T].
+        """
+        return torch.sqrt(1.0 - torch.exp(2.0 * self.marginal_log_mean_coeff(t)))
+
+    def marginal_lambda(self, t):
+        """
+        Compute lambda_t = log(alpha_t) - log(sigma_t) of a given continuous-time label t in [0, T].
+        """
+        log_mean_coeff = self.marginal_log_mean_coeff(t)
+        log_std = 0.5 * torch.log(1.0 - torch.exp(2.0 * log_mean_coeff))
+        return log_mean_coeff - log_std
+
+    def inverse_lambda(self, lamb):
+        """
+        Compute the continuous-time label t in [0, T] of a given half-logSNR lambda_t.
+        """
+        if self.schedule == "linear":
+            tmp = 2.0 * (self.beta_1 - self.beta_0) * torch.logaddexp(-2.0 * lamb, torch.zeros((1,)).to(lamb))
+            Delta = self.beta_0**2 + tmp
+            return tmp / (torch.sqrt(Delta) + self.beta_0) / (self.beta_1 - self.beta_0)
+        else:
+            log_alpha = -0.5 * torch.logaddexp(-2.0 * lamb, torch.zeros((1,)).to(lamb))
+            t_fn = (
+                lambda log_alpha_t: torch.arccos(torch.exp(log_alpha_t + self.cosine_log_alpha_0)) * 2.0 * (1.0 + self.cosine_s) / math.pi
+                - self.cosine_s
+            )
+            t = t_fn(log_alpha)
+            return t
 
 
 class DPM_Solver:
