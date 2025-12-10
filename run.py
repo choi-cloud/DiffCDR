@@ -129,19 +129,6 @@ class Run:
             data_iter = DataLoader(dataset, batchsize, shuffle=shuffle)
             return data_iter
 
-    def read_map_data(self, data_path):
-        cols = ["uid", "iid", "y", "pos_seq"]
-        data = pd.read_csv(data_path, header=None)
-        data.columns = cols
-        X = torch.tensor(data["uid"].unique(), dtype=torch.long)
-        y = torch.tensor(np.array(range(X.shape[0])), dtype=torch.long)
-        if self.use_cuda:
-            X = X.cuda()
-            y = y.cuda()
-        dataset = TensorDataset(X, y)
-        data_iter = DataLoader(dataset, self.batchsize_map, shuffle=True)
-        return data_iter
-
     def read_diff_data(self, data_path, batch_size, shuffle=True):
 
         meta_uid_seq = pd.read_csv(data_path, header=None)
@@ -160,103 +147,6 @@ class Run:
         data_iter = DataLoader(dataset, batch_size, shuffle=shuffle)
         return data_iter
 
-    def read_ss_data(self, data_path):
-        """ """
-        cols = ["uid", "iid", "y", "pos_seq"]
-        meta_data = pd.read_csv(data_path, header=None)
-        meta_data.columns = cols
-        meta_data.drop(["y"], axis=1, inplace=True)
-
-        # neg sample
-        meta_data["pos_seq"] = meta_data["pos_seq"].str[1:-1]
-        meta_data["pos_seq"] = meta_data["pos_seq"].str.split(",")
-        meta_data["pos_split_len"] = [len(x) for x in meta_data["pos_seq"]]
-        meta_data["positive_s_i"] = [np.random.choice(x, 1)[0] for x in meta_data["pos_split_len"]]
-        meta_data["positive_s_i"] = [int(x[y]) if x != [""] else 0 for x, y in zip(meta_data["pos_seq"], meta_data["positive_s_i"])]
-
-        # hist item
-        all_his_item = set()
-        for x_seq in meta_data["pos_seq"]:
-            for x in x_seq:
-                if x != "":
-                    all_his_item.add(int(x))
-
-        all_his_item = list(all_his_item)
-        neg_s_i = np.random.choice(len(all_his_item), meta_data.shape[0])
-
-        meta_data["negetive_s_i"] = [all_his_item[x] for x in neg_s_i]
-
-        x_u = torch.tensor(meta_data["uid"], dtype=torch.long)
-        x_p_i = torch.tensor(meta_data["positive_s_i"], dtype=torch.long)
-        x_n_i = torch.tensor(meta_data["negetive_s_i"], dtype=torch.long)
-        x_t_u = torch.tensor(meta_data["uid"], dtype=torch.long)
-
-        del meta_data, all_his_item, neg_s_i
-
-        if self.use_cuda:
-            x_u = x_u.cuda()
-            x_p_i = x_p_i.cuda()
-            x_n_i = x_n_i.cuda()
-            x_t_u = x_t_u.cuda()
-        dataset = TensorDataset(x_u, x_p_i, x_n_i, x_t_u)
-        data_iter = DataLoader(dataset, self.batchsize_ss, shuffle=True)
-
-        return data_iter
-
-    def read_la_data(self):
-
-        # overlap
-        cols = ["uid", "iid", "y", "pos_seq"]
-        meta_data = pd.read_csv(self.meta_path, header=None)
-        meta_data.columns = cols
-        meta_data.drop(["y"], axis=1, inplace=True)
-
-        # full_uid = meta_data[['uid']].drop_duplicates()
-        full_uid = meta_data[["uid"]]
-
-        full_uid["mask_src"] = 1
-        full_uid["mask_tgt"] = 1
-
-        x_uid = torch.tensor(full_uid["uid"], dtype=torch.long)
-        x_mask_src = torch.tensor(full_uid["mask_src"], dtype=torch.long)
-        x_mask_tgt = torch.tensor(full_uid["mask_tgt"], dtype=torch.long)
-
-        del meta_data, full_uid
-
-        if self.use_cuda:
-            x_uid = x_uid.cuda()
-            x_mask_src = x_mask_src.cuda()
-            x_mask_tgt = x_mask_tgt.cuda()
-        dataset = TensorDataset(x_uid, x_mask_src, x_mask_tgt)
-        data_iter = DataLoader(dataset, self.batchsize_la, shuffle=True)
-
-        return data_iter
-
-    def read_aug_data(self, tgt_path):
-        # merge source train , target train
-
-        cols_train = ["uid", "iid", "y"]
-        x_col = ["uid", "iid"]
-        y_col = ["y"]
-        src = pd.read_csv(self.src_path, header=None)
-        src.columns = cols_train
-        tgt = pd.read_csv(tgt_path, header=None)
-        tgt.columns = cols_train
-
-        X_src = torch.tensor(src[x_col].values, dtype=torch.long)
-        y_src = torch.tensor(src[y_col].values, dtype=torch.long)
-        X_tgt = torch.tensor(tgt[x_col].values, dtype=torch.long)
-        y_tgt = torch.tensor(tgt[y_col].values, dtype=torch.long)
-        X = torch.cat([X_src, X_tgt])
-        y = torch.cat([y_src, y_tgt])
-        if self.use_cuda:
-            X = X.cuda()
-            y = y.cuda()
-        dataset = TensorDataset(X, y)
-        data_iter = DataLoader(dataset, self.batchsize_aug, shuffle=True)
-
-        return data_iter
-
     def get_data(self):
         print("========Reading data========")
         data_src = self.read_log_data(self.src_path, self.batchsize_src)
@@ -265,23 +155,8 @@ class Run:
         data_tgt = self.read_log_data(self.tgt_path, self.batchsize_tgt)
         print("tgt {} iter / batchsize = {} ".format(len(data_tgt), self.batchsize_tgt))
 
-        data_meta = self.read_log_data(self.meta_path, self.batchsize_meta, history=True)
-        print("meta {} iter / batchsize = {} ".format(len(data_meta), self.batchsize_meta))
-
-        data_map = self.read_map_data(self.meta_path)
-        print("map {} iter / batchsize = {} ".format(len(data_map), self.batchsize_map))
-
         data_diff = self.read_diff_data(self.meta_path, batch_size=self.batchsize_diff)
         print("diff {} iter / batchsize = {} ".format(len(data_diff), self.batchsize_diff))
-
-        data_aug = self.read_aug_data(self.tgt_path)
-        print("aug {} iter / batchsize = {} ".format(len(data_aug), self.batchsize_aug))
-
-        data_ss = self.read_ss_data(self.meta_path)
-        print("ss {} iter / batchsize = {} ".format(len(data_ss), self.batchsize_ss))
-
-        data_la = self.read_la_data()
-        print("la {} iter / batchsize = {} ".format(len(data_la), self.batchsize_la))
 
         data_test = self.read_log_data(self.test_path, self.batchsize_test, history=True, shuffle=False)
         print("test {} iter / batchsize = {} ".format(len(data_test), self.batchsize_test))
@@ -289,7 +164,7 @@ class Run:
         data_diff_test = self.read_diff_data(self.test_path, batch_size=self.batchsize_diff_test, shuffle=False)
         print("diff {} iter / batchsize = {} ".format(len(data_diff_test), self.batchsize_diff_test))
 
-        return data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test
+        return data_src, data_tgt, data_diff, data_test, data_diff_test
 
     def get_model(self):
         if self.base_model == "MF":
@@ -301,25 +176,12 @@ class Run:
     def get_optimizer(self, model, diff_model=None, ss_model=None, la_model=None):
         optimizer_src = torch.optim.Adam(params=model.src_model.parameters(), lr=self.lr, weight_decay=self.wd)
         optimizer_tgt = torch.optim.Adam(params=model.tgt_model.parameters(), lr=self.lr, weight_decay=self.wd)
-        optimizer_meta = torch.optim.Adam(params=model.meta_net.parameters(), lr=self.lr, weight_decay=self.wd)
-        optimizer_aug = torch.optim.Adam(params=model.aug_model.parameters(), lr=self.lr, weight_decay=self.wd)
-
-        optimizer_map = torch.optim.Adam(params=model.mapping.parameters(), lr=self.lr, weight_decay=self.wd)
 
         if diff_model is None and ss_model is None and la_model is None:
-            return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_map
-
-        elif diff_model is None and ss_model is not None and la_model is None:
-            optimizer_ss = torch.optim.Adam(params=ss_model.parameters(), lr=self.lr, weight_decay=self.wd)
-            return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_ss, optimizer_map
-
-        elif diff_model is None and la_model is not None:
-            optimizer_la = torch.optim.Adam(params=la_model.parameters(), lr=self.la_lr, weight_decay=self.wd)
-            return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_la, optimizer_map
-
+            return optimizer_src, optimizer_tgt
         elif diff_model is not None:
             optimizer_diff = torch.optim.Adam(params=diff_model.parameters(), lr=self.diff_lr)
-            return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_diff, optimizer_map
+            return optimizer_src, optimizer_tgt, optimizer_diff
 
     def eval_mae(self, model, data_loader, stage):
         print("Evaluating MAE:")
@@ -338,23 +200,6 @@ class Run:
                     y_input = X[-1]
                     targets.extend(y_input.squeeze(1).tolist())
                     predicts.extend(pred.tolist())
-
-            elif stage in ("test_ss"):
-                for X, y in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
-                    model[0].eval()
-                    model[1].eval()
-                    pred = model[0](X, stage, self.device, diff_model=None, ss_model=model[1])
-                    targets.extend(y.squeeze(1).tolist())
-                    predicts.extend(pred.tolist())
-
-            elif stage in ("test_la"):
-                for X, y in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
-                    model[0].eval()
-                    model[1].eval()
-                    pred = model[0](X, stage, self.device, diff_model=None, la_model=model[1])
-                    targets.extend(y.squeeze(1).tolist())
-                    predicts.extend(pred.tolist())
-
             else:
                 for X, y in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                     model.eval()
@@ -392,30 +237,6 @@ class Run:
                     model.zero_grad()
                     loss.backward()
                     optimizer.step()
-
-                loss_ls.append(loss.item())
-            return torch.tensor(loss_ls).mean()
-
-        elif diff == False and ss == True and la == False:
-            for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
-                model[1].train()
-                loss = model[0](X, stage, self.device, diff_model=None, ss_model=model[1])
-
-                model[1].zero_grad()
-                loss.backward()
-                optimizer.step()
-
-                loss_ls.append(loss.item())
-            return torch.tensor(loss_ls).mean()
-
-        elif diff == False and la == True:
-            for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
-                model[1].train()
-                loss = model[0](X, stage, self.device, diff_model=None, la_model=model[1])
-
-                model[1].zero_grad()
-                loss.backward()
-                optimizer.step()
 
                 loss_ls.append(loss.item())
             return torch.tensor(loss_ls).mean()
@@ -484,16 +305,6 @@ class Run:
         for i in range(self.epoch):
             loss = self.train(data_src, model, criterion, optimizer_src, i, stage="train_src")
 
-    def DataAug(self, model, data_aug, data_test, criterion, optimizer):
-        print("=========DataAug========")
-        n_epoch = self.epoch
-
-        for i in range(n_epoch):
-            loss = self.train(data_aug, model, criterion, optimizer, i, stage="train_aug")
-            mae, rmse = self.eval_mae(model, data_test, stage="test_aug")
-            self.update_results(mae, rmse, "aug")
-            print("MAE: {} RMSE: {} ".format(mae, rmse))
-
     def Diff_CDR(self, model, diff_model, data_diff, data_test, optimizer):
         print("=========Diff_CDR========")
         for i in range(self.epoch):
@@ -502,37 +313,6 @@ class Run:
             mae, rmse = self.eval_mae([model, diff_model], data_test, stage="test_diff")
             self.update_results(mae, rmse, "diff")
             print("DIFF LOSS", loss.item(), "TASK LOSS", task_loss.item(), "MAE: {} RMSE: {}".format(mae, rmse))
-
-    def SS_CDR(self, model, ss_model, data_ss, data_test, optimizer_ss):
-        print("==========SS_CDR==========")
-        for i in range(self.epoch):
-            loss = self.train(data_ss, [model, ss_model], None, optimizer_ss, i, stage="train_ss", mapping=False, diff=False, ss=True)
-            mae, rmse = self.eval_mae([model, ss_model], data_test, stage="test_ss")
-            self.update_results(mae, rmse, "sscdr")
-            print("MAE: {} RMSE: {}".format(mae, rmse))
-
-    def LA_CDR(self, model, la_model, data_la, data_test, test_uid, optimizer_la):
-        print("==========LA_CDR==========")
-        for i in range(self.epoch):
-            loss = self.train(data_la, [model, la_model], None, optimizer_la, i, stage="train_la", mapping=False, diff=False, ss=False, la=True)
-            mae, rmse = self.eval_mae([model, la_model], data_test, stage="test_la")
-            self.update_results(mae, rmse, "lacdr")
-            print("LA LOSS", loss.item(), "MAE: {} RMSE: {}  ".format(mae, rmse))
-
-    def CDR(self, model, data_map, data_meta, data_test, criterion, optimizer_map, optimizer_meta):
-
-        print("==========EMCDR==========")
-        for i in range(self.epoch):
-            loss = self.train(data_map, model, criterion, optimizer_map, i, stage="train_map", mapping=True)
-            mae, rmse = self.eval_mae(model, data_test, stage="test_map")
-            self.update_results(mae, rmse, "emcdr")
-            print("MAE: {} RMSE: {}  ".format(mae, rmse))
-        print("==========PTUPCDR==========")
-        for i in range(self.epoch):
-            loss = self.train(data_meta, model, criterion, optimizer_meta, i, stage="train_meta")
-            mae, rmse = self.eval_mae(model, data_test, stage="test_meta")
-            self.update_results(mae, rmse, "ptupcdr")
-            print("MAE: {} RMSE: {} ".format(mae, rmse))
 
     def model_save(self, model, path):
         torch.save(model.state_dict(), path)
@@ -560,27 +340,12 @@ class Run:
 
             model = self.get_model()
 
-            optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_diff, optimizer_map = self.get_optimizer(model, diff_model)
-
-        elif exp_part == "ss_CDR":
-            ss_model = SSCDR.SSCDR(self.emb_dim)
-            ss_model = ss_model.cuda() if self.use_cuda else ss_model
-
-            model = self.get_model()
-            optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_ss, optimizer_map = self.get_optimizer(model, None, ss_model)
-
-        elif exp_part == "la_CDR":
-            la_model = LACDR.LACDR(self.emb_dim)
-            la_model = la_model.cuda() if self.use_cuda else la_model
-
-            model = self.get_model()
-            optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_la, optimizer_map = self.get_optimizer(model, None, None, la_model)
-
+            optimizer_src, optimizer_tgt, optimizer_diff = self.get_optimizer(model, diff_model)
         else:
             model = self.get_model()
-            optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_map = self.get_optimizer(model)
+            optimizer_src, optimizer_tgt = self.get_optimizer(model)
 
-        data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test = self.get_data()
+        data_src, data_tgt, data_diff, data_test, data_diff_test = self.get_data()
 
         criterion = torch.nn.MSELoss()
 
@@ -588,28 +353,8 @@ class Run:
             self.TgtOnly(model, data_tgt, data_test, criterion, optimizer_tgt)
             self.SrcOnly(model, data_src, criterion, optimizer_src)
             # CMF
-            self.DataAug(model, data_aug, data_test, criterion, optimizer_aug)
             self.result_print(["tgt", "aug"])
             self.model_save(model, path=save_path)
-
-        elif exp_part == "CDR":
-            self.model_load(model, path=save_path)
-            print("None_CDR model loaded")
-            self.CDR(model, data_map, data_meta, data_test, criterion, optimizer_map, optimizer_meta)
-            self.result_print(["emcdr", "ptupcdr"])
-
-        elif exp_part == "ss_CDR":
-            self.model_load(model, path=save_path)
-            print("None_CDR model loaded")
-            self.SS_CDR(model, ss_model, data_ss, data_test, optimizer_ss)
-            self.result_print(["sscdr"])
-
-        elif exp_part == "la_CDR":
-            self.model_load(model, path=save_path)
-            print("None_CDR model loaded")
-            self.LA_CDR(model, la_model, data_la, data_test, optimizer_la)
-            self.result_print(["lacdr"])
-
         elif exp_part == "diff_CDR":
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
