@@ -116,8 +116,7 @@ def q_x_fn(model, x_0, t, device):
     return (alphas_t * x_0 + alphas_1_m_t * noise), noise
 
 
-def diffusion_loss_fn(model, x_0, cond_emb, iid_emb, y_input, device, is_task):
-
+def diffusion_loss_fn(model, x_0, cond_emb, iid_emb, y_input, device, is_task, all_level_vectors=None):
     num_steps = model.num_steps
     mask_rate = model.mask_rate
 
@@ -148,13 +147,17 @@ def diffusion_loss_fn(model, x_0, cond_emb, iid_emb, y_input, device, is_task):
         return F.smooth_l1_loss(e, output)
 
     elif is_task:
-        final_output, iid_emb = p_sample_loop(model, cond_emb, iid_emb, device)
+        # 🔥 all_level_vectors가 들어오면 RQ 기반 샘플링 사용
+        if all_level_vectors is not None:
+            final_output, iid_emb = p_sample_loop_with_rq(model, all_level_vectors, iid_emb, device)
+        else:
+            # 기존 동작 유지
+            final_output, iid_emb = p_sample_loop(model, cond_emb, iid_emb, device)
+
         y_pred = torch.sum(final_output * iid_emb, dim=1)
 
-        # MSE
+        # MSE task loss
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
-        # RMSE
-        # task_loss =   (y_pred - y_input.squeeze().float()).square().sum().sqrt() / y_pred.shape[0]
 
         return F.smooth_l1_loss(x_0, final_output) + model.task_lambda * task_loss
 
@@ -195,3 +198,154 @@ def p_sample_loop(model, cond_emb, iid_input, device):
     cur_x, iid_emb_out = p_sample(model, cond_emb, cur_x, iid_input, device)
 
     return cur_x, iid_emb_out
+
+
+def p_sample_with_rq(model, all_level_vectors, x, iid_emb, device):
+    """
+    all_level_vectors: [L, B, D]  (RQ 코드북 레벨벡터)
+    x: 초기 x (예: 레벨벡터 합)
+    """
+    classifier_scale_para = model.c_scale
+    dmp_sample_steps = model.sample_steps
+    num_steps = model.num_steps
+
+    B = all_level_vectors.shape[1]
+    cond_mask = torch.zeros(B, device=device).int()  # uncond mask
+
+    model_kwargs = {
+        "all_level_vectors": all_level_vectors.to(device),
+        "cond_mask": cond_mask,
+    }
+
+    model_fn = model_wrapper_hierarchical_cond(
+        model,
+        noise_schedule,
+        is_cond_classifier=True,
+        classifier_scale=classifier_scale_para,
+        time_input_type="1",
+        total_N=num_steps,
+        model_kwargs=model_kwargs,
+    )
+
+    dpm_solver = DPM_Solver(model_fn, noise_schedule)
+    sample = dpm_solver.sample(
+        x,
+        steps=dmp_sample_steps,
+        eps=1e-4,
+        adaptive_step_size=False,
+        fast_version=True,
+    )
+
+    return model.get_al_emb(sample).to(device), iid_emb
+
+
+def p_sample_loop_with_rq(model, all_level_vectors, iid_input, device):
+    """
+    all_level_vectors: [L, B, D]
+    """
+    # 기존 p_sample_loop는 cond_emb에서 시작했으니,
+    # 여기서는 레벨벡터 합을 초기값으로 사용
+    cur_x = all_level_vectors.sum(dim=0)  # [B, D]
+
+    cur_x, iid_emb_out = p_sample_with_rq(model, all_level_vectors, cur_x, iid_input, device)
+
+    return cur_x, iid_emb_out
+
+
+def model_wrapper_hierarchical_cond(
+    model,
+    noise_schedule,
+    is_cond_classifier=True,
+    classifier_scale=1.0,
+    time_input_type="1",
+    total_N=1000,
+    model_kwargs=None,
+):
+    """
+    model_kwargs:
+        - "all_level_vectors": [L, B, D]
+        - "cond_mask": [B]
+    """
+    if model_kwargs is None:
+        model_kwargs = {}
+
+    all_level_vectors = model_kwargs.get("all_level_vectors", None)  # [L, B, D]
+    base_cond_mask = model_kwargs.get("cond_mask", None)  # [B]
+
+    def get_model_input_time(t_continuous):
+        if time_input_type == "0":
+            return t_continuous
+        elif time_input_type == "1":
+            return 1000.0 * torch.max(
+                t_continuous - 1.0 / total_N,
+                torch.zeros_like(t_continuous).to(t_continuous),
+            )
+        elif time_input_type == "2":
+            max_N = (total_N - 1) / total_N * 1000.0
+            return max_N * t_continuous
+        else:
+            raise ValueError
+
+    def model_fn(x, t_continuous):
+        if is_cond_classifier:
+            t_discrete = get_model_input_time(t_continuous)
+
+            # 🔥 여기서 time-step별 cond_emb(t) 생성
+            cond_emb_t = hierarchical_cond_from_levels(all_level_vectors, t_continuous, noise_schedule)  # [B, D]
+
+            cond_mask = base_cond_mask  # [B]
+            noise_uncond = model(x, t_discrete, cond_emb_t, cond_mask)
+
+            cond_mask_c = torch.ones_like(cond_mask, device=cond_mask.device)
+            noise_cond = model(x, t_discrete, cond_emb_t, cond_mask_c)
+
+            return noise_uncond + classifier_scale * (noise_cond - noise_uncond)
+        else:
+            t_discrete = get_model_input_time(t_continuous)
+            cond_emb_t = hierarchical_cond_from_levels(all_level_vectors, t_continuous, noise_schedule)
+            cond_mask = base_cond_mask
+            return model(x, t_discrete, cond_emb_t, cond_mask)
+
+    return model_fn
+
+
+def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous: torch.Tensor, noise_schedule):
+    """
+    all_level_vectors: [L, B, D]  (RQ-VAE 코드북 레벨별 벡터)
+    t_continuous: [B]  (DPM-Solver가 넘겨주는 연속 시간)
+    noise_schedule: NoiseScheduleVP (T 값을 쓰기 위해)
+
+    초기 타임스텝: 추상 레벨 위주
+    후기 타임스텝: 구체 레벨까지 모두 포함
+    """
+    L, B, D = all_level_vectors.shape
+    device = all_level_vectors.device
+
+    if t_continuous.dim() == 2:
+        t_continuous = t_continuous.squeeze(-1)
+
+    T = noise_schedule.T
+    # t_norm: 0(초기) ~ 1(마지막)
+    t_norm = 1.0 - t_continuous / T
+    t_norm = torch.clamp(t_norm, 0.0, 1.0)  # [B]
+
+    t_norm_exp = t_norm.view(B, 1, 1)  # [B, 1, 1]
+
+    # 레벨 인덱스 0~L-1 → 0~1 정규화 (0=추상, 1=구체)
+    level_ids = torch.arange(L, device=device).float().view(1, L, 1)  # [1, L, 1]
+    level_norm = level_ids / max(L - 1, 1)  # [1, L, 1]
+
+    # t_norm이 작을 때는 level_norm 작은 것(상위 레벨)만, 클수록 더 많은 레벨
+    # mask: [B, L, 1]
+    mask = (t_norm_exp >= (1.0 - level_norm)).float()
+    # [L, B, 1]
+    mask = mask.permute(1, 0, 2)
+
+    # 마스킹 후 합
+    weighted = all_level_vectors * mask  # [L, B, D]
+    cond_emb = weighted.sum(dim=0)  # [B, D]
+
+    denom = mask.sum(dim=0)  # [B, 1]
+    cond_emb = cond_emb / torch.clamp(denom, min=1.0)
+
+    return cond_emb
