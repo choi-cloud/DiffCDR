@@ -166,9 +166,9 @@ class Run:
 
         return data_src, data_tgt, data_diff, data_test, data_diff_test
 
-    def get_model(self):
+    def get_model(self, codebook_level, codebook_size):
         if self.base_model == "MF":
-            model = MFBasedModel(self.uid_all, self.iid_all, self.emb_dim, self.meta_dim)
+            model = MFBasedModel(self.uid_all, self.iid_all, self.emb_dim, self.meta_dim, codebook_level, codebook_size)
         else:
             raise ValueError("Unknown base model: " + self.base_model)
         return model.cuda() if self.use_cuda else model
@@ -331,18 +331,18 @@ class Run:
                 print_str += metric_name + ": {:.6f} ".format(self.results[metric_name])
         print(print_str)
 
-    def main(self, exp_part="None_CDR", save_path=None):
+    def main(self, exp_part="None_CDR", save_path=None, codebook_level=4, codebook_size=256):
         if exp_part == "diff_CDR":
             diff_model = Diff.DiffCDR(
                 self.diff_steps, self.diff_dim, self.emb_dim, self.diff_scale, self.diff_sample_steps, self.diff_task_lambda, self.diff_mask_rate
             )
             diff_model = diff_model.cuda() if self.use_cuda else diff_model
 
-            model = self.get_model()
+            model = self.get_model(codebook_level, codebook_size)
 
             optimizer_src, optimizer_tgt, optimizer_diff = self.get_optimizer(model, diff_model)
         else:
-            model = self.get_model()
+            model = self.get_model(codebook_level, codebook_size)
             optimizer_src, optimizer_tgt = self.get_optimizer(model)
 
         data_src, data_tgt, data_diff, data_test, data_diff_test = self.get_data()

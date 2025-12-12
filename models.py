@@ -23,14 +23,14 @@ class LookupEmbedding(torch.nn.Module):
 
 
 class MFBasedModel(torch.nn.Module):
-    def __init__(self, uid_all, iid_all, emb_dim, meta_dim_0):
+    def __init__(self, uid_all, iid_all, emb_dim, meta_dim_0, codebook_level, codebook_size):
         super().__init__()
         self.emb_dim = emb_dim
         self.src_model = LookupEmbedding(uid_all, iid_all, emb_dim)
         self.tgt_model = LookupEmbedding(uid_all, iid_all, emb_dim)
         self.aug_model = LookupEmbedding(uid_all, iid_all, emb_dim)
 
-        self.rq = ResidualQuantizer(code_dim=emb_dim)
+        self.rq = ResidualQuantizer(code_dim=emb_dim, num_levels=codebook_level, codebook_size=codebook_size)
 
     def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False):
         if stage == "train_src":

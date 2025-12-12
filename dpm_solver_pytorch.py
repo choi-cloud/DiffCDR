@@ -88,7 +88,7 @@ def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous:
 
     # t_norm이 작을 때는 level_norm 작은 것(상위 레벨)만, 클수록 더 많은 레벨
     # mask: [B, L, 1]
-    mask = (t_norm_exp >= (1.0 - level_norm)).float()
+    mask = (t_norm_exp >= level_norm).float()
     # [L, B, 1]
     mask = mask.permute(1, 0, 2)
 

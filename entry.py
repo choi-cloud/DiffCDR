@@ -24,8 +24,10 @@ def prepare_1():
 
     parser.add_argument("--root", default="./")
     parser.add_argument("--exp_part", default="None_CDR")
-    parser.add_argument("--save_path", default="./model_save_default/model_codebook_2.pth")
+    parser.add_argument("--save_path", default="./model_save_default/model_codebook_4_1028.pth")
     parser.add_argument("--use_cuda", default=1)
+    parser.add_argument("--codebook_level", default=4, type=int)
+    parser.add_argument("--codebook_size", default=256, type=int)
 
     args = parser.parse_args()
 
@@ -52,6 +54,7 @@ def prepare_2(args, config_path):
 
 if __name__ == "__main__":
     args = prepare_1()
+    print(args)
 
     config_path = args.root + "config.json"
 
@@ -80,4 +83,4 @@ if __name__ == "__main__":
     )
 
     if not args.process_data_mid and not args.process_data_ready:
-        Run(config).main(args.exp_part, args.save_path)
+        Run(config).main(args.exp_part, args.save_path, args.codebook_level, args.codebook_size)
