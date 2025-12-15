@@ -405,11 +405,11 @@ class Run():
                 item_feat = base_model.src_model.iid_embedding.weight.detach().to(self.device)
 
             was_training = gnn_module.training
-            gnn_module.eval()
-            with torch.no_grad():
-                user_emb, item_emb = gnn_module(user_feat, item_feat, uv_adj, vu_adj)
-            if was_training:
-                gnn_module.train()
+            # gnn_module.eval()
+            # with torch.no_grad():
+            user_emb, item_emb = gnn_module(user_feat, item_feat, uv_adj, vu_adj)
+            # if was_training:
+                # gnn_module.train()
             return user_emb, item_emb
         else: # 단순 2홉 aggr
             # simple 2-hop aggregation (user -> items -> users) excluding 1-hop self contribution

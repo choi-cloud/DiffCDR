@@ -112,9 +112,10 @@ if __name__ == '__main__':
     write(f'✅ Task  {args.task}')
     write(f'✅ Ratio {args.ratio}')
     write(f'✅ Model {args.exp_part}')
+    write(f'✅ VBGE  {args.use_vbge}')
 
     if args.exp_part == 'diff_parallel': 
-        set_init = ['MF로 초기화', 'Aggr로 초기화', 'MF+Aggr 평균으로 초기화']
+        set_init = ['MF로 초기화', 'Aggr로 초기화', 'MF+Aggr 평균으로 초기화', 'DiffCDR에 cond만 agg로']
         set_loss = ['둘 다 MF', '둘 다 Aggr', '둘 다 MF+Aggr 평균', '따로따로']
         set_proj = ['따로 Proj', '합치고 proj']
         

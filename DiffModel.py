@@ -299,6 +299,9 @@ def diffusion_loss_fn_parallel(model,x_0_m,x_0_g,cond_emb1,cond_emb2, iid_emb,y_
         elif model.parallel['set_init'] == 2: # x_0 둘다 MF + Aggr로 
             x_m,e_m = q_x_fn(model,(x_0_m+x_0_g)/2,t,device)
             x_g,e_g = x_m,e_m
+        elif model.parallel['set_init'] == 3: # x_0 둘다 Aggr로 
+            x_m,e_m = q_x_fn(model,x_0_g,t,device)
+            x_g,e_g = x_m,e_m
         
         
         #random mask
@@ -309,9 +312,13 @@ def diffusion_loss_fn_parallel(model,x_0_m,x_0_g,cond_emb1,cond_emb2, iid_emb,y_
         cond_mask2 = 1 - cond_mask2.int()
 
         # pred noise
+        if model.parallel['set_aggr'] == 'aggonly':
+            output2 = model(x_g, t.squeeze(-1),cond_emb2,cond_mask2, diff_id=1) # x_t, c2 -> noise 
+            return F.smooth_l1_loss(e_g, output2)# 예측 노이즈와 실제 노이즈 비교 L1 loss 
+        
         output1 = model(x_m, t.squeeze(-1),cond_emb1,cond_mask1, diff_id=0) # x_t, c1 -> noise 
         output2 = model(x_g, t.squeeze(-1),cond_emb2,cond_mask2, diff_id=1) # x_t, c2 -> noise 
-
+         
         return F.smooth_l1_loss(e_m, output1) + F.smooth_l1_loss(e_g, output2)# 예측 노이즈와 실제 노이즈 비교 L1 loss 
 
     elif is_task: # task loss ALM 수행
@@ -326,6 +333,9 @@ def diffusion_loss_fn_parallel(model,x_0_m,x_0_g,cond_emb1,cond_emb2, iid_emb,y_
             start = (cond_emb1 + cond_emb2) / 2
             final_output_m, iid_emb=p_sample_loop_parallel(model,start, cond_emb1,iid_emb,device, diff_id=0) # 디노이징 된 user emb_m / item emb
             final_output_g, iid_emb=p_sample_loop_parallel(model,start, cond_emb2,iid_emb,device, diff_id=1) # 디노이징 된 user emb_g / item emb
+        elif model.parallel['set_init'] == 3: # Aggr만 사용 
+            # final_output_m, iid_emb=p_sample_loop_parallel(model,start, cond_emb1,iid_emb,device, diff_id=0) # 디노이징 된 user emb_m / item emb
+            final_output_g, iid_emb=p_sample_loop_parallel(model,cond_emb2, cond_emb2,iid_emb,device, diff_id=1) # 디노이징 된 user emb_g / item emb
 
 
         # final output = x'_c + x'_g 

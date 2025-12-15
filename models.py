@@ -188,6 +188,10 @@ class MFBasedModel(torch.nn.Module):
                 trans_emb_m, iid_emb=Diff.p_sample_loop_parallel(diff_model,start,cond_emb1,iid_emb,device, diff_id=0) # 디노이징 된 user emb_m / item emb
                 trans_emb_g, iid_emb=Diff.p_sample_loop_parallel(diff_model,start,cond_emb2,iid_emb,device, diff_id=1) # 디노이징 된 user emb_g / item emb
 
+            elif diff_model.parallel['set_init'] == 3: # x_0 둘다 Aggr로 
+                trans_emb_m, iid_emb=Diff.p_sample_loop_parallel(diff_model,cond_emb2,cond_emb2,iid_emb,device, diff_id=0) # 디노이징 된 user emb_m / item emb
+                trans_emb_g, iid_emb=Diff.p_sample_loop_parallel(diff_model,cond_emb2,cond_emb2,iid_emb,device, diff_id=1) # 디노이징 된 user emb_g / item emb
+     
             # final output = x'_c + x'_g 
             # TODO 두 디퓨전 모델의 아웃풋 결합 방법 ? 
             if diff_model.parallel['set_aggr'] == 'avg': 
