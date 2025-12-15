@@ -26,7 +26,7 @@ def prepare_1():
 
     parser.add_argument('--root', default='./')
     parser.add_argument('--exp_part', default='None_CDR')
-    parser.add_argument('--save_path', default='./model_save_default/model.pth')
+    parser.add_argument('--save_path', default='./model_save_default/model')
     parser.add_argument('--use_cuda', default=1)
     parser.add_argument('--experiment', default='DiffCDR')
     
@@ -122,7 +122,7 @@ if __name__ == '__main__':
         write(f'⭐ Diff loss 계산: ({args.set_loss}) {set_loss[args.set_loss]}')
         write(f'⭐ Project 위치  : ({args.set_proj}) {set_proj[args.set_proj]}')
     if not args.process_data_mid and not args.process_data_ready:
-        Run(config).main(args.exp_part,f'{args.save_path}_{args.task}_{args.ratio}')
+        Run(config).main(args.exp_part,f'{args.save_path}_{args.task}_{args.ratio}.pth')
         write(f'==============================')
 
 
