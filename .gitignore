@@ -1,0 +1,12 @@
+*.ipynb
+*.md
+*.sh
+*.json
+*.log
+*.csv
+*.pth
+*.pyc
+*.txt
+*.gz
+*.pdf
+
