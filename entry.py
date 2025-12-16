@@ -40,7 +40,7 @@ def prepare_1():
     parser.add_argument("--use_vbge", type=int, default=0, help="Use VBGE aggregation (1) or simple 2-hop (0).")
 
     # parallel setting
-    parser.add_argument("--set_loss", type=int, default=2, help="loss 계산, 0: MF, 1: aggr, 2: avg, 3: 따로따로")
+    parser.add_argument("--set_loss", type=int, default=0, help="loss 계산, 0: MF, 1: aggr, 2: avg, 3: 따로따로")
     parser.add_argument("--set_init", type=int, default=1, help="디퓨전2의 초기 x_T 설정, 0: MF, 1: aggr, 2: avg")
     parser.add_argument("--set_proj", type=int, default=1, help="diff 결과 proj 위치 - 0: 따로, 1: aggr 이후 같이")
     parser.add_argument("--set_aggr", type=str, default="attn", help="두 디퓨전 모델 아웃풋 aggregation 방법, [avg, add, concat]")
