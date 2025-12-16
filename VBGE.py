@@ -8,6 +8,7 @@ from torch.distributions.kl import kl_divergence
 from torch.distributions import Normal
 from torch.nn.modules.module import Module
 
+
 class GraphConvolution(Module):
     def __init__(self, in_features, out_features, bias=True):
         super(GraphConvolution, self).__init__()
@@ -18,11 +19,11 @@ class GraphConvolution(Module):
         if bias:
             self.bias = nn.Parameter(torch.FloatTensor(out_features))
         else:
-            self.register_parameter('bias', None)
+            self.register_parameter("bias", None)
         self.reset_parameters()
 
     def reset_parameters(self):
-        stdv = 1. / math.sqrt(self.weight.size(1))
+        stdv = 1.0 / math.sqrt(self.weight.size(1))
         self.weight.data.uniform_(-stdv, stdv)
         if self.bias is not None:
             self.bias.data.uniform_(-stdv, stdv)
@@ -41,10 +42,9 @@ class GraphConvolution(Module):
             return output
 
     def __repr__(self):
-        return self.__class__.__name__ + ' (' \
-               + str(self.in_features) + ' -> ' \
-               + str(self.out_features) + ')'
-    
+        return self.__class__.__name__ + " (" + str(self.in_features) + " -> " + str(self.out_features) + ")"
+
+
 class GCN(nn.Module):
     def __init__(self, nfeat, nhid, dropout, alpha):
         super(GCN, self).__init__()
@@ -55,6 +55,7 @@ class GCN(nn.Module):
     def forward(self, x, adj):
         x = self.leakyrelu(self.gc1(x, adj))
         return x
+
 
 class VGAE(nn.Module):
     def __init__(self, nfeat, nhid, dropout, alpha):
@@ -83,33 +84,34 @@ class VGAE(nn.Module):
         if self.gc_mean.training:
             sampled_z = gaussian_noise * torch.exp(logstd) + mean
             self.kld_loss = self._kld_gauss(mean, logstd, torch.zeros_like(mean), torch.ones_like(logstd))
-        else :
+        else:
             sampled_z = mean
         return sampled_z
 
     def forward(self, x, adj):
         x = self.encode(x, adj)
         return x
-    
+
 
 class singleVBGE(nn.Module):
     """
-        GNN Module layer
+    GNN Module layer
     """
+
     def __init__(self, opt):
         super(singleVBGE, self).__init__()
-        self.opt=opt
+        self.opt = opt
         self.layer_number = opt["GNN"]
         self.encoder = []
-        for i in range(self.layer_number-1):
-            self.encoder.append(DGCNLayer(opt)) # GCN layers
-        self.encoder.append(LastLayer(opt)) # 평군, 분산 -> reparameterization으로 샘플된 임베딩 
+        for i in range(self.layer_number - 1):
+            self.encoder.append(DGCNLayer(opt))  # GCN layers
+        self.encoder.append(LastLayer(opt))  # 평군, 분산 -> reparameterization으로 샘플된 임베딩
         self.encoder = nn.ModuleList(self.encoder)
         self.dropout = opt["dropout"]
 
-    def forward(self, ufea, vfea, UV_adj, VU_adj): # UV adj(user->item), VU adj(item->user) - sparse 
-        learn_user = ufea #[ num users, feat dim]
-        learn_item = vfea #[ num items, feat dim]
+    def forward(self, ufea, vfea, UV_adj, VU_adj):  # UV adj(user->item), VU adj(item->user) - sparse
+        learn_user = ufea  # [ num users, feat dim]
+        learn_item = vfea  # [ num items, feat dim]
         for layer in self.encoder:
             learn_user = F.dropout(learn_user, self.dropout, training=self.training)
             learn_item = F.dropout(learn_item, self.dropout, training=self.training)
@@ -123,46 +125,27 @@ class singleVBGE(nn.Module):
             learn_user = layer.forward_user_share(learn_user, UV_adj, VU_adj)
         mean, sigma = self.encoder[-1].forward_user_share(learn_user, UV_adj, VU_adj)
         return mean, sigma
-    
 
-class DGCNLayer(nn.Module): 
+
+class DGCNLayer(nn.Module):
     """
-        DGCN Module layer
+    DGCN Module layer
     """
+
     def __init__(self, opt):
         super(DGCNLayer, self).__init__()
-        self.opt=opt
+        self.opt = opt
         self.dropout = opt["dropout"]
-        self.gc1 = GCN(
-            nfeat=opt["feature_dim"],
-            nhid=opt["hidden_dim"],
-            dropout=opt["dropout"],
-            alpha=opt["leakey"]
-        )
+        self.gc1 = GCN(nfeat=opt["feature_dim"], nhid=opt["hidden_dim"], dropout=opt["dropout"], alpha=opt["leakey"])
 
-        self.gc2 = GCN(
-            nfeat=opt["feature_dim"],
-            nhid=opt["hidden_dim"],
-            dropout=opt["dropout"],
-            alpha=opt["leakey"]
-        )
-        self.gc3 = GCN(
-            nfeat=opt["hidden_dim"], # change
-            nhid=opt["feature_dim"],
-            dropout=opt["dropout"],
-            alpha=opt["leakey"]
-        )
+        self.gc2 = GCN(nfeat=opt["feature_dim"], nhid=opt["hidden_dim"], dropout=opt["dropout"], alpha=opt["leakey"])
+        self.gc3 = GCN(nfeat=opt["hidden_dim"], nhid=opt["feature_dim"], dropout=opt["dropout"], alpha=opt["leakey"])  # change
 
-        self.gc4 = GCN(
-            nfeat=opt["hidden_dim"], # change
-            nhid=opt["feature_dim"],
-            dropout=opt["dropout"],
-            alpha=opt["leakey"]
-        )
+        self.gc4 = GCN(nfeat=opt["hidden_dim"], nhid=opt["feature_dim"], dropout=opt["dropout"], alpha=opt["leakey"])  # change
         self.user_union = nn.Linear(opt["feature_dim"] + opt["feature_dim"], opt["feature_dim"])
         self.item_union = nn.Linear(opt["feature_dim"] + opt["feature_dim"], opt["feature_dim"])
 
-    def forward(self, ufea, vfea, UV_adj,VU_adj):
+    def forward(self, ufea, vfea, UV_adj, VU_adj):
         User_ho = self.gc1(ufea, VU_adj)
         Item_ho = self.gc2(vfea, UV_adj)
         User_ho = self.gc3(User_ho, UV_adj)
@@ -180,7 +163,7 @@ class DGCNLayer(nn.Module):
         User = self.user_union(User)
         return F.relu(User)
 
-    def forward_item(self, ufea, vfea, UV_adj,VU_adj):
+    def forward_item(self, ufea, vfea, UV_adj, VU_adj):
         Item_ho = self.gc2(vfea, UV_adj)
         Item_ho = self.gc4(Item_ho, VU_adj)
         Item = torch.cat((Item_ho, vfea), dim=1)
@@ -197,50 +180,21 @@ class DGCNLayer(nn.Module):
 
 class LastLayer(nn.Module):
     """
-        DGCN Module layer
+    DGCN Module layer
     """
+
     def __init__(self, opt):
         super(LastLayer, self).__init__()
-        self.opt=opt
+        self.opt = opt
         self.dropout = opt["dropout"]
-        self.gc1 = GCN(
-            nfeat=opt["feature_dim"],
-            nhid=opt["hidden_dim"],
-            dropout=opt["dropout"],
-            alpha=opt["leakey"]
-        )
+        self.gc1 = GCN(nfeat=opt["feature_dim"], nhid=opt["hidden_dim"], dropout=opt["dropout"], alpha=opt["leakey"])
 
-        self.gc2 = GCN(
-            nfeat=opt["feature_dim"],
-            nhid=opt["hidden_dim"],
-            dropout=opt["dropout"],
-            alpha=opt["leakey"]
-        )
-        self.gc3_mean = GCN(
-            nfeat=opt["hidden_dim"], # change
-            nhid=opt["feature_dim"],
-            dropout=opt["dropout"],
-            alpha=opt["leakey"]
-        )
-        self.gc3_logstd = GCN(
-            nfeat=opt["hidden_dim"],  # change
-            nhid=opt["feature_dim"],
-            dropout=opt["dropout"],
-            alpha=opt["leakey"]
-        )
+        self.gc2 = GCN(nfeat=opt["feature_dim"], nhid=opt["hidden_dim"], dropout=opt["dropout"], alpha=opt["leakey"])
+        self.gc3_mean = GCN(nfeat=opt["hidden_dim"], nhid=opt["feature_dim"], dropout=opt["dropout"], alpha=opt["leakey"])  # change
+        self.gc3_logstd = GCN(nfeat=opt["hidden_dim"], nhid=opt["feature_dim"], dropout=opt["dropout"], alpha=opt["leakey"])  # change
 
-        self.gc4_mean = GCN(
-            nfeat=opt["hidden_dim"], # change
-            nhid=opt["feature_dim"],
-            dropout=opt["dropout"],
-            alpha=opt["leakey"]
-        )
-        self.gc4_logstd = GCN(
-            nfeat=opt["hidden_dim"],  # change
-            nhid=opt["feature_dim"],
-            dropout=opt["dropout"],
-            alpha=opt["leakey"]
-        )
+        self.gc4_mean = GCN(nfeat=opt["hidden_dim"], nhid=opt["feature_dim"], dropout=opt["dropout"], alpha=opt["leakey"])  # change
+        self.gc4_logstd = GCN(nfeat=opt["hidden_dim"], nhid=opt["feature_dim"], dropout=opt["dropout"], alpha=opt["leakey"])  # change
         self.user_union_mean = nn.Linear(opt["feature_dim"] + opt["feature_dim"], opt["feature_dim"])
         self.user_union_logstd = nn.Linear(opt["feature_dim"] + opt["feature_dim"], opt["feature_dim"])
         self.item_union_mean = nn.Linear(opt["feature_dim"] + opt["feature_dim"], opt["feature_dim"])
@@ -268,14 +222,13 @@ class LastLayer(nn.Module):
         kld_loss = self._kld_gauss(mean, logstd, torch.zeros_like(mean), torch.ones_like(logstd))
         return sampled_z, kld_loss
 
-    def forward(self, ufea, vfea, UV_adj,VU_adj):
-        user, user_kld = self.forward_user(ufea, vfea, UV_adj,VU_adj)
+    def forward(self, ufea, vfea, UV_adj, VU_adj):
+        user, user_kld = self.forward_user(ufea, vfea, UV_adj, VU_adj)
         item, item_kld = self.forward_item(ufea, vfea, UV_adj, VU_adj)
 
         self.kld_loss = user_kld + item_kld
 
         return user, item
-
 
     def forward_user(self, ufea, vfea, UV_adj, VU_adj):
         User_ho = self.gc1(ufea, VU_adj)
@@ -290,7 +243,7 @@ class LastLayer(nn.Module):
         user, kld_loss = self.reparameters(User_ho_mean, User_ho_logstd)
         return user, kld_loss
 
-    def forward_item(self, ufea, vfea, UV_adj,VU_adj):
+    def forward_item(self, ufea, vfea, UV_adj, VU_adj):
         Item_ho = self.gc2(vfea, UV_adj)
 
         Item_ho_mean = self.gc4_mean(Item_ho, VU_adj)
