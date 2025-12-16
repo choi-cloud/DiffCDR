@@ -19,7 +19,7 @@ def prepare_1():
     parser.add_argument("--base_model", default="MF")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--ratio", default="[0.8, 0.2]")
-    parser.add_argument("--gpu", default="0")
+    parser.add_argument("--gpu", default="3")
     parser.add_argument("--epoch", type=int, default=10)
     parser.add_argument("--lr", type=float, default=0.01)
     parser.add_argument("--la_lr", type=float, default=0.001)
@@ -43,7 +43,7 @@ def prepare_1():
     parser.add_argument("--set_loss", type=int, default=2, help="loss 계산, 0: MF, 1: aggr, 2: avg, 3: 따로따로")
     parser.add_argument("--set_init", type=int, default=1, help="디퓨전2의 초기 x_T 설정, 0: MF, 1: aggr, 2: avg")
     parser.add_argument("--set_proj", type=int, default=1, help="diff 결과 proj 위치 - 0: 따로, 1: aggr 이후 같이")
-    parser.add_argument("--set_aggr", type=str, default="avg", help="두 디퓨전 모델 아웃풋 aggregation 방법, [avg, add, concat]")
+    parser.add_argument("--set_aggr", type=str, default="attn", help="두 디퓨전 모델 아웃풋 aggregation 방법, [avg, add, concat]")
 
     args = parser.parse_args()
 
