@@ -3,6 +3,9 @@ import os
 import sys
 import logging
 import csv
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 
 def get_parent_curr_dir():
@@ -70,3 +73,29 @@ def log_args_table(args, max_per_line: int = 5, col_width: int = 30):
         logging.info(" | ".join(row))
 
     logging.info("=" * (col_width * max_per_line + (max_per_line - 1)))
+
+
+class AttentionLayer(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.q = nn.Linear(in_dim, in_dim, bias=False)
+        self.k = nn.Linear(in_dim, in_dim, bias=False)
+        self.v = nn.Linear(in_dim, out_dim, bias=False)
+        self.scale = in_dim**-0.5
+
+    def forward(self, x, mask=None):
+        """
+        x: (B, T, D)
+        mask: (B, T) or None
+        """
+        Q = self.q(x)
+        K = self.k(x)
+        V = self.v(x)
+
+        score = torch.matmul(Q, K.transpose(-2, -1)) * self.scale  # (B, T, T)
+        if mask is not None:
+            score = score.masked_fill(mask[:, None, :] == 0, -1e9)
+
+        attn = F.softmax(score, dim=-1)
+        out = torch.matmul(attn, V)  # (B, T, D)
+        return out
