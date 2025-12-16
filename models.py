@@ -4,6 +4,8 @@ import torch.nn.functional as F
 import DiffModel as Diff
 import sscdr_model as SSCDR
 import lacdr_model as LACDR
+from rqvae import ResidualQuantizer
+from utils import AttentionLayer
 
 
 class LookupEmbedding(torch.nn.Module):
@@ -47,6 +49,10 @@ class MFBasedModel(torch.nn.Module):
 
         self.meta_net = MetaNet(emb_dim, meta_dim_0)
         self.mapping = torch.nn.Linear(emb_dim, emb_dim, False)
+
+        # ! mf 소스 임베딩과 aggr 소스 임베딩 각각을 양자화하기 위한 모듈
+        self.rq_mf = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
+        self.rq_aggr = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
 
     def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False):
         if stage == "train_src":
@@ -146,20 +152,45 @@ class MFBasedModel(torch.nn.Module):
             tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)
 
             # 조건 1: MF 기반 유저 임베딩, 조건 2: VBGE 기반 유저 임베딩
-            cond_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
-            cond_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
+            src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
+            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
 
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
 
-            loss = Diff.diffusion_loss_fn_parallel(diff_model, tgt_emb1, tgt_emb2, cond_emb1, cond_emb2, iid_emb, y_input, device, is_task)
-            return loss  # is_task=False: 노이즈 예측 , is_task=True: ALS, pred 로스
+            # ! mf 임베딩과 aggr 임베딩 양자화
+            quantized, all_level_vectors1, rq_loss1 = self.rq_mf(src_uid_emb1)
+            quantized, all_level_vectors2, rq_loss2 = self.rq_aggr(src_uid_emb2)
+
+            loss = Diff.diffusion_loss_fn_parallel(
+                diff_model,
+                tgt_emb1,
+                tgt_emb2,
+                # ! diff_loss 계산 시에는 양자화하지 않은 기존 소스 임베딩을 컨디션으로 이용
+                src_uid_emb1,
+                src_uid_emb2,
+                iid_emb,
+                y_input,
+                device,
+                is_task,
+                # ! is_taks가 True일 때만 양자화된 컨디션을 시간축에 따라 이용
+                q_embs1=all_level_vectors1,
+                q_embs2=all_level_vectors2,
+            )
+
+            alpha_rq = 1e-2
+            total_loss = loss + alpha_rq * (rq_loss1 + rq_loss2)
+            return total_loss  # is_task=False: 노이즈 예측 , is_task=True: ALS, pred 로스
 
         elif stage == "test_diff_parallel":  # DiffParallel - test
 
             tgt_uid, iid_input, _ = x
 
-            cond_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
-            cond_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
+            src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
+            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
+
+            # ! mf 임베딩과 aggr 임베딩 양자화
+            quantized, all_level_vectors1, _ = self.rq_mf(src_uid_emb1)  # [L, B, D]
+            quantized, all_level_vectors2, _ = self.rq_aggr(src_uid_emb2)  # [L, B, D]
 
             # TODO item 임베딩은 MF 임베딩을 공유?
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
@@ -173,11 +204,12 @@ class MFBasedModel(torch.nn.Module):
                 )  # 디노이징 된 user emb_g / item emb
 
             elif diff_model.parallel["set_init"] == 1:  # 각각 MF, Aggr
+                # ! 각각 MF, Aggr인 파트만 수정
                 trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(
-                    diff_model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0
+                    diff_model, all_level_vectors1, all_level_vectors1, iid_emb, device, diff_id=0
                 )  # 디노이징 된 user emb_m / item emb
                 trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(
-                    diff_model, cond_emb2, cond_emb2, iid_emb, device, diff_id=1
+                    diff_model, all_level_vectors2, all_level_vectors2, iid_emb, device, diff_id=1
                 )  # 디노이징 된 user emb_g / item emb
 
             elif diff_model.parallel["set_init"] == 2:  # x_0 둘다 MF + Aggr로
@@ -205,6 +237,9 @@ class MFBasedModel(torch.nn.Module):
                 trans_emb = torch.cat([trans_emb_m, trans_emb_g], dim=1)
             elif diff_model.parallel["set_aggr"] == "aggonly":
                 trans_emb = trans_emb_g
+            elif diff_model.parallel["set_aggr"] == "attn":
+                # ! 어텐션으로 최종 임베딩 종합
+                trans_emb = diff_model.attn_layer(torch.cat([trans_emb_m, trans_emb_g], dim=1))
 
             if diff_model.parallel["set_proj"] == 1:
                 trans_emb = diff_model.get_al_emb(trans_emb).to(device)

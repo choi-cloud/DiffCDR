@@ -3,8 +3,10 @@ import torch.nn as nn
 
 import math
 
-from dpm_solver_pytorch import NoiseScheduleVP, model_wrapper, DPM_Solver
 from VBGE import singleVBGE
+from dpm_solver_pytorch import model_wrapper, model_wrapper_hierarchical_cond, NoiseScheduleVP, DPM_Solver
+from utils import AttentionLayer
+
 
 noise_schedule = NoiseScheduleVP(schedule="linear")
 
@@ -194,23 +196,16 @@ class DiffParallel(nn.Module):
             ]
         )
         # time embedding
-        self.step_emb_linear = nn.ModuleList(
-            [
-                nn.Linear(diff_dim, input_dim),
-            ]
-        )
+        self.step_emb_linear = nn.ModuleList([nn.Linear(diff_dim, input_dim)])
 
-        self.cond_emb_linear = nn.ModuleList(
-            [
-                nn.Linear(input_dim, input_dim),
-            ]
-        )
+        self.cond_emb_linear = nn.ModuleList([nn.Linear(input_dim, input_dim)])
 
         self.num_layers = 1
 
         # linear for alm
         self.al_linear = nn.Linear(input_dim, input_dim, False)
         # self.al_linear = nn.Linear(input_dim*2,input_dim,False)
+        self.attn_layer = AttentionLayer(in_dim=20, out_dim=10)
 
     def forward(self, x, t, cond_emb, cond_mask, diff_id):
 
@@ -292,7 +287,9 @@ def diffusion_loss_fn(model, x_0, cond_emb, iid_emb, y_input, device, is_task): 
         return F.smooth_l1_loss(x_0, final_output) + model.task_lambda * task_loss  # ALM 로스 + task loss
 
 
-def diffusion_loss_fn_parallel(model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_emb, y_input, device, is_task):  # DIM(reconstruction) loss
+def diffusion_loss_fn_parallel(
+    model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_emb, y_input, device, is_task, q_embs1=None, q_embs2=None
+):  # DIM(reconstruction) loss
 
     num_steps = model.num_steps
     mask_rate = model.mask_rate
@@ -356,12 +353,9 @@ def diffusion_loss_fn_parallel(model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_em
                 model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1
             )  # 디노이징 된 user emb_g / item emb
         elif model.parallel["set_init"] == 1:  # 각각 MF, Aggr
-            final_output_m, iid_emb = p_sample_loop_parallel(
-                model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0
-            )  # 디노이징 된 user emb_m / item emb
-            final_output_g, iid_emb = p_sample_loop_parallel(
-                model, cond_emb2, cond_emb2, iid_emb, device, diff_id=1
-            )  # 디노이징 된 user emb_g / item emb
+            # ! 각각 MF, Aggr인 파트만 수정
+            final_output_m, iid_emb = p_sample_loop_parallel(model, q_embs1, q_embs1, iid_emb, device, diff_id=0)  # 디노이징 된 user emb_m / item emb
+            final_output_g, iid_emb = p_sample_loop_parallel(model, q_embs2, q_embs2, iid_emb, device, diff_id=1)  # 디노이징 된 user emb_g / item emb
         elif model.parallel["set_init"] == 2:  # x_0 둘다 MF + Aggr로
             start = (cond_emb1 + cond_emb2) / 2
             final_output_m, iid_emb = p_sample_loop_parallel(model, start, cond_emb1, iid_emb, device, diff_id=0)  # 디노이징 된 user emb_m / item emb
@@ -380,6 +374,9 @@ def diffusion_loss_fn_parallel(model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_em
             final_output = torch.cat([final_output_m, final_output_g], dim=1)
         elif model.parallel["set_aggr"] == "aggonly":
             final_output = final_output_g
+        elif model.parallel["set_aggr"] == "attn":
+            # ! 어텐션으로 최종 임베딩 종합
+            final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1))
 
         if model.parallel["set_proj"] == 1:
             final_output = model.get_al_emb(final_output).to(device)
@@ -392,6 +389,7 @@ def diffusion_loss_fn_parallel(model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_em
         # task_loss =   (y_pred - y_input.squeeze().float()).square().sum().sqrt() / y_pred.shape[0]
 
         if model.parallel["set_loss"] == 0:
+            # ! mf 임베딩과 유사해지도록 통일
             return F.smooth_l1_loss(x_0_m, final_output) + model.task_lambda * task_loss
         elif model.parallel["set_loss"] == 1:
             return F.smooth_l1_loss(x_0_g, final_output) + model.task_lambda * task_loss
@@ -456,13 +454,17 @@ def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):  # ALM + ta
     dmp_sample_steps = model.sample_steps
     num_steps = model.num_steps
 
+    B = cond_emb.shape[1]
+    cond_mask = torch.zeros(B, device=device).int()  # uncond mask
+
     model_kwargs = {
-        "cond_emb": cond_emb,
-        "cond_mask": torch.zeros(cond_emb.size()[0], device=device),
+        "cond_emb": cond_emb.to(device),
+        "cond_mask": cond_mask,
         "diff_id": diff_id,  # DiffParallel.forword 처리 위해 diff id 인자 추가
     }
 
-    model_fn = model_wrapper(
+    # ! 양자화된 조건 임베딩을 역 디퓨전 과정에서 시간축에 따라 분할해서 사용하기 위한 별도의 model_wrapper 사용
+    model_fn = model_wrapper_hierarchical_cond(
         model,
         noise_schedule,
         is_cond_classifier=True,
@@ -489,12 +491,7 @@ def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):  # ALM + ta
 
 
 def p_sample_loop_parallel(model, start_emb, cond_emb, iid_input, device, diff_id):
-    # source emb input
-    cur_x = start_emb
-    # noise input
-    # cur_x = torch.normal(0,1,size = cond_emb.size() ,device=device)
-
-    # reversing
-    cur_x, iid_emb_out = p_sample_parallel(model, cond_emb, cur_x, iid_input, device, diff_id)  # denoised embedding, item emb
-
+    cur_x = start_emb.sum(dim=0)  # [B, D]
+    # cond_emb [L, B, D]
+    cur_x, iid_emb_out = p_sample_parallel(model, cond_emb, cur_x, iid_input, device, diff_id)
     return cur_x, iid_emb_out
