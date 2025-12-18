@@ -13,6 +13,54 @@ import lacdr_model as LACDR
 import pickle
 
 
+def build_uv_vu_adj_from_csv(path: str, num_users: int, num_items: int, threshold: int = 1, device=None, binary: bool = True):
+    """
+    CSV (uid, iid, y) -> uv_adj, vu_adj
+
+    return:
+      uv_adj: (num_users, num_items) sparse
+      vu_adj: (num_items, num_users) sparse
+    """
+    # --- read csv ---
+    df = pd.read_csv(path, header=None)
+    df.columns = ["uid", "iid", "y"]
+
+    # --- filter interactions ---
+    df = df[df["y"] >= threshold]
+    df = df.drop_duplicates(subset=["uid", "iid"])
+
+    # --- indices ---
+    u = torch.tensor(df["uid"].values, dtype=torch.long)
+    i = torch.tensor(df["iid"].values, dtype=torch.long)
+
+    # --- values ---
+    if binary:
+        v = torch.ones(len(df), dtype=torch.float32)
+    else:
+        v = torch.tensor(df["y"].values, dtype=torch.float32)
+
+    if device is not None:
+        u = u.to(device)
+        i = i.to(device)
+        v = v.to(device)
+
+    # --- uv adjacency ---
+    uv_adj = torch.sparse_coo_tensor(
+        indices=torch.stack([u, i], dim=0),
+        values=v,
+        size=(num_users, num_items),
+    ).coalesce()
+
+    # --- vu adjacency ---
+    vu_adj = torch.sparse_coo_tensor(
+        indices=torch.stack([i, u], dim=0),
+        values=v,
+        size=(num_items, num_users),
+    ).coalesce()
+
+    return {"uv_adj": uv_adj, "vu_adj": vu_adj}
+
+
 class Run:
     def __init__(self, config):
         self.use_cuda = config["use_cuda"]
@@ -289,7 +337,12 @@ class Run:
         data_diff_test = self.read_diff_data(self.test_path, batch_size=self.batchsize_diff_test, shuffle=False)
         print("diff {} iter / batchsize = {} ".format(len(data_diff_test), self.batchsize_diff_test))
 
-        return data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test
+        graph_data = {
+            "train_src": build_uv_vu_adj_from_csv(self.src_path, self.uid_all, self.iid_all, device=self.device),
+            "train_tgt": build_uv_vu_adj_from_csv(self.tgt_path, self.uid_all, self.iid_all, device=self.device),
+        }
+
+        return data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test, graph_data
 
     def get_model(self):
         if self.base_model == "MF":
@@ -580,7 +633,7 @@ class Run:
             model = self.get_model()
             optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_map = self.get_optimizer(model)
 
-        data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test = self.get_data()
+        data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test, graph_data = self.get_data()
 
         criterion = torch.nn.MSELoss()
 
