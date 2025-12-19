@@ -14,7 +14,7 @@ import pickle
 import json
 
 from utils import write
-
+import ast
 
 class Run:
     def __init__(self, config):
@@ -226,7 +226,65 @@ class Run:
             "item_ids": torch.unique(item_ids),
             "num_edges": user_ids.shape[0],
         }
+    
+    def build_test_graph_inputs(self, data_path, include_users=None, exclude_users=None):
+        interactions = pd.read_csv(data_path, header=None)
+        interactions.columns = ["uid", "iid", "y", "pos_seq"]
+        
+        if include_users is not None:
+            include_users = set(include_users)
+            interactions = interactions[interactions["uid"].isin(include_users)]
+        if exclude_users is not None:
+            exclude_users = set(exclude_users)
+            interactions = interactions[~interactions["uid"].isin(exclude_users)]
 
+        if interactions.empty:
+            return None
+
+        user_list = []
+        item_list = []
+        MAX_POS = 20 # history 길이 제한 
+
+        # 🔑 핵심: user 단위로 그룹핑 -> test_user 별로 pos_seq 한번씩만 추가 
+        for uid, group in interactions.groupby("uid"):
+            pos_seq = ast.literal_eval(group.iloc[0]["pos_seq"]) # pos_seq는 user별로 모두 동일하므로 첫 row만 사용
+
+            if not pos_seq:
+                continue
+
+            if len(pos_seq) > MAX_POS:
+                pos_seq = pos_seq[-MAX_POS:]
+
+            for iid in pos_seq:
+                user_list.append(uid)
+                item_list.append(iid)
+
+        user_ids = torch.tensor(user_list, dtype=torch.long)
+        item_ids = torch.tensor(item_list, dtype=torch.long)
+        edge_values = torch.ones(len(user_ids), dtype=torch.float32)
+
+        uv_indices = torch.stack([user_ids, item_ids])
+        uv_adj = torch.sparse_coo_tensor(
+            uv_indices,
+            edge_values,
+            size=(self.uid_all, self.iid_all + 1)
+        ).coalesce()
+
+        vu_indices = torch.stack([item_ids, user_ids])
+        vu_adj = torch.sparse_coo_tensor(
+            vu_indices,
+            edge_values,
+            size=(self.iid_all + 1, self.uid_all)
+        ).coalesce()
+
+        return {
+            "uv_adj": uv_adj,
+            "vu_adj": vu_adj,
+            "user_ids": torch.unique(user_ids),
+            "item_ids": torch.unique(item_ids),
+            "num_edges": user_ids.shape[0],
+        }
+    
     def read_ss_data(self, data_path):
         """ """
         cols = ["uid", "iid", "y", "pos_seq"]
@@ -360,9 +418,10 @@ class Run:
         test_users = test_users_df[0].tolist()
 
         graph_src_train = self.build_graph_inputs(self.src_path, exclude_users=test_users)
-        graph_src_test = self.build_graph_inputs(self.src_path, include_users=test_users)
-        graph_tgt_train = self.build_graph_inputs(self.tgt_path)
-        graph_tgt_test = self.build_graph_inputs(self.test_path)
+        graph_tgt_train = self.build_graph_inputs(self.tgt_path, exclude_users=test_users)
+
+        graph_src_test = self.build_test_graph_inputs(self.test_path) # src_path 말고 test_path에서 로드, pos_seq와 그래프 생성
+        graph_tgt_test = graph_src_test # tgt_test는 안 쓰임 
 
         def _print_graph_stats(name, graph):
             if graph is None:
