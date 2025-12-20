@@ -13,48 +13,41 @@ import lacdr_model as LACDR
 import pickle
 
 
-def build_uv_vu_adj_from_csv(path: str, num_users: int, num_items: int, threshold: int = 1, device=None, binary: bool = True):
-    """
-    CSV (uid, iid, y) -> uv_adj, vu_adj
-
-    return:
-      uv_adj: (num_users, num_items) sparse
-      vu_adj: (num_items, num_users) sparse
-    """
-    # --- read csv ---
+def build_uv_vu_adj_from_csv(path: str, num_users: int, num_items: int, threshold: int = 1, device=None):
     df = pd.read_csv(path, header=None)
     df.columns = ["uid", "iid", "y"]
 
-    # --- filter interactions ---
     df = df[df["y"] >= threshold]
     df = df.drop_duplicates(subset=["uid", "iid"])
 
-    # --- indices ---
     u = torch.tensor(df["uid"].values, dtype=torch.long)
     i = torch.tensor(df["iid"].values, dtype=torch.long)
-
-    # --- values ---
-    if binary:
-        v = torch.ones(len(df), dtype=torch.float32)
-    else:
-        v = torch.tensor(df["y"].values, dtype=torch.float32)
 
     if device is not None:
         u = u.to(device)
         i = i.to(device)
-        v = v.to(device)
 
-    # --- uv adjacency ---
+    # degree 계산
+    deg_u = torch.zeros(num_users, device=u.device)
+    deg_i = torch.zeros(num_items, device=u.device)
+
+    deg_u.scatter_add_(0, u, torch.ones_like(u, dtype=torch.float))
+    deg_i.scatter_add_(0, i, torch.ones_like(i, dtype=torch.float))
+
+    # 1 / sqrt(deg_u * deg_i)
+    val = 1.0 / torch.sqrt(deg_u[u] * deg_i[i])
+
+    # uv adjacency
     uv_adj = torch.sparse_coo_tensor(
         indices=torch.stack([u, i], dim=0),
-        values=v,
+        values=val,
         size=(num_users, num_items),
     ).coalesce()
 
-    # --- vu adjacency ---
+    # vu adjacency
     vu_adj = torch.sparse_coo_tensor(
         indices=torch.stack([i, u], dim=0),
-        values=v,
+        values=val,
         size=(num_items, num_users),
     ).coalesce()
 
@@ -354,13 +347,17 @@ class Run:
     def get_optimizer(self, model, diff_model=None, ss_model=None, la_model=None):
         optimizer_src = torch.optim.Adam(params=model.src_model.parameters(), lr=self.lr, weight_decay=self.wd)
         optimizer_tgt = torch.optim.Adam(params=model.tgt_model.parameters(), lr=self.lr, weight_decay=self.wd)
+
+        optimizer_src_graph = torch.optim.Adam(params=model.src_model_graph.parameters(), lr=self.lr, weight_decay=self.wd)
+        optimizer_tgt_graph = torch.optim.Adam(params=model.tgt_model_graph.parameters(), lr=self.lr, weight_decay=self.wd)
+
         optimizer_meta = torch.optim.Adam(params=model.meta_net.parameters(), lr=self.lr, weight_decay=self.wd)
         optimizer_aug = torch.optim.Adam(params=model.aug_model.parameters(), lr=self.lr, weight_decay=self.wd)
 
         optimizer_map = torch.optim.Adam(params=model.mapping.parameters(), lr=self.lr, weight_decay=self.wd)
 
         if diff_model is None and ss_model is None and la_model is None:
-            return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_map
+            return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_map, optimizer_src_graph, optimizer_tgt_graph
 
         elif diff_model is None and ss_model is not None and la_model is None:
             optimizer_ss = torch.optim.Adam(params=ss_model.parameters(), lr=self.lr, weight_decay=self.wd)
@@ -374,7 +371,7 @@ class Run:
             optimizer_diff = torch.optim.Adam(params=diff_model.parameters(), lr=self.diff_lr)
             return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_diff, optimizer_map
 
-    def eval_mae(self, model, data_loader, stage):
+    def eval_mae(self, model, data_loader, stage, graph_data=None):
         print("Evaluating MAE:")
 
         targets, predicts = list(), list()
@@ -411,7 +408,7 @@ class Run:
             else:
                 for X, y in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                     model.eval()
-                    pred = model(X, stage, self.device)
+                    pred = model(X, stage, self.device, graph_data=graph_data)
                     targets.extend(y.squeeze(1).tolist())
                     predicts.extend(pred.tolist())
 
@@ -420,7 +417,7 @@ class Run:
 
         return loss(targets, predicts).item(), torch.sqrt(mse_loss(targets, predicts)).item()
 
-    def train(self, data_loader, model, criterion, optimizer, epoch, stage, mapping=False, diff=False, ss=False, la=False):
+    def train(self, data_loader, model, criterion, optimizer, epoch, stage, mapping=False, diff=False, ss=False, la=False, graph_data=None):
         print("Training Epoch {}:".format(epoch + 1))
 
         loss_ls = []
@@ -439,7 +436,7 @@ class Run:
                 else:
                     model.train()
 
-                    pred = model(X, stage, self.device)
+                    pred = model(X, stage, self.device, graph_data=graph_data)
                     loss = criterion(pred, y.squeeze().float())
 
                     model.zero_grad()
@@ -521,6 +518,21 @@ class Run:
             "lacdr_mae": 10,
             "lacdr_rmse": 10,
         }
+
+    def TgtOnly_graph(self, model, data_tgt, data_test, criterion, optimizer, graph_data=None):
+        print("=========TgtOnlyGraph========")
+        n_epoch = self.epoch
+
+        for i in range(n_epoch):
+            loss = self.train(data_tgt, model, criterion, optimizer, i, stage="train_tgt", graph_data=graph_data)
+            mae, rmse = self.eval_mae(model, data_test, stage="test_tgt", graph_data=graph_data)
+            self.update_results(mae, rmse, "tgt")
+            print("MAE: {} RMSE: {} ".format(mae, rmse))
+
+    def SrcOnly_graph(self, model, data_src, criterion, optimizer_src, graph_data=None):
+        print("=====SrcOnlyGraph=====")
+        for i in range(self.epoch):
+            loss = self.train(data_src, model, criterion, optimizer_src, i, stage="train_src", graph_data=graph_data)
 
     def TgtOnly(self, model, data_tgt, data_test, criterion, optimizer):
         print("=========TgtOnly========")
@@ -631,17 +643,25 @@ class Run:
 
         else:
             model = self.get_model()
-            optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_map = self.get_optimizer(model)
+            optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_map, optimizer_src_graph, optimizer_tgt_graph = self.get_optimizer(
+                model
+            )
 
         data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test, graph_data = self.get_data()
+        # graph_data = {
+        #     "train_src": build_uv_vu_adj_from_csv(self.src_path, self.uid_all, self.iid_all, device=self.device),
+        #     "train_tgt": build_uv_vu_adj_from_csv(self.tgt_path, self.uid_all, self.iid_all, device=self.device),
+        # }
 
         criterion = torch.nn.MSELoss()
 
         if exp_part == "None_CDR":
-            self.TgtOnly(model, data_tgt, data_test, criterion, optimizer_tgt)
-            self.SrcOnly(model, data_src, criterion, optimizer_src)
+            self.TgtOnly_graph(model, data_tgt, data_test, criterion, optimizer_tgt_graph, graph_data=graph_data["train_tgt"])
+            self.SrcOnly_graph(model, data_src, criterion, optimizer_src_graph, graph_data=graph_data["train_src"])
+            # self.TgtOnly(model, data_tgt, data_test, criterion, optimizer_tgt)
+            # self.SrcOnly(model, data_src, criterion, optimizer_src)
             # CMF
-            self.DataAug(model, data_aug, data_test, criterion, optimizer_aug)
+            # self.DataAug(model, data_aug, data_test, criterion, optimizer_aug)
             self.result_print(["tgt", "aug"])
             self.model_save(model, path=save_path)
 
