@@ -383,7 +383,7 @@ class Run:
                 for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                     model[0].eval()
                     model[1].eval()
-                    pred = model[0](X, stage, self.device, diff_model=model[1])
+                    pred = model[0](X, stage, self.device, diff_model=model[1], graph_data=graph_data)
 
                     y_input = X[-1]
                     targets.extend(y_input.squeeze(1).tolist())
@@ -477,13 +477,13 @@ class Run:
 
                 # diff first, then task
                 # diff
-                loss = model[0](X, stage, self.device, diff_model=model[1], is_task=False)
+                loss = model[0](X, stage, self.device, diff_model=model[1], is_task=False, graph_data=graph_data)
                 model[1].zero_grad()
                 loss.backward()
                 _ = torch.nn.utils.clip_grad_norm_(model[1].parameters(), 1.0)
                 optimizer.step()
                 # task
-                task_loss = model[0](X, stage, self.device, diff_model=model[1], is_task=True)
+                task_loss = model[0](X, stage, self.device, diff_model=model[1], is_task=True, graph_data=graph_data)
                 model[1].zero_grad()
                 task_loss.backward()
                 _ = torch.nn.utils.clip_grad_norm_(model[1].parameters(), 1.0)
@@ -559,12 +559,14 @@ class Run:
             self.update_results(mae, rmse, "aug")
             print("MAE: {} RMSE: {} ".format(mae, rmse))
 
-    def Diff_CDR(self, model, diff_model, data_diff, data_test, optimizer):
+    def Diff_CDR(self, model, diff_model, data_diff, data_test, optimizer, graph_data=None):
         print("=========Diff_CDR========")
         for i in range(self.epoch):
-            loss, task_loss = self.train(data_diff, [model, diff_model], None, optimizer, i, stage="train_diff", mapping=False, diff=True)
+            loss, task_loss = self.train(
+                data_diff, [model, diff_model], None, optimizer, i, stage="train_diff", mapping=False, diff=True, graph_data=graph_data
+            )
 
-            mae, rmse = self.eval_mae([model, diff_model], data_test, stage="test_diff")
+            mae, rmse = self.eval_mae([model, diff_model], data_test, stage="test_diff", graph_data=graph_data)
             self.update_results(mae, rmse, "diff")
             print("DIFF LOSS", loss.item(), "TASK LOSS", task_loss.item(), "MAE: {} RMSE: {}".format(mae, rmse))
 
@@ -686,5 +688,5 @@ class Run:
         elif exp_part == "diff_CDR":
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
-            self.Diff_CDR(model, diff_model, data_diff, data_diff_test, optimizer_diff)
+            self.Diff_CDR(model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data=graph_data)
             self.result_print(["diff"])

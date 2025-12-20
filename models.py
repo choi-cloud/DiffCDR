@@ -151,10 +151,17 @@ class MFBasedModel(torch.nn.Module):
 
             tgt_uid, iid_input, y_input = x
 
-            tgt_emb = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
-            cond_emb = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
+            tgt_users, tgt_items = self.tgt_model_graph.aggregate(graph_data=graph_data["train_tgt"])
+            src_users, src_items = self.src_model_graph.aggregate(graph_data=graph_data["train_src"])
 
-            iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
+            tgt_emb = tgt_users.index_select(0, tgt_uid)
+            cond_emb = src_users.index_select(0, tgt_uid)
+            iid_emb = tgt_items.index_select(0, iid_input.squeeze(1))
+
+            # tgt_emb = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
+            # cond_emb = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
+
+            # iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
 
             loss = Diff.diffusion_loss_fn(diff_model, tgt_emb, cond_emb, iid_emb, y_input, device, is_task)
             return loss
@@ -163,8 +170,14 @@ class MFBasedModel(torch.nn.Module):
 
             tgt_uid, iid_input, _ = x
 
-            cond_emb = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
-            iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
+            tgt_users, tgt_items = self.tgt_model_graph.aggregate(graph_data=graph_data["train_tgt"])
+            src_users, src_items = self.src_model_graph.aggregate(graph_data=graph_data["train_src"])
+
+            cond_emb = src_users.index_select(0, tgt_uid)
+            iid_emb = tgt_items.index_select(0, iid_input.squeeze(1))
+
+            # cond_emb = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
+            # iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
 
             trans_emb, iid_emb_out = Diff.p_sample_loop(diff_model, cond_emb, iid_emb, device)
 
