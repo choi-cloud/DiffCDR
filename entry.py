@@ -45,6 +45,12 @@ def prepare_1():
     parser.add_argument("--set_proj", type=int, default=1, help="diff 결과 proj 위치 - 0: 따로, 1: aggr 이후 같이")
     parser.add_argument("--set_aggr", type=str, default="attn", help="두 디퓨전 모델 아웃풋 aggregation 방법, [avg, add, concat]")
 
+    # item codebook setting
+    parser.add_argument("--set_num_items", type=int, default=20, help="아이템 코드북에 사용할 아이템 개수.")
+    parser.add_argument("--set_criterion", type=str, default="mse", help="아이템 선택기준, [random, rating, time]")
+    parser.add_argument("--set_emb_met", type=str, default="mean", help="아이템 임베딩 합치는 방법, [mean, att]")
+    parser.add_argument("--set_cond_met", type=str, default="mean", help="컨디션 합치는 방법, [mean, att, hybrid]")
+
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -74,6 +80,10 @@ def prepare_2(args, config_path):
         config["set_init"] = int(args.set_init)
         config["set_proj"] = int(args.set_proj)
         config["set_aggr"] = args.set_aggr
+        config["set_num_items"] = int(args.set_num_items)
+        config["set_criterion"] = args.set_criterion
+        config["set_emb_met"] = args.set_emb_met
+        config["set_cond_met"] = args.set_cond_met
 
     return config
 

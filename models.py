@@ -54,6 +54,8 @@ class MFBasedModel(torch.nn.Module):
         self.rq_mf = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
         self.rq_aggr = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
 
+        self.rq_item = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
+
     def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False):
         if stage == "train_src":
             emb = self.src_model.forward(x)
@@ -146,20 +148,35 @@ class MFBasedModel(torch.nn.Module):
 
         elif stage == "train_diff_parallel":  # DiffParallel - train
 
-            tgt_uid, iid_input, y_input = x
+            tgt_uid, iid_input, y_input, src_seq = x
+
+            src_iid = src_seq[:, 2:]  # source interaction item ids [B, 20]
 
             tgt_emb1 = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF feature
             tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)
 
             # 조건 1: MF 기반 유저 임베딩, 조건 2: VBGE 기반 유저 임베딩
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
-            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
-
+            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)            
+            # 타겟 아이템 임베딩
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
+
+            # 상호작용한 소스 아이템 임베딩
+            src_iid_emb = self.src_model.iid_embedding(src_iid)  # [128, 20, 10]
+            # src_iid_emb 평균 임베딩
+            src_iid_emb_avg = torch.mean(src_iid_emb, dim=1)    # [128, 10]
 
             # ! mf 임베딩과 aggr 임베딩 양자화
             quantized, all_level_vectors1, rq_loss1 = self.rq_mf(src_uid_emb1)
             quantized, all_level_vectors2, rq_loss2 = self.rq_aggr(src_uid_emb2)
+
+            # src_item 임베딩 양자화
+            quantized, all_level_vectors_iid, rq_loss_iid = self.rq_item(src_iid_emb_avg)
+
+            if diff_model.item_codebook["set_cond_met"] == "mean":
+                all_level_vectors1 = all_level_vectors1 + all_level_vectors_iid
+                all_level_vectors2 = all_level_vectors2 + all_level_vectors_iid
+                all_level_vectors_iid = None  # mean 방식일 때는 item 임베딩 따로 전달하지 않음
 
             loss = Diff.diffusion_loss_fn_parallel(
                 diff_model,
@@ -175,15 +192,16 @@ class MFBasedModel(torch.nn.Module):
                 # ! is_taks가 True일 때만 양자화된 컨디션을 시간축에 따라 이용
                 q_embs1=all_level_vectors1,
                 q_embs2=all_level_vectors2,
+                q_embs_iid=all_level_vectors_iid,
             )
 
             alpha_rq = 1e-2
-            total_loss = loss + alpha_rq * (rq_loss1 + rq_loss2)
+            total_loss = loss + alpha_rq * (rq_loss1 + rq_loss2 + rq_loss_iid)
             return total_loss  # is_task=False: 노이즈 예측 , is_task=True: ALS, pred 로스
 
         elif stage == "test_diff_parallel":  # DiffParallel - test
 
-            tgt_uid, iid_input, _ = x
+            tgt_uid, iid_input, _, src_seq = x
 
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
             src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
@@ -192,8 +210,20 @@ class MFBasedModel(torch.nn.Module):
             quantized, all_level_vectors1, _ = self.rq_mf(src_uid_emb1)  # [L, B, D]
             quantized, all_level_vectors2, _ = self.rq_aggr(src_uid_emb2)  # [L, B, D]
 
+            # 상호작용한 소스 아이템 임베딩
+            src_iid = src_seq[:, 2:]  # source interaction item ids [B, 20]
+            src_iid_emb = self.src_model.iid_embedding(src_iid)  # [128, 20, 10]
+            # src_iid_emb 평균 임베딩
+            src_iid_emb_avg = torch.mean(src_iid_emb, dim=1)    # [128, 10]
+
+            # src_item 임베딩 양자화
+            quantized, all_level_vectors_iid, rq_loss_iid = self.rq_item(src_iid_emb_avg)
+
             # TODO item 임베딩은 MF 임베딩을 공유?
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
+
+            all_level_vectors1 = all_level_vectors1 + all_level_vectors_iid
+            all_level_vectors2 = all_level_vectors2 + all_level_vectors_iid
 
             if diff_model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
                 trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(

@@ -41,29 +41,48 @@ def model_wrapper_hierarchical_cond(
     def model_fn(x, t_continuous):
         if is_cond_classifier:
 
-            cond_emb = model_kwargs.get("cond_emb", None)
+            cond_emb_list = model_kwargs.get("cond_emb", None)   # list
+            cond_scales = model_kwargs.get("cond_scales", None)  # list
             cond_mask = model_kwargs.get("cond_mask", None)
             diff_id = model_kwargs.get("diff_id", None)
 
             t_discrete = get_model_input_time(t_continuous)
+            noise_uncond = None
+            guided_noise = None
 
-            # ! 양자화된 컨디션 임베딩을 시간축에 따라 분할
-            # ! 초기에는 추상적인 정보, 후기에는 구체적인 정보
-            cond_emb_quantized = hierarchical_cond_from_levels(cond_emb, t_continuous, noise_schedule)  # [B, D]
+            for i, cond_emb in enumerate(cond_emb_list):
 
-            if diff_id is not None:
-                noise_uncond = model(x, t_discrete, cond_emb_quantized, cond_mask, diff_id)
-            else:
-                noise_uncond = model(x, t_discrete, cond_emb_quantized, cond_mask)
+                if cond_emb is None:
+                    continue
 
-            cond_mask_c = torch.ones_like(cond_mask, device=cond_mask.device)
+                scale_i = cond_scales[i] if cond_scales is not None else classifier_scale
 
-            if diff_id is not None:
-                cond_grad = model(x, t_discrete, cond_emb_quantized, cond_mask_c, diff_id)
-            else:
-                cond_grad = model(x, t_discrete, cond_emb_quantized, cond_mask_c)
+                cond_emb_q = hierarchical_cond_from_levels(
+                                cond_emb, t_continuous, noise_schedule
+                            )  # [B, D]
+    
+                # uncond noise (한 번만 계산)
+                if noise_uncond is None:
+                    if diff_id is not None:
+                        noise_uncond = model(x, t_discrete, cond_emb_q, cond_mask, diff_id)
+                    else:
+                        noise_uncond = model(x, t_discrete, cond_emb_q, cond_mask)
 
-            return noise_uncond + classifier_scale * (cond_grad - noise_uncond)
+                cond_mask_c = torch.ones_like(cond_mask, device=cond_mask.device)
+                if diff_id is not None:
+                    noise_cond = model(x, t_discrete, cond_emb_q, cond_mask_c, diff_id)
+                else:
+                    noise_cond = model(x, t_discrete, cond_emb_q, cond_mask_c)
+                
+                
+                # guidance accumulation
+                if guided_noise is None:
+                    guided_noise = noise_uncond + scale_i * (noise_cond - noise_uncond)
+                else:
+                    guided_noise = guided_noise + scale_i * (noise_cond - noise_uncond)
+
+            return guided_noise
+
         else:
             t_discrete = get_model_input_time(t_continuous)
             cond_emb_quantized = hierarchical_cond_from_levels(all_level_vectors, t_continuous, noise_schedule)

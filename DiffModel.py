@@ -133,6 +133,7 @@ class DiffParallel(nn.Module):
         vbge_opt=None,
         use_vbge=True,
         parallel=None,
+        item_codebook=None
     ):
         super(DiffParallel, self).__init__()
 
@@ -175,6 +176,9 @@ class DiffParallel(nn.Module):
 
         # Parallel setting
         self.parallel = parallel
+
+        # Item setting
+        self.item_codebook = item_codebook
 
         # time, condition, noised emb -> reverse 하는 3FC diffusion solver
         self.diff_models = nn.ModuleList(
@@ -288,7 +292,7 @@ def diffusion_loss_fn(model, x_0, cond_emb, iid_emb, y_input, device, is_task): 
 
 
 def diffusion_loss_fn_parallel(
-    model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_emb, y_input, device, is_task, q_embs1=None, q_embs2=None
+    model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_emb, y_input, device, is_task, q_embs1=None, q_embs2=None, q_embs_iid=None
 ):  # DIM(reconstruction) loss
 
     num_steps = model.num_steps
@@ -344,27 +348,29 @@ def diffusion_loss_fn_parallel(
         return F.smooth_l1_loss(e_m, output1) + F.smooth_l1_loss(e_g, output2)  # 예측 노이즈와 실제 노이즈 비교 L1 loss
 
     elif is_task:  # task loss ALM 수행
+        final_output_m, iid_emb = p_sample_loop_parallel(model, q_embs1, q_embs1, iid_emb, device, diff_id=0, cond_item=q_embs_iid)  # 디노이징 된 user emb_m / item emb
+        final_output_g, iid_emb = p_sample_loop_parallel(model, q_embs2, q_embs2, iid_emb, device, diff_id=1, cond_item=q_embs_iid)  # 디노이징 된 user emb_g / item emb
 
-        if model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
-            final_output_m, iid_emb = p_sample_loop_parallel(
-                model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0
-            )  # 디노이징 된 user emb_m / item emb
-            final_output_g, iid_emb = p_sample_loop_parallel(
-                model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1
-            )  # 디노이징 된 user emb_g / item emb
-        elif model.parallel["set_init"] == 1:  # 각각 MF, Aggr
-            # ! 각각 MF, Aggr인 파트만 수정
-            final_output_m, iid_emb = p_sample_loop_parallel(model, q_embs1, q_embs1, iid_emb, device, diff_id=0)  # 디노이징 된 user emb_m / item emb
-            final_output_g, iid_emb = p_sample_loop_parallel(model, q_embs2, q_embs2, iid_emb, device, diff_id=1)  # 디노이징 된 user emb_g / item emb
-        elif model.parallel["set_init"] == 2:  # x_0 둘다 MF + Aggr로
-            start = (cond_emb1 + cond_emb2) / 2
-            final_output_m, iid_emb = p_sample_loop_parallel(model, start, cond_emb1, iid_emb, device, diff_id=0)  # 디노이징 된 user emb_m / item emb
-            final_output_g, iid_emb = p_sample_loop_parallel(model, start, cond_emb2, iid_emb, device, diff_id=1)  # 디노이징 된 user emb_g / item emb
-        elif model.parallel["set_init"] == 3:  # Aggr만 사용
-            # final_output_m, iid_emb=p_sample_loop_parallel(model,start, cond_emb1,iid_emb,device, diff_id=0) # 디노이징 된 user emb_m / item emb
-            final_output_g, iid_emb = p_sample_loop_parallel(
-                model, cond_emb2, cond_emb2, iid_emb, device, diff_id=1
-            )  # 디노이징 된 user emb_g / item emb
+        # if model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
+        #     final_output_m, iid_emb = p_sample_loop_parallel(
+        #         model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0
+        #     )  # 디노이징 된 user emb_m / item emb
+        #     final_output_g, iid_emb = p_sample_loop_parallel(
+        #         model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1
+        #     )  # 디노이징 된 user emb_g / item emb
+        # elif model.parallel["set_init"] == 1:  # 각각 MF, Aggr
+        #     # ! 각각 MF, Aggr인 파트만 수정
+        #     final_output_m, iid_emb = p_sample_loop_parallel(model, q_embs1, q_embs1, iid_emb, device, diff_id=0)  # 디노이징 된 user emb_m / item emb
+        #     final_output_g, iid_emb = p_sample_loop_parallel(model, q_embs2, q_embs2, iid_emb, device, diff_id=1)  # 디노이징 된 user emb_g / item emb
+        # elif model.parallel["set_init"] == 2:  # x_0 둘다 MF + Aggr로
+        #     start = (cond_emb1 + cond_emb2) / 2
+        #     final_output_m, iid_emb = p_sample_loop_parallel(model, start, cond_emb1, iid_emb, device, diff_id=0)  # 디노이징 된 user emb_m / item emb
+        #     final_output_g, iid_emb = p_sample_loop_parallel(model, start, cond_emb2, iid_emb, device, diff_id=1)  # 디노이징 된 user emb_g / item emb
+        # elif model.parallel["set_init"] == 3:  # Aggr만 사용
+        #     # final_output_m, iid_emb=p_sample_loop_parallel(model,start, cond_emb1,iid_emb,device, diff_id=0) # 디노이징 된 user emb_m / item emb
+        #     final_output_g, iid_emb = p_sample_loop_parallel(
+        #         model, cond_emb2, cond_emb2, iid_emb, device, diff_id=1
+        #     )  # 디노이징 된 user emb_g / item emb
 
         # final output = x'_c + x'_g
 
@@ -448,17 +454,27 @@ def p_sample_loop(model, cond_emb, iid_input, device):
     return cur_x, iid_emb_out
 
 
-def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):  # ALM + task loss
+def p_sample_parallel(model, cond_user, x, iid_emb, device, diff_id, cond_item=None):  # ALM + task loss
     # wrap for dpm_solver
     classifier_scale_para = model.c_scale
     dmp_sample_steps = model.sample_steps
     num_steps = model.num_steps
 
-    B = cond_emb.shape[1]
+    B = cond_user.shape[1]
     cond_mask = torch.zeros(B, device=device).int()  # uncond mask
 
+        
+    cond_emb_list = []
+
+    if cond_user is not None:
+        cond_emb_list.append(cond_user.to(device))
+
+    if cond_item is not None:
+        cond_emb_list.append(cond_item.to(device))
+
     model_kwargs = {
-        "cond_emb": cond_emb.to(device),
+        "cond_emb": cond_emb_list,
+        "cond_scales": [1.0, 1.0],
         "cond_mask": cond_mask,
         "diff_id": diff_id,  # DiffParallel.forword 처리 위해 diff id 인자 추가
     }
@@ -490,8 +506,13 @@ def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):  # ALM + ta
         return sample, iid_emb
 
 
-def p_sample_loop_parallel(model, start_emb, cond_emb, iid_input, device, diff_id):
+def p_sample_loop_parallel(model, start_emb, cond_user, iid_input, device, diff_id, cond_item=None):
     cur_x = start_emb.sum(dim=0)  # [B, D]
     # cond_emb [L, B, D]
-    cur_x, iid_emb_out = p_sample_parallel(model, cond_emb, cur_x, iid_input, device, diff_id)
+    cur_x, iid_emb_out = p_sample_parallel(model, cond_user, cur_x, iid_input, device, diff_id, cond_item)
     return cur_x, iid_emb_out
+
+
+
+
+

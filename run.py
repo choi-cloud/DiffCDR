@@ -96,6 +96,12 @@ class Run:
             "set_proj": config["set_proj"],
             "set_aggr": config["set_aggr"],
         }
+        self.item_codebook_setting = {
+            "set_num_items": config["set_num_items"],
+            "set_criterion": config["set_criterion"],
+            "set_emb_met": config["set_emb_met"],
+            "set_cond_met": config["set_cond_met"],
+        }
 
         self.device = "cuda" if config["use_cuda"] else "cpu"
 
@@ -157,9 +163,11 @@ class Run:
             id_fea = torch.tensor(data[x_col].values, dtype=torch.long)
             X = torch.cat([id_fea, pos_seq], dim=1)
             y = torch.tensor(data[y_col].values, dtype=torch.long)
+
             if self.use_cuda:
                 X = X.cuda()
                 y = y.cuda()
+            
             dataset = TensorDataset(X, y)
             data_iter = DataLoader(dataset, batchsize, shuffle=shuffle)
             return data_iter
@@ -190,8 +198,33 @@ class Run:
             meta_uid = meta_uid.cuda()
             iid_input = iid_input.cuda()
             y_input = y_input.cuda()
-
+      
         dataset = TensorDataset(meta_uid, iid_input, y_input)
+        data_iter = DataLoader(dataset, batch_size, shuffle=shuffle)
+        return data_iter
+
+
+    # %%% read_diff_data에 소스 아이템 포함
+    def read_diff_data_with_src(self, data_path, batch_size, shuffle=True):
+        num_items = self.item_codebook_setting.get("set_num_items", 20)
+
+        meta_uid_seq = pd.read_csv(data_path, header=None)
+        meta_uid_seq.columns = ["meta_uid", "iid", "y", "pos_seq"]
+        meta_uid = torch.tensor(meta_uid_seq["meta_uid"].values, dtype=torch.long)
+
+        iid_input = torch.tensor(meta_uid_seq[["iid"]].values, dtype=torch.long)
+        y_input = torch.tensor(meta_uid_seq[["y"]].values, dtype=torch.long)
+
+        pos_seq = keras.preprocessing.sequence.pad_sequences(meta_uid_seq.pos_seq.map(self.seq_extractor), maxlen=num_items, padding="post")
+        pos_seq = torch.tensor(pos_seq, dtype=torch.long)
+        id_fea = torch.tensor(meta_uid_seq[["meta_uid", "iid"]].values, dtype=torch.long)
+        X = torch.cat([id_fea, pos_seq], dim=1)
+        if self.use_cuda:
+            meta_uid = meta_uid.cuda()
+            iid_input = iid_input.cuda()
+            y_input = y_input.cuda()
+            X = X.cuda()
+        dataset = TensorDataset(meta_uid, iid_input, y_input, X)
         data_iter = DataLoader(dataset, batch_size, shuffle=shuffle)
         return data_iter
 
@@ -414,6 +447,13 @@ class Run:
         data_diff_test = self.read_diff_data(self.test_path, batch_size=self.batchsize_diff_test, shuffle=False)
         print("diff {} iter / batchsize = {} ".format(len(data_diff_test), self.batchsize_diff_test))
 
+        data_diff2 = self.read_diff_data_with_src(self.meta_path, batch_size=self.batchsize_diff)
+        print("diff2 {} iter / batchsize = {} ".format(len(data_diff2), self.batchsize_diff))
+
+        data_diff2_test = self.read_diff_data_with_src(self.test_path, batch_size=self.batchsize_diff_test, shuffle=False)
+        print("diff2_test {} iter / batchsize = {} ".format(len(data_diff2_test), self.batchsize_diff_test))
+
+
         test_users_df = pd.read_csv(self.test_path, header=None, usecols=[0])
         test_users = test_users_df[0].tolist()
 
@@ -440,7 +480,7 @@ class Run:
 
         graph_data = {"train": {"src": graph_src_train, "tgt": graph_tgt_train}, "test": {"src": graph_src_test, "tgt": graph_tgt_test}}
 
-        return data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test, graph_data
+        return data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test, graph_data, data_diff2, data_diff2_test
 
     def compute_user_graph_embeddings(self, base_model, diff_model, graph_data, use_target=False):
         if graph_data is None:
@@ -565,7 +605,7 @@ class Run:
                     model[0].eval()
                     model[1].eval()
                     pred = model[0](X, stage, self.device, diff_model=model[1])
-                    y_input = X[-1]
+                    y_input = X[-2]
                     targets.extend(y_input.squeeze(1).tolist())
                     predicts.extend(pred.tolist())
 
@@ -593,7 +633,20 @@ class Run:
                     predicts.extend(pred.tolist())
 
         targets = torch.tensor(targets).float()
-        predicts = torch.tensor(predicts)
+        predicts = torch.tensor(predicts).float()
+
+        # Ensure predictions and targets are 1-D and aligned element-wise.
+        # Some model branches may return nested lists or per-sample vectors;
+        # flatten to compare element-wise scalars if shapes don't match.
+        if targets.dim() != predicts.dim() or (targets.dim() > 1 and predicts.dim() > 1 and targets.shape[1] != predicts.shape[1]):
+            targets = targets.view(-1)
+            predicts = predicts.view(-1)
+        else:
+            # If one is multi-dim and other isn't, also flatten to 1-D
+            if targets.dim() > 1:
+                targets = targets.view(-1)
+            if predicts.dim() > 1:
+                predicts = predicts.view(-1)
 
         return loss(targets, predicts).item(), torch.sqrt(mse_loss(targets, predicts)).item()
 
@@ -823,6 +876,7 @@ class Run:
                 self.vbge_opt,
                 use_vbge=self.use_vbge,
                 parallel=self.parallel_setting,
+                item_codebook = self.item_codebook_setting,
             )
             diff_model = diff_model.cuda() if self.use_cuda else diff_model
 
@@ -848,7 +902,7 @@ class Run:
             model = self.get_model()
             optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_map = self.get_optimizer(model)
 
-        data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test, graph_data = self.get_data()
+        data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test, graph_data, data_diff2, data_diff2_test = self.get_data()
 
         criterion = torch.nn.MSELoss()
 
@@ -888,5 +942,5 @@ class Run:
         elif exp_part == "diff_parallel":
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
-            self.Diff_Parallel(model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"])
+            self.Diff_Parallel(model, diff_model, data_diff2, data_diff2_test, optimizer_diff, graph_data["train"], graph_data["test"])
             self.result_print(["diff_parallel"])
