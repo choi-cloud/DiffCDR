@@ -156,10 +156,21 @@ class MFBasedModel(torch.nn.Module):
             src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
 
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
+            # iid_emb = self._fetch_vbge_item_embedding(diff_model, iid_input)
+            # print(iid_emb)
 
             # ! mf 임베딩과 aggr 임베딩 양자화
-            quantized, all_level_vectors1, rq_loss1 = self.rq_mf(src_uid_emb1)
-            quantized, all_level_vectors2, rq_loss2 = self.rq_aggr(src_uid_emb2)
+            if diff_model.parallel["set_aggr"] == "pop_attn":
+                int_item_aggr = diff_model.int_item_aggr[tgt_uid.unsqueeze(1)].squeeze()
+                conf_item_aggr = diff_model.conf_item_aggr[tgt_uid.unsqueeze(1)].squeeze()
+                quantized, all_level_vectors1, rq_loss1 = self.rq_mf(int_item_aggr)  # [L, B, D]
+                quantized, all_level_vectors2, rq_loss2 = self.rq_aggr(conf_item_aggr)  # [L, B, D]
+            else: 
+                quantized, all_level_vectors1, rq_loss1 = self.rq_mf(src_uid_emb1)
+                quantized, all_level_vectors2, rq_loss2 = self.rq_aggr(src_uid_emb2)
+
+            conf_weight = diff_model.item_popularity[iid_input]
+            # int_weight = 1 - conf_weight
 
             loss = Diff.diffusion_loss_fn_parallel(
                 diff_model,
@@ -175,6 +186,7 @@ class MFBasedModel(torch.nn.Module):
                 # ! is_taks가 True일 때만 양자화된 컨디션을 시간축에 따라 이용
                 q_embs1=all_level_vectors1,
                 q_embs2=all_level_vectors2,
+                pop=conf_weight,
             )
 
             alpha_rq = 1e-2
@@ -189,11 +201,18 @@ class MFBasedModel(torch.nn.Module):
             src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
 
             # ! mf 임베딩과 aggr 임베딩 양자화
-            quantized, all_level_vectors1, _ = self.rq_mf(src_uid_emb1)  # [L, B, D]
-            quantized, all_level_vectors2, _ = self.rq_aggr(src_uid_emb2)  # [L, B, D]
+            if diff_model.parallel["set_aggr"] == "pop_attn":
+                int_item_aggr = diff_model.int_item_aggr[tgt_uid.unsqueeze(1)].squeeze()
+                conf_item_aggr = diff_model.conf_item_aggr[tgt_uid.unsqueeze(1)].squeeze()
+                quantized, all_level_vectors1, _ = self.rq_mf(int_item_aggr)  # [L, B, D]
+                quantized, all_level_vectors2, _ = self.rq_aggr(conf_item_aggr)  # [L, B, D]
+            else: 
+                quantized, all_level_vectors1, _ = self.rq_mf(src_uid_emb1)  # [L, B, D]
+                quantized, all_level_vectors2, _ = self.rq_aggr(src_uid_emb2)  # [L, B, D]
 
             # TODO item 임베딩은 MF 임베딩을 공유?
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
+            # iid_emb = self._fetch_vbge_item_embedding(diff_model, iid_input)
 
             if diff_model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
                 trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(
@@ -203,7 +222,7 @@ class MFBasedModel(torch.nn.Module):
                     diff_model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1
                 )  # 디노이징 된 user emb_g / item emb
 
-            elif diff_model.parallel["set_init"] == 1:  # 각각 MF, Aggr
+            elif diff_model.parallel["set_init"] == 1 or diff_model.parallel["set_init"] == 4:  # 각각 MF, Aggr
                 # ! 각각 MF, Aggr인 파트만 수정
                 trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(
                     diff_model, all_level_vectors1, all_level_vectors1, iid_emb, device, diff_id=0
@@ -238,8 +257,20 @@ class MFBasedModel(torch.nn.Module):
             elif diff_model.parallel["set_aggr"] == "aggonly":
                 trans_emb = trans_emb_g
             elif diff_model.parallel["set_aggr"] == "attn":
-                # ! 어텐션으로 최종 임베딩 종합
+                # ! 어텐션으로 최종 임베딩 종합 
                 trans_emb = diff_model.attn_layer(torch.cat([trans_emb_m, trans_emb_g], dim=1))
+            elif diff_model.parallel["set_aggr"] == "pop": 
+                # m -> int, g -> conf 
+                conf_weight = diff_model.item_popularity[iid_input]
+                int_weight = 1 - conf_weight
+                trans_emb = int_weight * trans_emb_m + conf_weight * trans_emb_g
+            elif diff_model.parallel["set_aggr"] == "pop_attn":
+                # conf_weight = diff_model.item_popularity[iid_input]
+                # int_weight = 1 - conf_weight
+                
+                # trans_emb_m = int_weight * trans_emb_m 
+                # trans_emb_g = conf_weight * trans_emb_g
+                trans_emb = diff_model.attn_layer(torch.cat([trans_emb_m, trans_emb_g], dim=1)) 
 
             if diff_model.parallel["set_proj"] == 1:
                 trans_emb = diff_model.get_al_emb(trans_emb).to(device)
@@ -256,3 +287,9 @@ class MFBasedModel(torch.nn.Module):
             return None
         indices = tgt_uid.long()
         return vbge_cache[indices]
+    
+    def _fetch_vbge_item_embedding(self, diff_model, tgt_iid):
+        if not hasattr(diff_model, "smooth_item_emb"):
+            return None
+        indices = tgt_iid.long()
+        return diff_model.smooth_item_emb[indices].squeeze() 

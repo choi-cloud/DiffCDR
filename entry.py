@@ -125,13 +125,15 @@ if __name__ == "__main__":
     write(f"✅ VBGE  {args.use_vbge}")
 
     if args.exp_part == "diff_parallel":
-        set_init = ["MF로 초기화", "Aggr로 초기화", "MF+Aggr 평균으로 초기화", "DiffCDR에 cond만 agg로"]
+        set_init = ["MF로 초기화", "Aggr로 초기화", "MF+Aggr 평균으로 초기화", "DiffCDR에 cond만 agg로", "DIM에도 cond 양자화"]
         set_loss = ["둘 다 MF", "둘 다 Aggr", "둘 다 MF+Aggr 평균", "따로따로"]
         set_proj = ["따로 Proj", "합치고 proj"]
 
         write(f"⭐ Diff2 초기화  : ({args.set_init}) x_T = {set_init[args.set_init]}")
         write(f"⭐ Diff loss 계산: ({args.set_loss}) {set_loss[args.set_loss]}")
         write(f"⭐ Project 위치  : ({args.set_proj}) {set_proj[args.set_proj]}")
+        write(f"⭐ Aggrgation   : {args.set_aggr}")
+
     if not args.process_data_mid and not args.process_data_ready:
         Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth")
         write(f"==============================")

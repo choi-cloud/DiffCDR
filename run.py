@@ -227,6 +227,96 @@ class Run:
             "num_edges": user_ids.shape[0],
         }
     
+    def build_shared_train_graph(self, src_path, tgt_path, exclude_users=None):
+        """Build a single graph using both train_src and train_tgt interactions (same CSV schema)."""
+        src_interactions = pd.read_csv(src_path, header=None, usecols=[0, 1])
+        tgt_interactions = pd.read_csv(tgt_path, header=None, usecols=[0, 1])
+        src_interactions.columns = ["uid", "iid"]
+        tgt_interactions.columns = ["uid", "iid"]
+        interactions = pd.concat([src_interactions, tgt_interactions], ignore_index=True)
+
+        # keep item split info for later slicing
+        self.num_src_items = src_interactions["iid"].nunique()
+        self.num_tgt_items = tgt_interactions["iid"].nunique()
+
+        if exclude_users is not None:
+            exclude_users = set(exclude_users)
+            interactions = interactions[~interactions["uid"].isin(exclude_users)]
+
+        if interactions.empty:
+            return None
+
+        user_ids = torch.tensor(interactions["uid"].values, dtype=torch.long)
+        item_ids = torch.tensor(interactions["iid"].values, dtype=torch.long)
+        edge_values = torch.ones(user_ids.shape[0], dtype=torch.float32)
+
+        uv_indices = torch.stack([user_ids, item_ids])
+        uv_adj = torch.sparse_coo_tensor(uv_indices, edge_values, size=(self.uid_all, self.iid_all + 1)).coalesce()
+
+        vu_indices = torch.stack([item_ids, user_ids])
+        vu_adj = torch.sparse_coo_tensor(vu_indices, edge_values, size=(self.iid_all + 1, self.uid_all)).coalesce()
+
+        return {
+            "uv_adj": uv_adj,
+            "vu_adj": vu_adj,
+            "user_ids": torch.unique(user_ids),
+            "item_ids": torch.unique(item_ids),
+            "num_edges": user_ids.shape[0],
+        }
+
+    def compute_item_popularity(self, paths):
+        """Count item frequency from given CSVs (col 1 = iid), clip to >=1, normalize by max."""
+        frames = [] # src train + tgt train 
+        for p in paths:
+            df = pd.read_csv(p, header=None, usecols=[1])
+            df.columns = ["iid"]
+            frames.append(df)
+        if not frames:
+            return None
+        counts = pd.concat(frames, ignore_index=True)["iid"].value_counts() # 각 iid 마다 등장 횟수 카운팅
+        full_counts = counts.reindex(range(self.iid_all + 1), fill_value=0).to_numpy() # iid 번호 순서대로 정렬 
+
+        # TODO 정규화 - src/tgt 따로 or 같이? (현재는 같이 한번에 정규화)
+        max_count = full_counts.max() if full_counts.size > 0 else 0
+        if max_count == 0:
+            return torch.zeros(self.iid_all + 1, dtype=torch.float32)
+        full_counts = np.clip(full_counts, 1, max_count)
+        pop_norm = full_counts / max_count
+        return torch.tensor(pop_norm, dtype=torch.float32)
+    
+    def build_shared_test_graph(self, data_path, include_users=None, exclude_users=None):
+        """Build a single graph from test.csv (has pos_seq, but only uid/iid are used for edges)."""
+        interactions = pd.read_csv(data_path, header=None)
+        interactions.columns = ["uid", "iid", "y", "pos_seq"]
+
+        if include_users is not None:
+            include_users = set(include_users)
+            interactions = interactions[interactions["uid"].isin(include_users)]
+        if exclude_users is not None:
+            exclude_users = set(exclude_users)
+            interactions = interactions[~interactions["uid"].isin(exclude_users)]
+
+        if interactions.empty:
+            return None
+
+        user_ids = torch.tensor(interactions["uid"].values, dtype=torch.long)
+        item_ids = torch.tensor(interactions["iid"].values, dtype=torch.long)
+        edge_values = torch.ones(user_ids.shape[0], dtype=torch.float32)
+
+        uv_indices = torch.stack([user_ids, item_ids])
+        uv_adj = torch.sparse_coo_tensor(uv_indices, edge_values, size=(self.uid_all, self.iid_all + 1)).coalesce()
+
+        vu_indices = torch.stack([item_ids, user_ids])
+        vu_adj = torch.sparse_coo_tensor(vu_indices, edge_values, size=(self.iid_all + 1, self.uid_all)).coalesce()
+
+        return {
+            "uv_adj": uv_adj,
+            "vu_adj": vu_adj,
+            "user_ids": torch.unique(user_ids),
+            "item_ids": torch.unique(item_ids),
+            "num_edges": user_ids.shape[0],
+        }
+    
     def build_test_graph_inputs(self, data_path, include_users=None, exclude_users=None):
         interactions = pd.read_csv(data_path, header=None)
         interactions.columns = ["uid", "iid", "y", "pos_seq"]
@@ -417,11 +507,17 @@ class Run:
         test_users_df = pd.read_csv(self.test_path, header=None, usecols=[0])
         test_users = test_users_df[0].tolist()
 
+        # item popularity on train src+tgt (normalized)
+        self.item_popularity = self.compute_item_popularity([self.src_path, self.tgt_path]).cuda()
+
         graph_src_train = self.build_graph_inputs(self.src_path, exclude_users=test_users)
         graph_tgt_train = self.build_graph_inputs(self.tgt_path, exclude_users=test_users)
 
         graph_src_test = self.build_test_graph_inputs(self.test_path) # src_path 말고 test_path에서 로드, pos_seq와 그래프 생성
         graph_tgt_test = graph_src_test # tgt_test는 안 쓰임 
+
+        graph_shared_train = self.build_shared_train_graph(self.src_path, self.tgt_path, exclude_users=test_users)
+        graph_shared_test = self.build_shared_test_graph(self.test_path)
 
         def _print_graph_stats(name, graph):
             if graph is None:
@@ -437,8 +533,13 @@ class Run:
         _print_graph_stats("graph src test", graph_src_test)
         _print_graph_stats("graph tgt train", graph_tgt_train)
         _print_graph_stats("graph tgt test", graph_tgt_test)
+        _print_graph_stats("graph shared train", graph_shared_train)
+        _print_graph_stats("graph shared test", graph_shared_test)
 
-        graph_data = {"train": {"src": graph_src_train, "tgt": graph_tgt_train}, "test": {"src": graph_src_test, "tgt": graph_tgt_test}}
+        graph_data = {
+            "train": {"src": graph_src_train, "tgt": graph_tgt_train, "shared": graph_shared_train},
+            "test": {"src": graph_src_test, "tgt": graph_tgt_test, "shared": graph_shared_test},
+        }
 
         return data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test, graph_data
 
@@ -502,7 +603,62 @@ class Run:
                 # fallback: if no 2-hop neighbors, keep original embedding
                 zero_mask = two_hop_counts.squeeze(1) == 0
                 user_emb[zero_mask] = user_feat[zero_mask]
+
             return user_emb, None
+
+    def compute_item_aggregation_popularity(self, base_model, graph_data):
+        uv_adj = graph_data["uv_adj"].to(self.device)  # [num_users, num_items]
+
+        # item embedding 선택
+        item_feat = base_model.src_model.iid_embedding.weight.detach().to(self.device)
+
+        # item popularity (assumed shape: [num_items])
+        conf_weight = self.item_popularity.to(self.device).unsqueeze(1)  # [num_items, 1]
+        int_weight = torch.ones_like(conf_weight)-conf_weight
+
+        
+        
+        with torch.no_grad():
+            # popularity-weighted item embedding
+            item_feat_conf = item_feat * conf_weight  # [num_items, d]
+            item_feat_int = item_feat * int_weight  # [num_items, d]
+
+            # 1-hop aggregation: user <- items
+            user_agg_conf = torch.sparse.mm(uv_adj, item_feat_conf)  # [num_users, d]
+            user_agg_int = torch.sparse.mm(uv_adj, item_feat_int)  # [num_users, d]
+
+            # normalization term: sum of item popularities per user
+            pop_sum_conf = torch.sparse.mm(uv_adj, conf_weight).clamp(min=1e-8)  # [num_users, 1] # 이웃 item들의 pop sum으로 정규화 
+            pop_sum_int = torch.sparse.mm(uv_adj, int_weight).clamp(min=1e-8)  # [num_users, 1] # 이웃 item들의 pop sum으로 정규화 
+
+            user_emb_conf = user_agg_conf / pop_sum_conf
+            user_emb_int = user_agg_int / pop_sum_int
+
+        return user_emb_conf, user_emb_int
+
+    def compute_global_graph_embeddings(self, base_model, graph_data_shared):
+        """Aggregate on shared graph with two sequential 1-hop steps; split src/tgt item embeddings."""
+        if graph_data_shared is None:
+            return None, None, None
+
+        uv_adj = graph_data_shared["uv_adj"].to(self.device)
+        vu_adj = graph_data_shared["vu_adj"].to(self.device)
+
+        # prefer pre-computed split; fall back to even split if missing
+        num_items_total = uv_adj.shape[1]
+
+        with torch.no_grad():
+            # use averaged user embedding as seed
+            user_feat_src = base_model.src_model.uid_embedding.weight.detach().to(self.device)
+            user_feat_tgt = base_model.tgt_model.uid_embedding.weight.detach().to(self.device)
+            user_emb = (user_feat_src + user_feat_tgt) / 2
+
+            # iterative 1-hop aggregation twice
+            for _ in range(2):
+                item_emb = torch.sparse.mm(vu_adj, user_emb)  # users -> items
+                user_emb = torch.sparse.mm(uv_adj, item_emb)  # items -> users
+
+        return user_emb, item_emb
 
     def get_model(self):
         if self.base_model == "MF":
@@ -553,13 +709,20 @@ class Run:
                     predicts.extend(pred.tolist())
 
             elif stage in ("test_diff_parallel"):
-
                 src_graph = graph_test.get("src")
                 tgt_graph = graph_test.get("tgt")
+                shared_graph = graph_test.get("shared")
                 smooth_user_emb_src, _ = self.compute_user_graph_embeddings(model[0], model[1], src_graph, use_target=False)
                 smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model[0], model[1], tgt_graph, use_target=True)
+                global_user_emb, global_item_emb = self.compute_global_graph_embeddings(model[0], shared_graph)
+                conf_item_aggr, int_item_aggr = self.compute_item_aggregation_popularity(model[0], shared_graph)
                 model[1].smooth_user_emb_src = smooth_user_emb_src
                 model[1].smooth_user_emb_tgt = smooth_user_emb_tgt
+                model[1].smooth_user_emb_global = global_user_emb
+                model[1].smooth_item_emb = global_item_emb
+                model[1].item_popularity = self.item_popularity
+                model[1].conf_item_aggr = conf_item_aggr
+                model[1].int_item_aggr = int_item_aggr
 
                 for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                     model[0].eval()
@@ -654,10 +817,18 @@ class Run:
             if graph_train is not None:  # DiffParallel else DiffCDR
                 src_graph = graph_train.get("src")
                 tgt_graph = graph_train.get("tgt")
+                shared_graph = graph_train.get("shared")
                 smooth_user_emb_src, _ = self.compute_user_graph_embeddings(model[0], model[1], src_graph, use_target=False)
                 smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model[0], model[1], tgt_graph, use_target=True)
+                global_user_emb, global_item_emb = self.compute_global_graph_embeddings(model[0], shared_graph)
+                conf_item_aggr, int_item_aggr = self.compute_item_aggregation_popularity(model[0], shared_graph)
                 model[1].smooth_user_emb_src = smooth_user_emb_src
                 model[1].smooth_user_emb_tgt = smooth_user_emb_tgt
+                model[1].smooth_user_emb_global = global_user_emb
+                model[1].smooth_item_emb = global_item_emb
+                model[1].item_popularity = self.item_popularity
+                model[1].conf_item_aggr = conf_item_aggr 
+                model[1].int_item_aggr = int_item_aggr 
             task_loss_ls = []
             for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                 model[1].train()

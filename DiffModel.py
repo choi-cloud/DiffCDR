@@ -288,7 +288,7 @@ def diffusion_loss_fn(model, x_0, cond_emb, iid_emb, y_input, device, is_task): 
 
 
 def diffusion_loss_fn_parallel(
-    model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_emb, y_input, device, is_task, q_embs1=None, q_embs2=None
+    model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_emb, y_input, device, is_task, q_embs1=None, q_embs2=None, pop=None,
 ):  # DIM(reconstruction) loss
 
     num_steps = model.num_steps
@@ -325,6 +325,33 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_init"] == 3:  # x_0 둘다 Aggr로
             x_m, e_m = q_x_fn(model, x_0_g, t, device)
             x_g, e_g = x_m, e_m
+        elif model.parallel["set_init"] == 4: 
+            x_m, e_m = q_x_fn(model, x_0_m, t, device)
+            x_g, e_g = q_x_fn(model, x_0_g, t, device)
+
+            
+            num_steps = model.num_steps            
+            t_discrete = 1000.0 * torch.max(
+                        t - 1.0 / num_steps,
+                        torch.zeros_like(t).to(t),
+                    ).squeeze()
+
+            # ! 양자화된 컨디션 임베딩을 시간축에 따라 분할
+            # ! 초기에는 추상적인 정보, 후기에는 구체적인 정보
+            from dpm_solver_pytorch import hierarchical_cond_from_levels
+            cond_emb_quantized_1 = hierarchical_cond_from_levels(q_embs1, t, noise_schedule)  # [B, D]
+            cond_emb_quantized_2 = hierarchical_cond_from_levels(q_embs2, t, noise_schedule)  # [B, D]
+            
+            cond_mask1 = 1 * (torch.rand(cond_emb_quantized_1.shape[0], device=device) <= mask_rate)
+            cond_mask1 = 1 - cond_mask1.int()
+
+            cond_mask2 = 1 * (torch.rand(cond_emb_quantized_2.shape[0], device=device) <= mask_rate)
+            cond_mask2 = 1 - cond_mask2.int()
+
+            output1 = model(x_m, t_discrete, cond_emb_quantized_1, cond_mask1, diff_id=0)  # x_t, c1 -> noise
+            output2 = model(x_g, t_discrete, cond_emb_quantized_2, cond_mask2, diff_id=1)  # x_t, c2 -> noise
+
+            return F.smooth_l1_loss(e_m, output1) + F.smooth_l1_loss(e_g, output2)  # 예측 노이즈와 실제 노이즈 비교 L1 loss
 
         # random mask
         cond_mask1 = 1 * (torch.rand(cond_emb1.shape[0], device=device) <= mask_rate)
@@ -352,7 +379,7 @@ def diffusion_loss_fn_parallel(
             final_output_g, iid_emb = p_sample_loop_parallel(
                 model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1
             )  # 디노이징 된 user emb_g / item emb
-        elif model.parallel["set_init"] == 1:  # 각각 MF, Aggr
+        elif model.parallel["set_init"] == 1 or model.parallel["set_init"] == 4:  # 각각 MF, Aggr
             # ! 각각 MF, Aggr인 파트만 수정
             final_output_m, iid_emb = p_sample_loop_parallel(model, q_embs1, q_embs1, iid_emb, device, diff_id=0)  # 디노이징 된 user emb_m / item emb
             final_output_g, iid_emb = p_sample_loop_parallel(model, q_embs2, q_embs2, iid_emb, device, diff_id=1)  # 디노이징 된 user emb_g / item emb
@@ -377,12 +404,23 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_aggr"] == "attn":
             # ! 어텐션으로 최종 임베딩 종합
             final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1))
+        elif model.parallel["set_aggr"] == "pop": 
+            conf_weight = pop
+            int_weight = 1 - conf_weight
+            
+            final_output = int_weight * final_output_m + conf_weight * final_output_g
+        elif model.parallel["set_aggr"] == "pop_attn":
+            # conf_weight = pop
+            # int_weight = 1 - conf_weight
+            
+            # final_output_m = int_weight * final_output_m 
+            # final_output_g = conf_weight * final_output_g
+            final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1))
 
         if model.parallel["set_proj"] == 1:
             final_output = model.get_al_emb(final_output).to(device)
         # TODO item 임베딩은 MF 임베딩을 공유?
         y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 곱해서 예측
-
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
         # RMSE
