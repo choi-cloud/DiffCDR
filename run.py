@@ -508,16 +508,16 @@ class Run:
         test_users = test_users_df[0].tolist()
 
         # item popularity on train src+tgt (normalized)
-        self.item_popularity = self.compute_item_popularity([self.src_path, self.tgt_path]).cuda()
+        self.item_popularity = self.compute_item_popularity([self.src_path, self.tgt_path]).cuda() 
 
-        graph_src_train = self.build_graph_inputs(self.src_path, exclude_users=test_users)
+        graph_src_train = self.build_graph_inputs(self.src_path) # 전체 그래프 생성 
         graph_tgt_train = self.build_graph_inputs(self.tgt_path, exclude_users=test_users)
 
-        graph_src_test = self.build_test_graph_inputs(self.test_path) # src_path 말고 test_path에서 로드, pos_seq와 그래프 생성
-        graph_tgt_test = graph_src_test # tgt_test는 안 쓰임 
+        graph_src_test = graph_src_train  # train, test graph 동일 
+        graph_tgt_test = graph_tgt_train  # tgt_test는 안 쓰임 
 
         graph_shared_train = self.build_shared_train_graph(self.src_path, self.tgt_path, exclude_users=test_users)
-        graph_shared_test = self.build_shared_test_graph(self.test_path)
+        graph_shared_test = self.build_shared_test_graph(self.test_path) # pos seq 와 그래프 생성 -> test user가 인터랙션한 source items.
 
         def _print_graph_stats(name, graph):
             if graph is None:
@@ -606,18 +606,18 @@ class Run:
 
             return user_emb, None
 
-    def compute_item_aggregation_popularity(self, base_model, graph_data):
+    def compute_item_aggregation_popularity(self, base_model, graph_data, src_item_num):
         uv_adj = graph_data["uv_adj"].to(self.device)  # [num_users, num_items]
 
-        # item embedding 선택
-        item_feat = base_model.src_model.iid_embedding.weight.detach().to(self.device)
+        # MF item embedding 
+        src_item_feat = base_model.src_model.iid_embedding.weight.detach().to(self.device)[:src_item_num] # [num_items, emb_dim] 
+        tgt_item_feat = base_model.tgt_model.iid_embedding.weight.detach().to(self.device)[src_item_num:] # [num_items, emb_dim] 
+        item_feat = torch.cat([src_item_feat, tgt_item_feat], dim=0) # [num_items, emb_dim]   
 
-        # item popularity (assumed shape: [num_items])
+        # item popularity 
         conf_weight = self.item_popularity.to(self.device).unsqueeze(1)  # [num_items, 1]
         int_weight = torch.ones_like(conf_weight)-conf_weight
 
-        
-        
         with torch.no_grad():
             # popularity-weighted item embedding
             item_feat_conf = item_feat * conf_weight  # [num_items, d]
@@ -629,36 +629,12 @@ class Run:
 
             # normalization term: sum of item popularities per user
             pop_sum_conf = torch.sparse.mm(uv_adj, conf_weight).clamp(min=1e-8)  # [num_users, 1] # 이웃 item들의 pop sum으로 정규화 
-            pop_sum_int = torch.sparse.mm(uv_adj, int_weight).clamp(min=1e-8)  # [num_users, 1] # 이웃 item들의 pop sum으로 정규화 
+            pop_sum_int = torch.sparse.mm(uv_adj, int_weight).clamp(min=1e-8)    # [num_users, 1] # 이웃 item들의 pop sum으로 정규화 
 
             user_emb_conf = user_agg_conf / pop_sum_conf
             user_emb_int = user_agg_int / pop_sum_int
 
         return user_emb_conf, user_emb_int
-
-    def compute_global_graph_embeddings(self, base_model, graph_data_shared):
-        """Aggregate on shared graph with two sequential 1-hop steps; split src/tgt item embeddings."""
-        if graph_data_shared is None:
-            return None, None, None
-
-        uv_adj = graph_data_shared["uv_adj"].to(self.device)
-        vu_adj = graph_data_shared["vu_adj"].to(self.device)
-
-        # prefer pre-computed split; fall back to even split if missing
-        num_items_total = uv_adj.shape[1]
-
-        with torch.no_grad():
-            # use averaged user embedding as seed
-            user_feat_src = base_model.src_model.uid_embedding.weight.detach().to(self.device)
-            user_feat_tgt = base_model.tgt_model.uid_embedding.weight.detach().to(self.device)
-            user_emb = (user_feat_src + user_feat_tgt) / 2
-
-            # iterative 1-hop aggregation twice
-            for _ in range(2):
-                item_emb = torch.sparse.mm(vu_adj, user_emb)  # users -> items
-                user_emb = torch.sparse.mm(uv_adj, item_emb)  # items -> users
-
-        return user_emb, item_emb
 
     def get_model(self):
         if self.base_model == "MF":
@@ -714,15 +690,13 @@ class Run:
                 shared_graph = graph_test.get("shared")
                 smooth_user_emb_src, _ = self.compute_user_graph_embeddings(model[0], model[1], src_graph, use_target=False)
                 smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model[0], model[1], tgt_graph, use_target=True)
-                global_user_emb, global_item_emb = self.compute_global_graph_embeddings(model[0], shared_graph)
-                conf_item_aggr, int_item_aggr = self.compute_item_aggregation_popularity(model[0], shared_graph)
                 model[1].smooth_user_emb_src = smooth_user_emb_src
                 model[1].smooth_user_emb_tgt = smooth_user_emb_tgt
-                model[1].smooth_user_emb_global = global_user_emb
-                model[1].smooth_item_emb = global_item_emb
-                model[1].item_popularity = self.item_popularity
+
+                conf_item_aggr, int_item_aggr = self.compute_item_aggregation_popularity(model[0], shared_graph, src_graph["item_ids"].shape[0])
                 model[1].conf_item_aggr = conf_item_aggr
                 model[1].int_item_aggr = int_item_aggr
+                model[1].item_popularity = self.item_popularity
 
                 for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                     model[0].eval()
@@ -820,15 +794,15 @@ class Run:
                 shared_graph = graph_train.get("shared")
                 smooth_user_emb_src, _ = self.compute_user_graph_embeddings(model[0], model[1], src_graph, use_target=False)
                 smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model[0], model[1], tgt_graph, use_target=True)
-                global_user_emb, global_item_emb = self.compute_global_graph_embeddings(model[0], shared_graph)
-                conf_item_aggr, int_item_aggr = self.compute_item_aggregation_popularity(model[0], shared_graph)
                 model[1].smooth_user_emb_src = smooth_user_emb_src
                 model[1].smooth_user_emb_tgt = smooth_user_emb_tgt
-                model[1].smooth_user_emb_global = global_user_emb
-                model[1].smooth_item_emb = global_item_emb
-                model[1].item_popularity = self.item_popularity
+                # item aggregation 
+                # TODO: # src/tgt graph 로 input 변경, p 가중치 수정 
+                conf_item_aggr, int_item_aggr = self.compute_item_aggregation_popularity(model[0], shared_graph, src_graph["item_ids"].shape[0]) 
                 model[1].conf_item_aggr = conf_item_aggr 
                 model[1].int_item_aggr = int_item_aggr 
+                model[1].item_popularity = self.item_popularity
+
             task_loss_ls = []
             for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                 model[1].train()
