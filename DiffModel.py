@@ -384,9 +384,11 @@ def diffusion_loss_fn_parallel(
             final_output_m, iid_emb = p_sample_loop_parallel(model, q_embs1, q_embs1, iid_emb, device, diff_id=0)  # 디노이징 된 user emb_m / item emb
             final_output_g, iid_emb = p_sample_loop_parallel(model, q_embs2, q_embs2, iid_emb, device, diff_id=1)  # 디노이징 된 user emb_g / item emb
         elif model.parallel["set_init"] == 2:  # x_0 둘다 MF + Aggr로
-            start = (cond_emb1 + cond_emb2) / 2
-            final_output_m, iid_emb = p_sample_loop_parallel(model, start, cond_emb1, iid_emb, device, diff_id=0)  # 디노이징 된 user emb_m / item emb
-            final_output_g, iid_emb = p_sample_loop_parallel(model, start, cond_emb2, iid_emb, device, diff_id=1)  # 디노이징 된 user emb_g / item emb
+            start = (q_embs1 + q_embs2) / 2
+            final_output_m, iid_emb = p_sample_loop_parallel(model, start, q_embs1, iid_emb, device, diff_id=0)  # 디노이징 된 user emb_m / item emb
+            final_output_g, iid_emb = p_sample_loop_parallel(model, start, q_embs2, iid_emb, device, diff_id=1)  # 디노이징 된 user emb_g / item emb
+            # final_output_m, iid_emb = p_sample_loop_parallel(model, start, cond_emb1, iid_emb, device, diff_id=0)  # 디노이징 된 user emb_m / item emb
+            # final_output_g, iid_emb = p_sample_loop_parallel(model, start, cond_emb2, iid_emb, device, diff_id=1)  # 디노이징 된 user emb_g / item emb
         elif model.parallel["set_init"] == 3:  # Aggr만 사용
             # final_output_m, iid_emb=p_sample_loop_parallel(model,start, cond_emb1,iid_emb,device, diff_id=0) # 디노이징 된 user emb_m / item emb
             final_output_g, iid_emb = p_sample_loop_parallel(

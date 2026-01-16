@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 
 import DiffModel as Diff
 import sscdr_model as SSCDR
@@ -54,7 +55,92 @@ class MFBasedModel(torch.nn.Module):
         self.rq_mf = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
         self.rq_aggr = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
 
-    def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False):
+        self.user_proto_cache = None  # 🔥 추가
+
+        self.proto_to_cond = torch.nn.Linear(emb_dim, emb_dim, bias=False)
+
+        self.alpha_top = nn.Parameter(torch.zeros(emb_dim))
+        self.alpha_bot = nn.Parameter(torch.zeros(emb_dim))
+
+        self.item_cond = False
+
+    @torch.no_grad()
+    def build_user_prototype_cache(
+        self,
+        device,
+        top_p=0.01,        # 상위 p%
+        bottom_p=0.005,    # 하위 p%
+        user_batch=256,
+    ):  
+        """
+        Memory-safe prototype cache builder
+        """
+        uid_emb_all = self.src_model.uid_embedding.weight.detach().to(device)
+        iid_emb = self.src_model.iid_embedding.weight.detach().to(device)
+
+        num_users = uid_emb_all.size(0)
+        num_items = iid_emb.size(0)
+        d = uid_emb_all.size(1)
+
+        # percentage → k (NO clamp)
+        topk = int(num_items * top_p)
+        bottomk = int(num_items * bottom_p)
+
+        # prototype cache
+        top_proto = torch.zeros((num_users, d), device=device)
+        bot_proto = torch.zeros((num_users, d), device=device)
+
+        for start in range(0, num_users, user_batch):
+            end = min(start + user_batch, num_users)
+
+            u_emb = uid_emb_all[start:end]          # [B, d]
+
+            # score matrix for this batch only
+            scores = torch.matmul(u_emb, iid_emb.t())  # [B, I]
+
+            # ---------- TOP PROTOTYPE ----------
+            if topk > 0:
+                top_idx = torch.topk(scores, k=topk, dim=1).indices  # [B, topk]
+                top_proto[start:end] = iid_emb[top_idx].mean(dim=1)
+            else:
+                # clean skip
+                top_proto[start:end] = torch.zeros_like(u_emb)
+
+            # ---------- BOTTOM PROTOTYPE (REPULSION) ----------
+            if bottomk > 0:
+                bot_idx = torch.topk(
+                    scores, k=bottomk, dim=1, largest=False
+                ).indices                                           # [B, bottomk]
+
+                bottom_mean = iid_emb[bot_idx].mean(dim=1)          # [B, d]
+                # bot_proto[start:end] = F.normalize(
+                #     u_emb - bottom_mean, dim=1
+                # )
+                bot_proto[start:end] = iid_emb[bot_idx].mean(dim=1)
+            else:
+                # clean skip
+                bot_proto[start:end] = torch.zeros_like(u_emb)
+
+            # very important to free memory
+            del scores
+
+            if start % (user_batch * 20) == 0:
+                torch.cuda.empty_cache()
+
+        # store cache
+        self.user_proto_cache = {
+            'top': top_proto.detach(),
+            'bottom': bot_proto.detach()
+        }
+
+    @torch.no_grad()
+    def get_top_bottom_item_prototypes(self, uid):
+        top = self.user_proto_cache['top'][uid]
+        bottom = self.user_proto_cache['bottom'][uid]
+        return top, bottom
+
+
+    def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False, item_cond=False):
         if stage == "train_src":
             emb = self.src_model.forward(x)
             x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
@@ -151,14 +237,24 @@ class MFBasedModel(torch.nn.Module):
             tgt_emb1 = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF feature
             tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)
 
+           
             # 조건 1: MF 기반 유저 임베딩, 조건 2: VBGE 기반 유저 임베딩
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
             src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
+            
+            if item_cond==True:
+                top_proto, bottom_proto = self.get_top_bottom_item_prototypes(tgt_uid)
+                top_proto_u = self.proto_to_cond(top_proto)
+                bottom_proto_u = self.proto_to_cond(bottom_proto)
+
+                alpha_top = torch.sigmoid(self.alpha_top).unsqueeze(0)
+                alpha_bot = torch.sigmoid(self.alpha_bot).unsqueeze(0)
+
+                src_uid_emb1 = alpha_top * src_uid_emb1 + (1 - alpha_top) * top_proto_u
+                src_uid_emb2 = alpha_bot * src_uid_emb2 + (1 - alpha_bot) * bottom_proto_u
 
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
-            # iid_emb = self._fetch_vbge_item_embedding(diff_model, iid_input)
-            # print(iid_emb)
-
+            
             # ! mf 임베딩과 aggr 임베딩 양자화
             if diff_model.parallel["set_aggr"] == "pop_attn":
                 int_item_aggr = diff_model.int_item_aggr[tgt_uid.unsqueeze(1)].squeeze()
@@ -200,6 +296,18 @@ class MFBasedModel(torch.nn.Module):
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
             src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
 
+            if item_cond==True:
+                top_proto, bottom_proto = self.get_top_bottom_item_prototypes(tgt_uid)
+                top_proto_u = self.proto_to_cond(top_proto)
+                bottom_proto_u = self.proto_to_cond(bottom_proto)
+
+
+                alpha_top = torch.sigmoid(self.alpha_top).unsqueeze(0)
+                alpha_bot = torch.sigmoid(self.alpha_bot).unsqueeze(0)
+
+                src_uid_emb1 = alpha_top * src_uid_emb1 + (1 - alpha_top) * top_proto_u
+                src_uid_emb2 = alpha_bot * src_uid_emb2 + (1 - alpha_bot) * bottom_proto_u
+
             # ! mf 임베딩과 aggr 임베딩 양자화
             if diff_model.parallel["set_aggr"] == "pop_attn":
                 int_item_aggr = diff_model.int_item_aggr[tgt_uid.unsqueeze(1)].squeeze()
@@ -232,12 +340,12 @@ class MFBasedModel(torch.nn.Module):
                 )  # 디노이징 된 user emb_g / item emb
 
             elif diff_model.parallel["set_init"] == 2:  # x_0 둘다 MF + Aggr로
-                start = (cond_emb1 + cond_emb2) / 2
+                start = (all_level_vectors1 + all_level_vectors2) / 2
                 trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(
-                    diff_model, start, cond_emb1, iid_emb, device, diff_id=0
+                    diff_model, start, all_level_vectors1, iid_emb, device, diff_id=0
                 )  # 디노이징 된 user emb_m / item emb
                 trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(
-                    diff_model, start, cond_emb2, iid_emb, device, diff_id=1
+                    diff_model, start, all_level_vectors2, iid_emb, device, diff_id=1
                 )  # 디노이징 된 user emb_g / item emb
 
             elif diff_model.parallel["set_init"] == 3:  # x_0 둘다 Aggr로

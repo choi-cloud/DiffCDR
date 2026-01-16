@@ -40,6 +40,7 @@ class Run:
 
         self.batchsize_aug = self.batchsize_src
 
+        self.item_cond = config['item_cond']
         self.epoch = config["epoch"]
         self.emb_dim = config["emb_dim"]
         self.meta_dim = config["meta_dim"]
@@ -701,7 +702,7 @@ class Run:
                 for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                     model[0].eval()
                     model[1].eval()
-                    pred = model[0](X, stage, self.device, diff_model=model[1])
+                    pred = model[0](X, stage, self.device, diff_model=model[1], item_cond=self.item_cond)
                     y_input = X[-1]
                     targets.extend(y_input.squeeze(1).tolist())
                     predicts.extend(pred.tolist())
@@ -807,13 +808,13 @@ class Run:
             for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                 model[1].train()
                 # diff first, then task
-                loss = model[0](X, stage, self.device, diff_model=model[1], is_task=False)
+                loss = model[0](X, stage, self.device, diff_model=model[1], is_task=False,  item_cond=self.item_cond)
                 model[1].zero_grad()
                 loss.backward()
                 _ = torch.nn.utils.clip_grad_norm_(model[1].parameters(), 1.0)
                 optimizer.step()
 
-                task_loss = model[0](X, stage, self.device, diff_model=model[1], is_task=True)
+                task_loss = model[0](X, stage, self.device, diff_model=model[1], is_task=True,  item_cond=self.item_cond)
                 model[1].zero_grad()
                 task_loss.backward()
                 _ = torch.nn.utils.clip_grad_norm_(model[1].parameters(), 1.0)
@@ -865,6 +866,109 @@ class Run:
         write("=====SrcOnly=====")
         for i in range(self.epoch):
             loss = self.train(data_src, model, criterion, optimizer_src, i, stage="train_src")
+
+    def BPRMF(self, data_loader, model, optimizer, stage):
+        model.train()
+        total_loss = []
+
+        for X, _ in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
+            uid = X[:, 0]
+            pos_iid = X[:, 1]
+
+            # negative sampling
+            neg_iid = torch.randint(
+                low=0,
+                high=self.iid_all,
+                size=pos_iid.size(),
+                device=pos_iid.device
+            )
+
+            # embeddings
+            if stage == 'src':
+                user_emb = model.src_model.uid_embedding(uid)
+                pos_item_emb = model.src_model.iid_embedding(pos_iid)
+                neg_item_emb = model.src_model.iid_embedding(neg_iid)
+            else:
+                user_emb = model.tgt_model.uid_embedding(uid)
+                pos_item_emb = model.tgt_model.iid_embedding(pos_iid)
+                neg_item_emb = model.tgt_model.iid_embedding(neg_iid)
+
+            # scores
+            pos_score = torch.sum(user_emb * pos_item_emb, dim=1)
+            neg_score = torch.sum(user_emb * neg_item_emb, dim=1)
+
+            # BPR loss
+            loss = -torch.mean(torch.log(torch.sigmoid(pos_score - neg_score) + 1e-8))
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            total_loss.append(loss.item())
+
+        return torch.tensor(total_loss).mean()
+
+    def lightgcn_propagate(self, user_emb, item_emb, uv_adj, vu_adj, num_layers=2):
+        """
+        user_emb: [num_users, d]
+        item_emb: [num_items, d]
+        """
+        u_list = [user_emb]
+        i_list = [item_emb]
+
+        u, i = user_emb, item_emb
+        for _ in range(num_layers):
+            u = torch.sparse.mm(uv_adj, i)
+            i = torch.sparse.mm(vu_adj, u)
+            u_list.append(u)
+            i_list.append(i)
+
+        u_final = torch.stack(u_list, dim=0).mean(dim=0)
+        i_final = torch.stack(i_list, dim=0).mean(dim=0)
+        return u_final, i_final
+
+    def LightGCN_BPR(self, model, graph, optimizer, stage, num_layers=2):
+        model.train()
+        uv_adj = graph['uv_adj'].to(self.device)
+        vu_adj = graph['vu_adj'].to(self.device)
+
+        if stage == 'src':
+            user_emb = model.src_model.uid_embedding.weight
+            item_emb = model.src_model.iid_embedding.weight
+        else:
+            user_emb = model.tgt_model.uid_embedding.weight
+            item_emb = model.tgt_model.iid_embedding.weight
+
+        # LightGCN propagation
+        u_g, i_g = self.lightgcn_propagate(user_emb, item_emb, uv_adj, vu_adj, num_layers)
+
+        # sample edges
+        users = graph['user_ids'].to(self.device)
+        idx = torch.randint(0, users.shape[0], (self.batchsize_src,), device=self.device)
+        u = users[idx]
+
+        # positive items
+        edges = uv_adj.indices()
+        mask = torch.isin(edges[0], u)
+        pos_i = edges[1][mask][:u.shape[0]]
+
+        if pos_i.shape[0] < u.shape[0]:
+            return torch.tensor(0.0, device=self.device)
+
+        pos_i = pos_i[:u.shape[0]]
+        neg_i = torch.randint(0, self.iid_all, pos_i.shape, device=self.device)
+
+        pos_score = (u_g[u] * i_g[pos_i]).sum(dim=1)
+        neg_score = (u_g[u] * i_g[neg_i]).sum(dim=1)
+
+        loss = -torch.mean(torch.log(torch.sigmoid(pos_score - neg_score) + 1e-8))
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        return loss.detach()
+    
 
     def DataAug(self, model, data_aug, data_test, criterion, optimizer):
         write("=========DataAug========")
@@ -932,7 +1036,9 @@ class Run:
 
     def model_load(self, model, path):
         if self.device == "cuda":
-            model.load_state_dict(torch.load(path))
+            # model.load_state_dict(torch.load(path))
+            state = torch.load(path, map_location=self.device)
+            model.load_state_dict(state, strict=False)
         else:
             model.load_state_dict(torch.load(path, map_location="cpu"))
 
@@ -1006,6 +1112,76 @@ class Run:
             self.result_print(["tgt", "aug"])
             self.model_save(model, path=save_path)
 
+         #################### BPRMF #######################
+        if exp_part == 'BPRMF':
+            write('========== BPRMF ==========')
+
+            # SRC domain BPR training
+            write('--- BPRMF on SRC domain ---')
+            for epoch in range(self.epoch):
+                loss = self.BPRMF(
+                    data_src,
+                    model,                 # ✅ 위에서 만든 model
+                    optimizer_src,         # ✅ 공통 optimizer
+                    stage='src'
+                )
+                write(f'[SRC][Epoch {epoch}] BPR Loss: {loss:.4f}')
+
+            # TGT domain BPR training
+            write('--- BPRMF on TGT domain ---')
+            for epoch in range(self.epoch):
+                loss = self.BPRMF(
+                    data_tgt,
+                    model,
+                    optimizer_tgt,
+                    stage='tgt'
+                )
+                mae, rmse = self.eval_mae(model, data_test, stage='test_tgt')
+                self.update_results(mae, rmse, 'tgt')
+                write(
+                    f'[TGT][Epoch {epoch}] '
+                    f'BPR Loss: {loss:.4f} | MAE {mae:.4f} RMSE {rmse:.4f}'
+                )
+
+            self.result_print(['tgt'])
+            self.model_save(model,path =  save_path )
+
+        #################### LIGHT GCN #######################
+        if exp_part == 'LightGCN':
+            write('========== LightGCN ==========')
+
+            # -------- SRC domain --------
+            write('--- LightGCN on SRC domain ---')
+            for epoch in range(self.epoch):
+                loss = self.LightGCN_BPR(
+                    model,
+                    graph_data['train']['src'],
+                    optimizer_src,
+                    stage='src',
+                    num_layers=2
+                )
+                write(f'[SRC][Epoch {epoch}] LightGCN BPR Loss: {loss:.4f}')
+
+            # -------- TGT domain --------
+            write('--- LightGCN on TGT domain ---')
+            for epoch in range(self.epoch):
+                loss = self.LightGCN_BPR(
+                    model,
+                    graph_data['train']['tgt'],
+                    optimizer_tgt,
+                    stage='tgt',
+                    num_layers=2
+                )
+                mae, rmse = self.eval_mae(model, data_test, stage='test_tgt')
+                self.update_results(mae, rmse, 'tgt')
+                write(
+                    f'[TGT][Epoch {epoch}] '
+                    f'LightGCN BPR Loss: {loss:.4f} | MAE {mae:.4f} RMSE {rmse:.4f}'
+                )
+
+            self.result_print(['tgt'])
+            self.model_save(model, path=save_path)
+
         elif exp_part == "CDR":
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
@@ -1032,6 +1208,7 @@ class Run:
 
         elif exp_part == "diff_parallel":
             self.model_load(model, path=save_path)
+            model.build_user_prototype_cache(self.device,0.5, 0.5, user_batch=1024)
             print("None_CDR model loaded")
             self.Diff_Parallel(model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"])
             self.result_print(["diff_parallel"])

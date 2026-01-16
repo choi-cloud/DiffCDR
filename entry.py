@@ -40,11 +40,14 @@ def prepare_1():
     parser.add_argument("--use_vbge", type=int, default=0, help="Use VBGE aggregation (1) or simple 2-hop (0).")
 
     # parallel setting
-    parser.add_argument("--set_loss", type=int, default=0, help="loss 계산, 0: MF, 1: aggr, 2: avg, 3: 따로따로")
-    parser.add_argument("--set_init", type=int, default=1, help="디퓨전2의 초기 x_T 설정, 0: MF, 1: aggr, 2: avg")
+    parser.add_argument("--set_loss", type=int, default=2, help="loss 계산, 0: MF, 1: aggr, 2: avg, 3: 따로따로")
+    parser.add_argument("--set_init", type=int, default=2, help="디퓨전2의 초기 x_T 설정, 0: MF, 1: aggr, 2: avg")
     parser.add_argument("--set_proj", type=int, default=1, help="diff 결과 proj 위치 - 0: 따로, 1: aggr 이후 같이")
-    parser.add_argument("--set_aggr", type=str, default="attn", help="두 디퓨전 모델 아웃풋 aggregation 방법, [avg, add, concat]")
+    parser.add_argument("--set_aggr", type=str, default="avg", help="두 디퓨전 모델 아웃풋 aggregation 방법, [avg, add, concat]")
 
+    # item cond
+    parser.add_argument('--item_cond', type=bool, default=False, help='아이템 조건 사용 여부')
+    
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -74,6 +77,7 @@ def prepare_2(args, config_path):
         config["set_init"] = int(args.set_init)
         config["set_proj"] = int(args.set_proj)
         config["set_aggr"] = args.set_aggr
+        config['item_cond'] = args.item_cond
 
     return config
 
@@ -123,6 +127,7 @@ if __name__ == "__main__":
     write(f"✅ Ratio {args.ratio}")
     write(f"✅ Model {args.exp_part}")
     write(f"✅ VBGE  {args.use_vbge}")
+    write(f"✅ Item  {args.item_cond}")
 
     if args.exp_part == "diff_parallel":
         set_init = ["MF로 초기화", "Aggr로 초기화", "MF+Aggr 평균으로 초기화", "DiffCDR에 cond만 agg로", "DIM에도 cond 양자화"]
