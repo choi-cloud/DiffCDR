@@ -726,7 +726,9 @@ class Run():
 
     def model_load(self,model,path):
         if self.device == 'cuda':
-            model.load_state_dict(torch.load(path))  
+            # model.load_state_dict(torch.load(path))  
+            state = torch.load(path, map_location=self.device)
+            model.load_state_dict(state, strict=False)
         else:
             model.load_state_dict(torch.load(path,map_location='cpu'))  
 
@@ -814,6 +816,7 @@ class Run():
             
         elif exp_part == 'diff_parallel':    
             self.model_load(model,path =  save_path )
+            model.build_user_prototype_cache(self.device,0.5, 0.5, user_batch=1024)
             print('None_CDR model loaded')
             self.Diff_Parallel(model,diff_model,  data_diff, data_diff_test ,optimizer_diff, graph_data['train'], graph_data['test'])
             self.result_print(['diff_parallel'])

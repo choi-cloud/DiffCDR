@@ -461,4 +461,3 @@ def p_sample_loop_parallel(model,start_emb,cond_emb,iid_input,device, diff_id):
     cur_x, iid_emb_out = p_sample_parallel(model,cond_emb,cur_x,iid_input,device, diff_id) # denoised embedding, item emb
 
     return cur_x ,iid_emb_out
-
