@@ -234,12 +234,12 @@ class MFBasedModel(torch.nn.Module):
 
             tgt_uid, iid_input, y_input = x
 
-            tgt_emb1 = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF feature
+            tgt_emb1 = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze().detach()  # MF feature
             tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)
 
            
             # 조건 1: MF 기반 유저 임베딩, 조건 2: VBGE 기반 유저 임베딩
-            src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
+            src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze().detach()
             src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
             
             if item_cond==True:
@@ -379,6 +379,10 @@ class MFBasedModel(torch.nn.Module):
                 # trans_emb_m = int_weight * trans_emb_m 
                 # trans_emb_g = conf_weight * trans_emb_g
                 trans_emb = diff_model.attn_layer(torch.cat([trans_emb_m, trans_emb_g], dim=1)) 
+            elif diff_model.parallel["set_aggr"] == "item_attn":
+                # ! 어텐션으로 최종 임베딩 종합
+                trans_emb = diff_model.attn_layer(torch.cat([trans_emb_m, trans_emb_g], dim=1),  query = torch.cat([iid_emb, iid_emb], dim=1))
+
 
             if diff_model.parallel["set_proj"] == 1:
                 trans_emb = diff_model.get_al_emb(trans_emb).to(device)

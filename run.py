@@ -163,6 +163,7 @@ class Run:
                 y = y.cuda()
             dataset = TensorDataset(X, y)
             data_iter = DataLoader(dataset, batchsize, shuffle=shuffle)
+            print(f'test - target mean: {y.float().mean().item()} +- {y.float().std().item()}')
             return data_iter
 
     def read_map_data(self, data_path):
@@ -194,6 +195,8 @@ class Run:
 
         dataset = TensorDataset(meta_uid, iid_input, y_input)
         data_iter = DataLoader(dataset, batch_size, shuffle=shuffle)
+        
+        print(f'data_diff - target mean: {y_input.float().mean().item()} +- {y_input.float().std().item()}')
         return data_iter
 
     def build_graph_inputs(self, data_path, include_users=None, exclude_users=None):
@@ -732,6 +735,8 @@ class Run:
 
         targets = torch.tensor(targets).float()
         predicts = torch.tensor(predicts)
+        print(f'Target mean: {targets.mean().item()} +- {targets.std().item()}')
+        print(f'Predic mean: {predicts.mean().item()} +- {predicts.std().item()}')
 
         return loss(targets, predicts).item(), torch.sqrt(mse_loss(targets, predicts)).item()
 
@@ -1209,6 +1214,7 @@ class Run:
         elif exp_part == "diff_parallel":
             self.model_load(model, path=save_path)
             model.build_user_prototype_cache(self.device,0.5, 0.5, user_batch=1024)
-            print("None_CDR model loaded")
+            print("None_CDR model loaded") 
+            # optimizer_diff: DiffParallel 의 파라미터만 포함, model에 있는 user/item embedding update X 
             self.Diff_Parallel(model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"])
             self.result_print(["diff_parallel"])

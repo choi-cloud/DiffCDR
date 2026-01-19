@@ -418,6 +418,9 @@ def diffusion_loss_fn_parallel(
             # final_output_m = int_weight * final_output_m 
             # final_output_g = conf_weight * final_output_g
             final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1))
+        elif model.parallel["set_aggr"] == "item_attn":
+            # ! 어텐션으로 최종 임베딩 종합
+            final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1),  query = torch.cat([iid_emb, iid_emb], dim=1))
 
         if model.parallel["set_proj"] == 1:
             final_output = model.get_al_emb(final_output).to(device)

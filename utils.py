@@ -83,12 +83,15 @@ class AttentionLayer(nn.Module):
         self.v = nn.Linear(in_dim, out_dim, bias=False)
         self.scale = in_dim**-0.5
 
-    def forward(self, x, mask=None):
+    def forward(self, x, mask=None, query=None):
         """
         x: (B, T, D)
         mask: (B, T) or None
         """
-        Q = self.q(x)
+        if query is not None: 
+            Q = self.q(query)
+        else: 
+            Q = self.q(x)
         K = self.k(x)
         V = self.v(x)
 
