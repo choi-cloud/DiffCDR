@@ -83,19 +83,16 @@ class Run:
             "lacdr_rmse": 10,
         }
 
-        self.use_vbge = bool(config.get("use_vbge", 1))
-        self.vbge_opt = {
-            "GNN": config["vbge_GNN"],  # num of layers
-            "dropout": config["vbge_drouout"],
-            "feature_dim": self.emb_dim,  # MF 임베딩 차원 사용
-            "hidden_dim": config["vbge_hidden_dim"],
-            "leakey": config["vbge_leakey"],
-        }
         self.parallel_setting = {
             "set_loss": config["set_loss"],
             "set_init": config["set_init"],
             "set_proj": config["set_proj"],
             "set_aggr": config["set_aggr"],
+        }
+        self.rqvae_setting = {
+            "codebook_num": config["codebook_num"],
+            "codebook_size": config["codebook_size"],
+            "alpha_rq": config["alpha_rq"],
         }
 
         self.device = "cuda" if config["use_cuda"] else "cpu"
@@ -477,6 +474,7 @@ class Run:
         return data_iter
 
     def get_data(self):  # 데이터로더 생성하고 학습 단계별로 재사용.
+        print(f'src: {self.src_path}')
         print("========Reading data========")
         data_src = self.read_log_data(self.src_path, self.batchsize_src)
         print("src {} iter / batchsize = {} ".format(len(data_src), self.batchsize_src))
@@ -551,64 +549,41 @@ class Run:
         if graph_data is None:
             return None, None
 
-        if self.use_vbge:  # VBGE로 agg
-            gnn_attr = "t_gnn" if use_target else "s_gnn"
-            gnn_module = getattr(diff_model, gnn_attr, None)
-            if gnn_module is None:
-                return None, None
+        # 단순 2홉 aggr
+        # simple 2-hop aggregation (user -> items -> users) excluding 1-hop self contribution
+        uv_adj = graph_data["uv_adj"].to(self.device)
+        vu_adj = graph_data["vu_adj"].to(self.device)
+        if use_target:
+            user_feat = base_model.tgt_model.uid_embedding.weight.detach().to(self.device)
+        else:
+            user_feat = base_model.src_model.uid_embedding.weight.detach().to(self.device)
+        with torch.no_grad():
+            # 1-hop: items aggregate from users
+            item_msg = torch.sparse.mm(vu_adj, user_feat)  # [num_items, d]
 
-            uv_adj = graph_data["uv_adj"].to(self.device)
-            vu_adj = graph_data["vu_adj"].to(self.device)
+            # 2-hop: users aggregate from items
+            user_2hop = torch.sparse.mm(uv_adj, item_msg)  # [num_users, d]
 
-            if use_target:
-                user_feat = base_model.tgt_model.uid_embedding.weight.detach().to(self.device)
-                item_feat = base_model.tgt_model.iid_embedding.weight.detach().to(self.device)
-            else:
-                user_feat = base_model.src_model.uid_embedding.weight.detach().to(self.device)
-                item_feat = base_model.src_model.iid_embedding.weight.detach().to(self.device)
+            # remove self 1-hop contribution (user -> item -> user)
+            user_deg = torch.sparse.sum(uv_adj, dim=1).to_dense().unsqueeze(1)
+            user_2hop = user_2hop - user_deg * user_feat  # self-removal
 
-            was_training = gnn_module.training
-            # gnn_module.eval()
-            # with torch.no_grad():
-            user_emb, item_emb = gnn_module(user_feat, item_feat, uv_adj, vu_adj)
-            # if was_training:
-            # gnn_module.train()
-            return user_emb, item_emb
-        else:  # 단순 2홉 aggr
-            # simple 2-hop aggregation (user -> items -> users) excluding 1-hop self contribution
-            uv_adj = graph_data["uv_adj"].to(self.device)
-            vu_adj = graph_data["vu_adj"].to(self.device)
-            if use_target:
-                user_feat = base_model.tgt_model.uid_embedding.weight.detach().to(self.device)
-            else:
-                user_feat = base_model.src_model.uid_embedding.weight.detach().to(self.device)
-            with torch.no_grad():
-                # 1-hop: items aggregate from users
-                item_msg = torch.sparse.mm(vu_adj, user_feat)  # [num_items, d]
+            # count real 2-hop neighbors: user -> item -> other_users
+            item_deg = torch.sparse.sum(vu_adj, dim=1).to_dense()
+            item_other = torch.relu(item_deg - 1)  # max(deg-1, 0)
+            two_hop_counts = torch.sparse.mm(uv_adj, item_other[:, None]).to_dense()
 
-                # 2-hop: users aggregate from items
-                user_2hop = torch.sparse.mm(uv_adj, item_msg)  # [num_users, d]
+            # normalization (avoid division by zero)
+            norm = torch.where(two_hop_counts == 0, torch.ones_like(two_hop_counts), two_hop_counts)
 
-                # remove self 1-hop contribution (user -> item -> user)
-                user_deg = torch.sparse.sum(uv_adj, dim=1).to_dense().unsqueeze(1)
-                user_2hop = user_2hop - user_deg * user_feat  # self-removal
+            # final 2-hop embedding
+            user_emb = user_2hop / norm
 
-                # count real 2-hop neighbors: user -> item -> other_users
-                item_deg = torch.sparse.sum(vu_adj, dim=1).to_dense()
-                item_other = torch.relu(item_deg - 1)  # max(deg-1, 0)
-                two_hop_counts = torch.sparse.mm(uv_adj, item_other[:, None]).to_dense()
+            # fallback: if no 2-hop neighbors, keep original embedding
+            zero_mask = two_hop_counts.squeeze(1) == 0
+            user_emb[zero_mask] = user_feat[zero_mask]
 
-                # normalization (avoid division by zero)
-                norm = torch.where(two_hop_counts == 0, torch.ones_like(two_hop_counts), two_hop_counts)
-
-                # final 2-hop embedding
-                user_emb = user_2hop / norm
-
-                # fallback: if no 2-hop neighbors, keep original embedding
-                zero_mask = two_hop_counts.squeeze(1) == 0
-                user_emb[zero_mask] = user_feat[zero_mask]
-
-            return user_emb, None
+        return user_emb, None
 
     def compute_item_aggregation_popularity(self, base_model, graph_data, src_item_num):
         uv_adj = graph_data["uv_adj"].to(self.device)  # [num_users, num_items]
@@ -696,11 +671,6 @@ class Run:
                 smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model[0], model[1], tgt_graph, use_target=True)
                 model[1].smooth_user_emb_src = smooth_user_emb_src
                 model[1].smooth_user_emb_tgt = smooth_user_emb_tgt
-
-                conf_item_aggr, int_item_aggr = self.compute_item_aggregation_popularity(model[0], shared_graph, src_graph["item_ids"].shape[0])
-                model[1].conf_item_aggr = conf_item_aggr
-                model[1].int_item_aggr = int_item_aggr
-                model[1].item_popularity = self.item_popularity
 
                 for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                     model[0].eval()
@@ -802,12 +772,6 @@ class Run:
                 smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model[0], model[1], tgt_graph, use_target=True)
                 model[1].smooth_user_emb_src = smooth_user_emb_src
                 model[1].smooth_user_emb_tgt = smooth_user_emb_tgt
-                # item aggregation 
-                # TODO: # src/tgt graph 로 input 변경, p 가중치 수정 
-                conf_item_aggr, int_item_aggr = self.compute_item_aggregation_popularity(model[0], shared_graph, src_graph["item_ids"].shape[0]) 
-                model[1].conf_item_aggr = conf_item_aggr 
-                model[1].int_item_aggr = int_item_aggr 
-                model[1].item_popularity = self.item_popularity
 
             task_loss_ls = []
             for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
@@ -1076,9 +1040,8 @@ class Run:
                 self.diff_sample_steps,
                 self.diff_task_lambda,
                 self.diff_mask_rate,
-                self.vbge_opt,
-                use_vbge=self.use_vbge,
                 parallel=self.parallel_setting,
+                rqvae=self.rqvae_setting,
             )
             diff_model = diff_model.cuda() if self.use_cuda else diff_model
 

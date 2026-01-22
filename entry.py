@@ -27,23 +27,20 @@ def prepare_1():
 
     parser.add_argument("--root", default="./")
     parser.add_argument("--exp_part", default="None_CDR")
-    parser.add_argument("--save_path", default="./model_save_default/model")
+    parser.add_argument("--save_path", default="/home/shared/cjp/model_save_default/model")
     parser.add_argument("--use_cuda", default=1)
     parser.add_argument("--experiment", default="DiffCDR")
 
-    # VBGE
-    parser.add_argument("--vbge_GNN", type=int, default=2, help="GNN layer.")
-    parser.add_argument("--vbge_drouout", type=float, default=0.3, help="GNN layer dropout rate.")
-    parser.add_argument("--vbge_feature_dim", type=int, default=128, help="Initialize network embedding dimension.")
-    parser.add_argument("--vbge_hidden_dim", type=int, default=128, help="GNN network hidden embedding dimension.")
-    parser.add_argument("--vbge_leakey", type=float, default=0.1)
-    parser.add_argument("--use_vbge", type=int, default=0, help="Use VBGE aggregation (1) or simple 2-hop (0).")
-
     # parallel setting
     parser.add_argument("--set_loss", type=int, default=0, help="loss 계산, 0: MF, 1: aggr, 2: avg, 3: 따로따로")
-    parser.add_argument("--set_init", type=int, default=1, help="디퓨전2의 초기 x_T 설정, 0: MF, 1: aggr, 2: avg")
+    parser.add_argument("--set_init", type=int, default=1, help="디퓨전2의 초기 x_T 설정, 0: MF, 1: aggr")
     parser.add_argument("--set_proj", type=int, default=1, help="diff 결과 proj 위치 - 0: 따로, 1: aggr 이후 같이")
-    parser.add_argument("--set_aggr", type=str, default="attn", help="두 디퓨전 모델 아웃풋 aggregation 방법, [avg, add, concat]")
+    parser.add_argument("--set_aggr", type=str, default="item_cls", help="두 디퓨전 모델 아웃풋 aggregation 방법, [attn, item_attn, item_cls]")
+
+    # RQVAE(code_dim=input_dim, num_levels=4, codebook_size=256)
+    parser.add_argument("--codebook_num", type=int, default=4, help="RQVAE 코드북 개수(level)")
+    parser.add_argument("--codebook_size", type=int, default=256, help="RQVAE 코드북 크기")
+    parser.add_argument("--alpha_rq", type=float, default=1e-2, help="RQVAE loss 가중치")
 
     # item cond
     parser.add_argument('--item_cond', type=bool, default=False, help='아이템 조건 사용 여부')
@@ -67,17 +64,14 @@ def prepare_2(args, config_path):
         config["lr"] = args.lr
         config["la_lr"] = args.la_lr
         config["diff_lr"] = args.diff_lr
-        config["vbge_GNN"] = args.vbge_GNN
-        config["vbge_drouout"] = args.vbge_drouout
-        config["vbge_feature_dim"] = args.vbge_feature_dim
-        config["vbge_hidden_dim"] = args.vbge_hidden_dim
-        config["vbge_leakey"] = args.vbge_leakey
-        config["use_vbge"] = int(args.use_vbge)
         config["set_loss"] = int(args.set_loss)
         config["set_init"] = int(args.set_init)
         config["set_proj"] = int(args.set_proj)
         config["set_aggr"] = args.set_aggr
         config['item_cond'] = args.item_cond
+        config["codebook_num"] = args.codebook_num
+        config["codebook_size"] = args.codebook_size
+        config["alpha_rq"] = args.alpha_rq
 
     return config
 
@@ -88,7 +82,7 @@ if __name__ == "__main__":
     config_path = args.root + "config.json"
 
     config = prepare_2(args, config_path)
-    config["root"] = args.root + "data/"
+    # config["root"] = args.root + "data/"
     config["use_cuda"] = 0 if args.use_cuda == "0" else 1
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
@@ -126,13 +120,12 @@ if __name__ == "__main__":
     write(f"✅ Task  {args.task}")
     write(f"✅ Ratio {args.ratio}")
     write(f"✅ Model {args.exp_part}")
-    write(f"✅ VBGE  {args.use_vbge}")
     write(f"✅ Item  {args.item_cond}")
 
     if args.exp_part == "diff_parallel":
-        set_init = ["MF로 초기화", "Aggr로 초기화", "MF+Aggr 평균으로 초기화", "DiffCDR에 cond만 agg로", "DIM에도 cond 양자화"]
+        set_init = ["MF로 초기화", "Aggr로 초기화", ]
         set_loss = ["둘 다 MF", "둘 다 Aggr", "둘 다 MF+Aggr 평균", "따로따로"]
-        set_proj = ["따로 Proj", "합치고 proj"]
+        set_proj = ["따로 Proj", "합치고 proj", "안 함"]
 
         write(f"⭐ Diff2 초기화  : ({args.set_init}) x_T = {set_init[args.set_init]}")
         write(f"⭐ Diff loss 계산: ({args.set_loss}) {set_loss[args.set_loss]}")

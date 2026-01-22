@@ -234,40 +234,28 @@ class MFBasedModel(torch.nn.Module):
 
             tgt_uid, iid_input, y_input = x
 
-            tgt_emb1 = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze().detach()  # MF feature
-            tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)
-
+            tgt_emb1 = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF 
+            tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True) # Aggr
            
-            # 조건 1: MF 기반 유저 임베딩, 조건 2: VBGE 기반 유저 임베딩
-            src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze().detach()
-            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
+            # Diff1: MF 유저 임베딩, Diff2: Aggr 유저 임베딩
+            src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze() # MF
+            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False) # Aggr
             
             if item_cond==True:
                 top_proto, bottom_proto = self.get_top_bottom_item_prototypes(tgt_uid)
-                top_proto_u = self.proto_to_cond(top_proto)
-                bottom_proto_u = self.proto_to_cond(bottom_proto)
-
-                alpha_top = torch.sigmoid(self.alpha_top).unsqueeze(0)
-                alpha_bot = torch.sigmoid(self.alpha_bot).unsqueeze(0)
-
-                src_uid_emb1 = alpha_top * src_uid_emb1 + (1 - alpha_top) * top_proto_u
-                src_uid_emb2 = alpha_bot * src_uid_emb2 + (1 - alpha_bot) * bottom_proto_u
+                cond_emb1 = top_proto
+                cond_emb2 = bottom_proto
+            else:
+                cond_emb1 = src_uid_emb1
+                cond_emb2 = src_uid_emb2
 
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
             
             # ! mf 임베딩과 aggr 임베딩 양자화
-            if diff_model.parallel["set_aggr"] == "pop_attn":
-                int_item_aggr = diff_model.int_item_aggr[tgt_uid.unsqueeze(1)].squeeze()
-                conf_item_aggr = diff_model.conf_item_aggr[tgt_uid.unsqueeze(1)].squeeze()
-                quantized, all_level_vectors1, rq_loss1 = self.rq_mf(int_item_aggr)  # [L, B, D]
-                quantized, all_level_vectors2, rq_loss2 = self.rq_aggr(conf_item_aggr)  # [L, B, D]
-            else: 
-                quantized, all_level_vectors1, rq_loss1 = self.rq_mf(src_uid_emb1)
-                quantized, all_level_vectors2, rq_loss2 = self.rq_aggr(src_uid_emb2)
+            quantized, all_level_vectors1, rq_loss1 = diff_model.rq_mf(cond_emb1)
+            quantized, all_level_vectors2, rq_loss2 = diff_model.rq_aggr(cond_emb2)
 
-            conf_weight = diff_model.item_popularity[iid_input]
-            # int_weight = 1 - conf_weight
-
+            # is_task=False: 노이즈 예측 , is_task=True: ALS + task 로스
             loss = Diff.diffusion_loss_fn_parallel(
                 diff_model,
                 tgt_emb1,
@@ -282,46 +270,33 @@ class MFBasedModel(torch.nn.Module):
                 # ! is_taks가 True일 때만 양자화된 컨디션을 시간축에 따라 이용
                 q_embs1=all_level_vectors1,
                 q_embs2=all_level_vectors2,
-                pop=conf_weight,
             )
 
-            alpha_rq = 1e-2
-            total_loss = loss + alpha_rq * (rq_loss1 + rq_loss2)
-            return total_loss  # is_task=False: 노이즈 예측 , is_task=True: ALS, pred 로스
+            total_loss = loss + diff_model.rqvae["alpha_rq"] * (rq_loss1 + rq_loss2)
+            return total_loss  
 
         elif stage == "test_diff_parallel":  # DiffParallel - test
 
             tgt_uid, iid_input, _ = x
 
-            src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
-            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
+            src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze() # MF
+            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False) # Aggr
 
             if item_cond==True:
                 top_proto, bottom_proto = self.get_top_bottom_item_prototypes(tgt_uid)
-                top_proto_u = self.proto_to_cond(top_proto)
-                bottom_proto_u = self.proto_to_cond(bottom_proto)
-
-
-                alpha_top = torch.sigmoid(self.alpha_top).unsqueeze(0)
-                alpha_bot = torch.sigmoid(self.alpha_bot).unsqueeze(0)
-
-                src_uid_emb1 = alpha_top * src_uid_emb1 + (1 - alpha_top) * top_proto_u
-                src_uid_emb2 = alpha_bot * src_uid_emb2 + (1 - alpha_bot) * bottom_proto_u
+                cond_emb1 = top_proto
+                cond_emb2 = bottom_proto
+            else:
+                cond_emb1 = src_uid_emb1
+                cond_emb2 = src_uid_emb2
 
             # ! mf 임베딩과 aggr 임베딩 양자화
-            if diff_model.parallel["set_aggr"] == "pop_attn":
-                int_item_aggr = diff_model.int_item_aggr[tgt_uid.unsqueeze(1)].squeeze()
-                conf_item_aggr = diff_model.conf_item_aggr[tgt_uid.unsqueeze(1)].squeeze()
-                quantized, all_level_vectors1, _ = self.rq_mf(int_item_aggr)  # [L, B, D]
-                quantized, all_level_vectors2, _ = self.rq_aggr(conf_item_aggr)  # [L, B, D]
-            else: 
-                quantized, all_level_vectors1, _ = self.rq_mf(src_uid_emb1)  # [L, B, D]
-                quantized, all_level_vectors2, _ = self.rq_aggr(src_uid_emb2)  # [L, B, D]
+            quantized, all_level_vectors1, _ = diff_model.rq_mf(cond_emb1)  # [L, B, D]
+            quantized, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
 
-            # TODO item 임베딩은 MF 임베딩을 공유?
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
-            # iid_emb = self._fetch_vbge_item_embedding(diff_model, iid_input)
 
+            ### [TEST] 1️. Diff1, Diff2 noised x_0 설정에 따라 denoising 
             if diff_model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
                 trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(
                     diff_model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0
@@ -330,64 +305,36 @@ class MFBasedModel(torch.nn.Module):
                     diff_model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1
                 )  # 디노이징 된 user emb_g / item emb
 
-            elif diff_model.parallel["set_init"] == 1 or diff_model.parallel["set_init"] == 4:  # 각각 MF, Aggr
+            elif diff_model.parallel["set_init"] == 1:  # 각각 MF, Aggr
                 # ! 각각 MF, Aggr인 파트만 수정
                 trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(
-                    diff_model, all_level_vectors1, all_level_vectors1, iid_emb, device, diff_id=0
+                    diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0
                 )  # 디노이징 된 user emb_m / item emb
                 trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(
-                    diff_model, all_level_vectors2, all_level_vectors2, iid_emb, device, diff_id=1
+                    diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1
                 )  # 디노이징 된 user emb_g / item emb
 
-            elif diff_model.parallel["set_init"] == 2:  # x_0 둘다 MF + Aggr로
-                start = (all_level_vectors1 + all_level_vectors2) / 2
-                trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(
-                    diff_model, start, all_level_vectors1, iid_emb, device, diff_id=0
-                )  # 디노이징 된 user emb_m / item emb
-                trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(
-                    diff_model, start, all_level_vectors2, iid_emb, device, diff_id=1
-                )  # 디노이징 된 user emb_g / item emb
-
-            elif diff_model.parallel["set_init"] == 3:  # x_0 둘다 Aggr로
-                trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(
-                    diff_model, cond_emb2, cond_emb2, iid_emb, device, diff_id=0
-                )  # 디노이징 된 user emb_m / item emb
-                trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(
-                    diff_model, cond_emb2, cond_emb2, iid_emb, device, diff_id=1
-                )  # 디노이징 된 user emb_g / item emb
-
-            # final output = x'_c + x'_g
-            # TODO 두 디퓨전 모델의 아웃풋 결합 방법 ?
-            if diff_model.parallel["set_aggr"] == "avg":
-                trans_emb = (trans_emb_m + trans_emb_g) / 2
-            elif diff_model.parallel["set_aggr"] == "concat":
-                trans_emb = torch.cat([trans_emb_m, trans_emb_g], dim=1)
-            elif diff_model.parallel["set_aggr"] == "aggonly":
-                trans_emb = trans_emb_g
-            elif diff_model.parallel["set_aggr"] == "attn":
+            ### [TEST] 2. Diff1, Diff2 결과 aggregation 
+            if diff_model.parallel["set_aggr"] == "attn":
                 # ! 어텐션으로 최종 임베딩 종합 
                 trans_emb = diff_model.attn_layer(torch.cat([trans_emb_m, trans_emb_g], dim=1))
-            elif diff_model.parallel["set_aggr"] == "pop": 
-                # m -> int, g -> conf 
-                conf_weight = diff_model.item_popularity[iid_input]
-                int_weight = 1 - conf_weight
-                trans_emb = int_weight * trans_emb_m + conf_weight * trans_emb_g
-            elif diff_model.parallel["set_aggr"] == "pop_attn":
-                # conf_weight = diff_model.item_popularity[iid_input]
-                # int_weight = 1 - conf_weight
-                
-                # trans_emb_m = int_weight * trans_emb_m 
-                # trans_emb_g = conf_weight * trans_emb_g
-                trans_emb = diff_model.attn_layer(torch.cat([trans_emb_m, trans_emb_g], dim=1)) 
+
             elif diff_model.parallel["set_aggr"] == "item_attn":
-                # ! 어텐션으로 최종 임베딩 종합
+                # 아이템을 쿼리로 사용
                 trans_emb = diff_model.attn_layer(torch.cat([trans_emb_m, trans_emb_g], dim=1),  query = torch.cat([iid_emb, iid_emb], dim=1))
-
-
+            
+            elif diff_model.parallel["set_aggr"] == "item_cls":
+                # 아이템 포함해서 self attn -> 아이템 출력만 사용 
+                final_output = torch.stack([iid_emb, trans_emb_m, trans_emb_g], dim=1)
+                trans_emb = diff_model.attn_layer(final_output)
+                trans_emb = trans_emb[:, 0, :]
+            
+            ### [TEST] 3. ALM 모듈 통과 
             if diff_model.parallel["set_proj"] == 1:
                 trans_emb = diff_model.get_al_emb(trans_emb).to(device)
 
-            x = torch.sum(trans_emb * iid_emb, dim=1)  # user, item emb 곱해서 예측
+            ### [TEST] 4. rating 예측 
+            x = torch.sum(trans_emb * iid_emb, dim=1)  # user, item emb 내적해서 예측
 
             return x
 

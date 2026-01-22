@@ -58,7 +58,7 @@ class ResidualQuantizer(nn.Module):
             residual = residual - chosen
 
             # 간단한 commitment loss (residual이 너무 크지 않도록)
-            rq_loss = rq_loss + F.mse_loss(residual.detach(), torch.zeros_like(residual))
+            rq_loss = rq_loss + F.mse_loss(residual, torch.zeros_like(residual))
 
         # [L, B, D]
         all_level_vectors = torch.stack(all_level_vectors, dim=0)

@@ -102,3 +102,18 @@ class AttentionLayer(nn.Module):
         attn = F.softmax(score, dim=-1)
         out = torch.matmul(attn, V)  # (B, T, D)
         return out
+
+class SimilarityProjector(nn.Module):
+    def __init__(self, out_dim=10):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(1, 32),
+            nn.ReLU(),
+            nn.Linear(32, out_dim)
+        )
+
+    def forward(self, iid_emb, trans_emb_m):
+        # cosine similarity (B, 1)
+        sim = F.cosine_similarity(iid_emb, trans_emb_m, dim=1, eps=1e-8).unsqueeze(1)
+        # (B, 10)
+        return self.proj(sim)
