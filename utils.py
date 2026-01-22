@@ -88,9 +88,9 @@ class AttentionLayer(nn.Module):
         x: (B, T, D)
         mask: (B, T) or None
         """
-        if query is not None: 
+        if query is not None:
             Q = self.q(query)
-        else: 
+        else:
             Q = self.q(x)
         K = self.k(x)
         V = self.v(x)
@@ -103,14 +103,11 @@ class AttentionLayer(nn.Module):
         out = torch.matmul(attn, V)  # (B, T, D)
         return out
 
+
 class SimilarityProjector(nn.Module):
     def __init__(self, out_dim=10):
         super().__init__()
-        self.proj = nn.Sequential(
-            nn.Linear(1, 32),
-            nn.ReLU(),
-            nn.Linear(32, out_dim)
-        )
+        self.proj = nn.Sequential(nn.Linear(1, 32), nn.ReLU(), nn.Linear(32, out_dim))
 
     def forward(self, iid_emb, trans_emb_m):
         # cosine similarity (B, 1)

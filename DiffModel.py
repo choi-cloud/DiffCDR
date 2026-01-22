@@ -168,8 +168,8 @@ class DiffParallel(nn.Module):
         # Parallel setting
         self.parallel = parallel
 
-        # RQVAE setting 
-        self.rqvae = rqvae 
+        # RQVAE setting
+        self.rqvae = rqvae
 
         # time, condition, noised emb -> reverse 하는 3FC diffusion solver
         self.diff_models = nn.ModuleList(
@@ -200,11 +200,11 @@ class DiffParallel(nn.Module):
         # linear for alm
         self.al_linear = nn.Linear(input_dim, input_dim, False)
 
-        if self.parallel["set_aggr"] in ['attn', 'item_attn']: 
-            self.attn_layer = AttentionLayer(in_dim=input_dim*2, out_dim=input_dim)
-        elif self.parallel["set_aggr"] == 'item_cls': 
+        if self.parallel["set_aggr"] in ["attn", "item_attn"]:
+            self.attn_layer = AttentionLayer(in_dim=input_dim * 2, out_dim=input_dim)
+        elif self.parallel["set_aggr"] == "item_cls":
             self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
-        
+
         self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
         self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
 
@@ -289,7 +289,17 @@ def diffusion_loss_fn(model, x_0, cond_emb, iid_emb, y_input, device, is_task): 
 
 
 def diffusion_loss_fn_parallel(
-    model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_emb, y_input, device, is_task, q_embs1=None, q_embs2=None, 
+    model,
+    x_0_m,
+    x_0_g,
+    cond_emb1,
+    cond_emb2,
+    iid_emb,
+    y_input,
+    device,
+    is_task,
+    q_embs1=None,
+    q_embs2=None,
 ):  # DIM(reconstruction) loss
 
     num_steps = model.num_steps
@@ -333,42 +343,42 @@ def diffusion_loss_fn_parallel(
         return F.smooth_l1_loss(e_m, output1) + F.smooth_l1_loss(e_g, output2)  # 예측 노이즈와 실제 노이즈 비교 L1 loss
 
     elif is_task:  # task loss ALM 수행
-        
-        ### [TRAIN-ALM] 1. noised x_0 설정에 따라 denoising 
+
+        ### [TRAIN-ALM] 1. noised x_0 설정에 따라 denoising
         if model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
-            final_output_m, iid_emb = p_sample_loop_parallel(
-                model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0
-            ) 
-            final_output_g, iid_emb = p_sample_loop_parallel(
-                model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1
-            ) 
+            final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0)
+            final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1)
         elif model.parallel["set_init"] == 1:  # 각각 MF, Aggr
             # ! 각각 MF, Aggr인 파트만 수정
-            final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, q_embs1, iid_emb, device, diff_id=0)  # 디노이징 된 user emb_m / item emb
-            final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb2, q_embs2, iid_emb, device, diff_id=1)  # 디노이징 된 user emb_g / item emb
+            final_output_m, iid_emb = p_sample_loop_parallel(
+                model, cond_emb1, q_embs1, iid_emb, device, diff_id=0
+            )  # 디노이징 된 user emb_m / item emb
+            final_output_g, iid_emb = p_sample_loop_parallel(
+                model, cond_emb2, q_embs2, iid_emb, device, diff_id=1
+            )  # 디노이징 된 user emb_g / item emb
 
-        ### [TRAIN-ALM] 2. Diff1, Diff2 결과 aggregation 
+        ### [TRAIN-ALM] 2. Diff1, Diff2 결과 aggregation
         if model.parallel["set_aggr"] == "attn":
             # ! 어텐션으로 최종 임베딩 종합
             final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1))
-        
-        elif model.parallel["set_aggr"] == "item_attn":
-            # 아이템을 쿼리로 사용 
-            final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1),  query = torch.cat([iid_emb, iid_emb], dim=1))
-        
-        elif model.parallel["set_aggr"] == "item_cls":
-            # 아이템 포함해서 self attn -> 아이템 출력만 사용 
-            final_output = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)  # (B, 3, D)
-            final_output = model.attn_layer(final_output) # (B, 3, D)
-            final_output = final_output[:, 0, :] # (B, D) iid_emb 토큰의 출력만 취함 
 
-        ### [TRAIN-ALM] 3. ALM 모듈 통과 
+        elif model.parallel["set_aggr"] == "item_attn":
+            # 아이템을 쿼리로 사용
+            final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1), query=torch.cat([iid_emb, iid_emb], dim=1))
+
+        elif model.parallel["set_aggr"] == "item_cls":
+            # 아이템 포함해서 self attn -> 아이템 출력만 사용
+            final_output = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)  # (B, 3, D)
+            final_output = model.attn_layer(final_output)  # (B, 3, D)
+            final_output = final_output[:, 0, :]  # (B, D) iid_emb 토큰의 출력만 취함
+
+        ### [TRAIN-ALM] 3. ALM 모듈 통과
         if model.parallel["set_proj"] == 1:
             final_output = model.get_al_emb(final_output).to(device)
 
-        ### [TRAIN-ALM] 4. rating 예측 
+        ### [TRAIN-ALM] 4. rating 예측
         y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
-        
+
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
         # RMSE
@@ -385,6 +395,7 @@ def diffusion_loss_fn_parallel(
             return (
                 F.smooth_l1_loss(x_0_m, final_output_m) + F.smooth_l1_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
             )  # ALM 로스 + task loss
+
 
 # generation fun
 def p_sample(model, cond_emb, x, iid_emb, device):  # ALM + task loss
@@ -436,10 +447,10 @@ def p_sample_loop(model, cond_emb, iid_input, device):
 def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):  # ALM + task loss
     """
     Docstring for p_sample_parallel
-    
+
     :param model: DiffParallel
-    :param cond_emb: condition 
-    :param x: Noised emb(x0) <- start emb 
+    :param cond_emb: condition
+    :param x: Noised emb(x0) <- start emb
     :param iid_emb: Description
     :param device: Description
     :param diff_id: MF(0), Aggr(1)
@@ -488,7 +499,7 @@ def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):  # ALM + ta
 def p_sample_loop_parallel(model, start_emb, cond_emb, iid_input, device, diff_id):
     """
     Docstring for p_sample_loop_parallel
-    
+
     :param model: DiffParallel
     :param start_emb: 소스 유저 임베딩(MF or Aggr) [B, D]
     :param cond_emb: L개 코드북 맵핑 결과 [L, B, D]
@@ -496,10 +507,5 @@ def p_sample_loop_parallel(model, start_emb, cond_emb, iid_input, device, diff_i
     :param device: device
     :param diff_id: MF(0), Aggr(1)
     """
-    cur_x, iid_emb_out = p_sample_parallel(model=model, 
-                                           cond_emb=cond_emb,
-                                           x=start_emb, 
-                                           iid_emb=iid_input, 
-                                           device=device, 
-                                           diff_id=diff_id)
+    cur_x, iid_emb_out = p_sample_parallel(model=model, cond_emb=cond_emb, x=start_emb, iid_emb=iid_input, device=device, diff_id=diff_id)
     return cur_x, iid_emb_out

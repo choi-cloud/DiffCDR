@@ -16,6 +16,7 @@ import json
 from utils import write
 import ast
 
+
 class Run:
     def __init__(self, config):
         self.use_cuda = config["use_cuda"]
@@ -40,7 +41,7 @@ class Run:
 
         self.batchsize_aug = self.batchsize_src
 
-        self.item_cond = config['item_cond']
+        self.item_cond = config["item_cond"]
         self.epoch = config["epoch"]
         self.emb_dim = config["emb_dim"]
         self.meta_dim = config["meta_dim"]
@@ -160,7 +161,7 @@ class Run:
                 y = y.cuda()
             dataset = TensorDataset(X, y)
             data_iter = DataLoader(dataset, batchsize, shuffle=shuffle)
-            print(f'test - target mean: {y.float().mean().item()} +- {y.float().std().item()}')
+            print(f"test - target mean: {y.float().mean().item()} +- {y.float().std().item()}")
             return data_iter
 
     def read_map_data(self, data_path):
@@ -192,8 +193,8 @@ class Run:
 
         dataset = TensorDataset(meta_uid, iid_input, y_input)
         data_iter = DataLoader(dataset, batch_size, shuffle=shuffle)
-        
-        print(f'data_diff - target mean: {y_input.float().mean().item()} +- {y_input.float().std().item()}')
+
+        print(f"data_diff - target mean: {y_input.float().mean().item()} +- {y_input.float().std().item()}")
         return data_iter
 
     def build_graph_inputs(self, data_path, include_users=None, exclude_users=None):
@@ -227,7 +228,7 @@ class Run:
             "item_ids": torch.unique(item_ids),
             "num_edges": user_ids.shape[0],
         }
-    
+
     def build_shared_train_graph(self, src_path, tgt_path, exclude_users=None):
         """Build a single graph using both train_src and train_tgt interactions (same CSV schema)."""
         src_interactions = pd.read_csv(src_path, header=None, usecols=[0, 1])
@@ -267,15 +268,15 @@ class Run:
 
     def compute_item_popularity(self, paths):
         """Count item frequency from given CSVs (col 1 = iid), clip to >=1, normalize by max."""
-        frames = [] # src train + tgt train 
+        frames = []  # src train + tgt train
         for p in paths:
             df = pd.read_csv(p, header=None, usecols=[1])
             df.columns = ["iid"]
             frames.append(df)
         if not frames:
             return None
-        counts = pd.concat(frames, ignore_index=True)["iid"].value_counts() # 각 iid 마다 등장 횟수 카운팅
-        full_counts = counts.reindex(range(self.iid_all + 1), fill_value=0).to_numpy() # iid 번호 순서대로 정렬 
+        counts = pd.concat(frames, ignore_index=True)["iid"].value_counts()  # 각 iid 마다 등장 횟수 카운팅
+        full_counts = counts.reindex(range(self.iid_all + 1), fill_value=0).to_numpy()  # iid 번호 순서대로 정렬
 
         # TODO 정규화 - src/tgt 따로 or 같이? (현재는 같이 한번에 정규화)
         max_count = full_counts.max() if full_counts.size > 0 else 0
@@ -284,7 +285,7 @@ class Run:
         full_counts = np.clip(full_counts, 1, max_count)
         pop_norm = full_counts / max_count
         return torch.tensor(pop_norm, dtype=torch.float32)
-    
+
     def build_shared_test_graph(self, data_path, include_users=None, exclude_users=None):
         """Build a single graph from test.csv (has pos_seq, but only uid/iid are used for edges)."""
         interactions = pd.read_csv(data_path, header=None)
@@ -317,11 +318,11 @@ class Run:
             "item_ids": torch.unique(item_ids),
             "num_edges": user_ids.shape[0],
         }
-    
+
     def build_test_graph_inputs(self, data_path, include_users=None, exclude_users=None):
         interactions = pd.read_csv(data_path, header=None)
         interactions.columns = ["uid", "iid", "y", "pos_seq"]
-        
+
         if include_users is not None:
             include_users = set(include_users)
             interactions = interactions[interactions["uid"].isin(include_users)]
@@ -334,11 +335,11 @@ class Run:
 
         user_list = []
         item_list = []
-        MAX_POS = 20 # history 길이 제한 
+        MAX_POS = 20  # history 길이 제한
 
-        # 🔑 핵심: user 단위로 그룹핑 -> test_user 별로 pos_seq 한번씩만 추가 
+        # 🔑 핵심: user 단위로 그룹핑 -> test_user 별로 pos_seq 한번씩만 추가
         for uid, group in interactions.groupby("uid"):
-            pos_seq = ast.literal_eval(group.iloc[0]["pos_seq"]) # pos_seq는 user별로 모두 동일하므로 첫 row만 사용
+            pos_seq = ast.literal_eval(group.iloc[0]["pos_seq"])  # pos_seq는 user별로 모두 동일하므로 첫 row만 사용
 
             if not pos_seq:
                 continue
@@ -355,18 +356,10 @@ class Run:
         edge_values = torch.ones(len(user_ids), dtype=torch.float32)
 
         uv_indices = torch.stack([user_ids, item_ids])
-        uv_adj = torch.sparse_coo_tensor(
-            uv_indices,
-            edge_values,
-            size=(self.uid_all, self.iid_all + 1)
-        ).coalesce()
+        uv_adj = torch.sparse_coo_tensor(uv_indices, edge_values, size=(self.uid_all, self.iid_all + 1)).coalesce()
 
         vu_indices = torch.stack([item_ids, user_ids])
-        vu_adj = torch.sparse_coo_tensor(
-            vu_indices,
-            edge_values,
-            size=(self.iid_all + 1, self.uid_all)
-        ).coalesce()
+        vu_adj = torch.sparse_coo_tensor(vu_indices, edge_values, size=(self.iid_all + 1, self.uid_all)).coalesce()
 
         return {
             "uv_adj": uv_adj,
@@ -375,7 +368,7 @@ class Run:
             "item_ids": torch.unique(item_ids),
             "num_edges": user_ids.shape[0],
         }
-    
+
     def read_ss_data(self, data_path):
         """ """
         cols = ["uid", "iid", "y", "pos_seq"]
@@ -474,7 +467,7 @@ class Run:
         return data_iter
 
     def get_data(self):  # 데이터로더 생성하고 학습 단계별로 재사용.
-        print(f'src: {self.src_path}')
+        print(f"src: {self.src_path}")
         print("========Reading data========")
         data_src = self.read_log_data(self.src_path, self.batchsize_src)
         print("src {} iter / batchsize = {} ".format(len(data_src), self.batchsize_src))
@@ -510,16 +503,16 @@ class Run:
         test_users = test_users_df[0].tolist()
 
         # item popularity on train src+tgt (normalized)
-        self.item_popularity = self.compute_item_popularity([self.src_path, self.tgt_path]).cuda() 
+        self.item_popularity = self.compute_item_popularity([self.src_path, self.tgt_path]).cuda()
 
-        graph_src_train = self.build_graph_inputs(self.src_path) # 전체 그래프 생성 
+        graph_src_train = self.build_graph_inputs(self.src_path)  # 전체 그래프 생성
         graph_tgt_train = self.build_graph_inputs(self.tgt_path, exclude_users=test_users)
 
-        graph_src_test = graph_src_train  # train, test graph 동일 
-        graph_tgt_test = graph_tgt_train  # tgt_test는 안 쓰임 
+        graph_src_test = graph_src_train  # train, test graph 동일
+        graph_tgt_test = graph_tgt_train  # tgt_test는 안 쓰임
 
         graph_shared_train = self.build_shared_train_graph(self.src_path, self.tgt_path, exclude_users=test_users)
-        graph_shared_test = self.build_shared_test_graph(self.test_path) # pos seq 와 그래프 생성 -> test user가 인터랙션한 source items.
+        graph_shared_test = self.build_shared_test_graph(self.test_path)  # pos seq 와 그래프 생성 -> test user가 인터랙션한 source items.
 
         def _print_graph_stats(name, graph):
             if graph is None:
@@ -588,14 +581,14 @@ class Run:
     def compute_item_aggregation_popularity(self, base_model, graph_data, src_item_num):
         uv_adj = graph_data["uv_adj"].to(self.device)  # [num_users, num_items]
 
-        # MF item embedding 
-        src_item_feat = base_model.src_model.iid_embedding.weight.detach().to(self.device)[:src_item_num] # [num_items, emb_dim] 
-        tgt_item_feat = base_model.tgt_model.iid_embedding.weight.detach().to(self.device)[src_item_num:] # [num_items, emb_dim] 
-        item_feat = torch.cat([src_item_feat, tgt_item_feat], dim=0) # [num_items, emb_dim]   
+        # MF item embedding
+        src_item_feat = base_model.src_model.iid_embedding.weight.detach().to(self.device)[:src_item_num]  # [num_items, emb_dim]
+        tgt_item_feat = base_model.tgt_model.iid_embedding.weight.detach().to(self.device)[src_item_num:]  # [num_items, emb_dim]
+        item_feat = torch.cat([src_item_feat, tgt_item_feat], dim=0)  # [num_items, emb_dim]
 
-        # item popularity 
+        # item popularity
         conf_weight = self.item_popularity.to(self.device).unsqueeze(1)  # [num_items, 1]
-        int_weight = torch.ones_like(conf_weight)-conf_weight
+        int_weight = torch.ones_like(conf_weight) - conf_weight
 
         with torch.no_grad():
             # popularity-weighted item embedding
@@ -607,8 +600,8 @@ class Run:
             user_agg_int = torch.sparse.mm(uv_adj, item_feat_int)  # [num_users, d]
 
             # normalization term: sum of item popularities per user
-            pop_sum_conf = torch.sparse.mm(uv_adj, conf_weight).clamp(min=1e-8)  # [num_users, 1] # 이웃 item들의 pop sum으로 정규화 
-            pop_sum_int = torch.sparse.mm(uv_adj, int_weight).clamp(min=1e-8)    # [num_users, 1] # 이웃 item들의 pop sum으로 정규화 
+            pop_sum_conf = torch.sparse.mm(uv_adj, conf_weight).clamp(min=1e-8)  # [num_users, 1] # 이웃 item들의 pop sum으로 정규화
+            pop_sum_int = torch.sparse.mm(uv_adj, int_weight).clamp(min=1e-8)  # [num_users, 1] # 이웃 item들의 pop sum으로 정규화
 
             user_emb_conf = user_agg_conf / pop_sum_conf
             user_emb_int = user_agg_int / pop_sum_int
@@ -705,8 +698,8 @@ class Run:
 
         targets = torch.tensor(targets).float()
         predicts = torch.tensor(predicts)
-        print(f'Target mean: {targets.mean().item()} +- {targets.std().item()}')
-        print(f'Predic mean: {predicts.mean().item()} +- {predicts.std().item()}')
+        print(f"Target mean: {targets.mean().item()} +- {targets.std().item()}")
+        print(f"Predic mean: {predicts.mean().item()} +- {predicts.std().item()}")
 
         return loss(targets, predicts).item(), torch.sqrt(mse_loss(targets, predicts)).item()
 
@@ -777,13 +770,13 @@ class Run:
             for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                 model[1].train()
                 # diff first, then task
-                loss = model[0](X, stage, self.device, diff_model=model[1], is_task=False,  item_cond=self.item_cond)
+                loss = model[0](X, stage, self.device, diff_model=model[1], is_task=False, item_cond=self.item_cond)
                 model[1].zero_grad()
                 loss.backward()
                 _ = torch.nn.utils.clip_grad_norm_(model[1].parameters(), 1.0)
                 optimizer.step()
 
-                task_loss = model[0](X, stage, self.device, diff_model=model[1], is_task=True,  item_cond=self.item_cond)
+                task_loss = model[0](X, stage, self.device, diff_model=model[1], is_task=True, item_cond=self.item_cond)
                 model[1].zero_grad()
                 task_loss.backward()
                 _ = torch.nn.utils.clip_grad_norm_(model[1].parameters(), 1.0)
@@ -845,15 +838,10 @@ class Run:
             pos_iid = X[:, 1]
 
             # negative sampling
-            neg_iid = torch.randint(
-                low=0,
-                high=self.iid_all,
-                size=pos_iid.size(),
-                device=pos_iid.device
-            )
+            neg_iid = torch.randint(low=0, high=self.iid_all, size=pos_iid.size(), device=pos_iid.device)
 
             # embeddings
-            if stage == 'src':
+            if stage == "src":
                 user_emb = model.src_model.uid_embedding(uid)
                 pos_item_emb = model.src_model.iid_embedding(pos_iid)
                 neg_item_emb = model.src_model.iid_embedding(neg_iid)
@@ -898,10 +886,10 @@ class Run:
 
     def LightGCN_BPR(self, model, graph, optimizer, stage, num_layers=2):
         model.train()
-        uv_adj = graph['uv_adj'].to(self.device)
-        vu_adj = graph['vu_adj'].to(self.device)
+        uv_adj = graph["uv_adj"].to(self.device)
+        vu_adj = graph["vu_adj"].to(self.device)
 
-        if stage == 'src':
+        if stage == "src":
             user_emb = model.src_model.uid_embedding.weight
             item_emb = model.src_model.iid_embedding.weight
         else:
@@ -912,19 +900,19 @@ class Run:
         u_g, i_g = self.lightgcn_propagate(user_emb, item_emb, uv_adj, vu_adj, num_layers)
 
         # sample edges
-        users = graph['user_ids'].to(self.device)
+        users = graph["user_ids"].to(self.device)
         idx = torch.randint(0, users.shape[0], (self.batchsize_src,), device=self.device)
         u = users[idx]
 
         # positive items
         edges = uv_adj.indices()
         mask = torch.isin(edges[0], u)
-        pos_i = edges[1][mask][:u.shape[0]]
+        pos_i = edges[1][mask][: u.shape[0]]
 
         if pos_i.shape[0] < u.shape[0]:
             return torch.tensor(0.0, device=self.device)
 
-        pos_i = pos_i[:u.shape[0]]
+        pos_i = pos_i[: u.shape[0]]
         neg_i = torch.randint(0, self.iid_all, pos_i.shape, device=self.device)
 
         pos_score = (u_g[u] * i_g[pos_i]).sum(dim=1)
@@ -937,7 +925,6 @@ class Run:
         optimizer.step()
 
         return loss.detach()
-    
 
     def DataAug(self, model, data_aug, data_test, criterion, optimizer):
         write("=========DataAug========")
@@ -1080,74 +1067,46 @@ class Run:
             self.result_print(["tgt", "aug"])
             self.model_save(model, path=save_path)
 
-         #################### BPRMF #######################
-        if exp_part == 'BPRMF':
-            write('========== BPRMF ==========')
+        #################### BPRMF #######################
+        if exp_part == "BPRMF":
+            write("========== BPRMF ==========")
 
             # SRC domain BPR training
-            write('--- BPRMF on SRC domain ---')
+            write("--- BPRMF on SRC domain ---")
             for epoch in range(self.epoch):
-                loss = self.BPRMF(
-                    data_src,
-                    model,                 # ✅ 위에서 만든 model
-                    optimizer_src,         # ✅ 공통 optimizer
-                    stage='src'
-                )
-                write(f'[SRC][Epoch {epoch}] BPR Loss: {loss:.4f}')
+                loss = self.BPRMF(data_src, model, optimizer_src, stage="src")  # ✅ 위에서 만든 model  # ✅ 공통 optimizer
+                write(f"[SRC][Epoch {epoch}] BPR Loss: {loss:.4f}")
 
             # TGT domain BPR training
-            write('--- BPRMF on TGT domain ---')
+            write("--- BPRMF on TGT domain ---")
             for epoch in range(self.epoch):
-                loss = self.BPRMF(
-                    data_tgt,
-                    model,
-                    optimizer_tgt,
-                    stage='tgt'
-                )
-                mae, rmse = self.eval_mae(model, data_test, stage='test_tgt')
-                self.update_results(mae, rmse, 'tgt')
-                write(
-                    f'[TGT][Epoch {epoch}] '
-                    f'BPR Loss: {loss:.4f} | MAE {mae:.4f} RMSE {rmse:.4f}'
-                )
+                loss = self.BPRMF(data_tgt, model, optimizer_tgt, stage="tgt")
+                mae, rmse = self.eval_mae(model, data_test, stage="test_tgt")
+                self.update_results(mae, rmse, "tgt")
+                write(f"[TGT][Epoch {epoch}] " f"BPR Loss: {loss:.4f} | MAE {mae:.4f} RMSE {rmse:.4f}")
 
-            self.result_print(['tgt'])
-            self.model_save(model,path =  save_path )
+            self.result_print(["tgt"])
+            self.model_save(model, path=save_path)
 
         #################### LIGHT GCN #######################
-        if exp_part == 'LightGCN':
-            write('========== LightGCN ==========')
+        if exp_part == "LightGCN":
+            write("========== LightGCN ==========")
 
             # -------- SRC domain --------
-            write('--- LightGCN on SRC domain ---')
+            write("--- LightGCN on SRC domain ---")
             for epoch in range(self.epoch):
-                loss = self.LightGCN_BPR(
-                    model,
-                    graph_data['train']['src'],
-                    optimizer_src,
-                    stage='src',
-                    num_layers=2
-                )
-                write(f'[SRC][Epoch {epoch}] LightGCN BPR Loss: {loss:.4f}')
+                loss = self.LightGCN_BPR(model, graph_data["train"]["src"], optimizer_src, stage="src", num_layers=2)
+                write(f"[SRC][Epoch {epoch}] LightGCN BPR Loss: {loss:.4f}")
 
             # -------- TGT domain --------
-            write('--- LightGCN on TGT domain ---')
+            write("--- LightGCN on TGT domain ---")
             for epoch in range(self.epoch):
-                loss = self.LightGCN_BPR(
-                    model,
-                    graph_data['train']['tgt'],
-                    optimizer_tgt,
-                    stage='tgt',
-                    num_layers=2
-                )
-                mae, rmse = self.eval_mae(model, data_test, stage='test_tgt')
-                self.update_results(mae, rmse, 'tgt')
-                write(
-                    f'[TGT][Epoch {epoch}] '
-                    f'LightGCN BPR Loss: {loss:.4f} | MAE {mae:.4f} RMSE {rmse:.4f}'
-                )
+                loss = self.LightGCN_BPR(model, graph_data["train"]["tgt"], optimizer_tgt, stage="tgt", num_layers=2)
+                mae, rmse = self.eval_mae(model, data_test, stage="test_tgt")
+                self.update_results(mae, rmse, "tgt")
+                write(f"[TGT][Epoch {epoch}] " f"LightGCN BPR Loss: {loss:.4f} | MAE {mae:.4f} RMSE {rmse:.4f}")
 
-            self.result_print(['tgt'])
+            self.result_print(["tgt"])
             self.model_save(model, path=save_path)
 
         elif exp_part == "CDR":
@@ -1176,8 +1135,8 @@ class Run:
 
         elif exp_part == "diff_parallel":
             self.model_load(model, path=save_path)
-            model.build_user_prototype_cache(self.device,0.5, 0.5, user_batch=1024)
-            print("None_CDR model loaded") 
-            # optimizer_diff: DiffParallel 의 파라미터만 포함, model에 있는 user/item embedding update X 
+            model.build_user_prototype_cache(self.device, 0.5, 0.5, user_batch=1024)
+            print("None_CDR model loaded")
+            # optimizer_diff: DiffParallel 의 파라미터만 포함, model에 있는 user/item embedding update X
             self.Diff_Parallel(model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"])
             self.result_print(["diff_parallel"])

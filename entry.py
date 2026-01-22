@@ -43,8 +43,8 @@ def prepare_1():
     parser.add_argument("--alpha_rq", type=float, default=1e-2, help="RQVAE loss 가중치")
 
     # item cond
-    parser.add_argument('--item_cond', type=bool, default=False, help='아이템 조건 사용 여부')
-    
+    parser.add_argument("--item_cond", type=bool, default=False, help="아이템 조건 사용 여부")
+
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -68,7 +68,7 @@ def prepare_2(args, config_path):
         config["set_init"] = int(args.set_init)
         config["set_proj"] = int(args.set_proj)
         config["set_aggr"] = args.set_aggr
-        config['item_cond'] = args.item_cond
+        config["item_cond"] = args.item_cond
         config["codebook_num"] = args.codebook_num
         config["codebook_size"] = args.codebook_size
         config["alpha_rq"] = args.alpha_rq
@@ -123,7 +123,7 @@ if __name__ == "__main__":
     write(f"✅ Item  {args.item_cond}")
 
     if args.exp_part == "diff_parallel":
-        set_init = ["MF로 초기화", "Aggr로 초기화", ]
+        set_init = ["MF로 초기화", "Aggr로 초기화"]
         set_loss = ["둘 다 MF", "둘 다 Aggr", "둘 다 MF+Aggr 평균", "따로따로"]
         set_proj = ["따로 Proj", "합치고 proj", "안 함"]
 
