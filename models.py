@@ -311,6 +311,9 @@ class MFBasedModel(torch.nn.Module):
 
             elif diff_model.parallel["set_aggr"] == "item_cls":
                 # 아이템 포함해서 self attn -> 아이템 출력만 사용
+                trans_emb_m = diff_model.linear_m(trans_emb_m)
+                trans_emb_g = diff_model.linear_g(trans_emb_g)
+
                 final_output = torch.stack([iid_emb, trans_emb_m, trans_emb_g], dim=1)
                 trans_emb = diff_model.attn_layer(final_output)
                 trans_emb = trans_emb[:, 0, :]

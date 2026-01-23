@@ -107,7 +107,7 @@ if __name__ == "__main__":
     )
 
     print()
-    print("점수별로 얼마나 잘 맞추고 못 맞추는지를 봐보자")
+    print("복원된 tgt_mf와 tgt_aggr를 각각 원본 tgt_mf와 tgt_aggr와 가까워지도록 하는 로스 추가")
     print()
 
     logfile = utils.make_dir(f"{args.experiment}")

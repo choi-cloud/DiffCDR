@@ -200,6 +200,9 @@ class DiffParallel(nn.Module):
         # linear for alm
         self.al_linear = nn.Linear(input_dim, input_dim, False)
 
+        self.linear_m = nn.Linear(input_dim, input_dim, False)
+        self.linear_g = nn.Linear(input_dim, input_dim, False)
+
         if self.parallel["set_aggr"] in ["attn", "item_attn"]:
             self.attn_layer = AttentionLayer(in_dim=input_dim * 2, out_dim=input_dim)
         elif self.parallel["set_aggr"] == "item_cls":
@@ -364,6 +367,9 @@ def diffusion_loss_fn_parallel(
 
         elif model.parallel["set_aggr"] == "item_cls":
             # 아이템 포함해서 self attn -> 아이템 출력만 사용
+            final_output_m = model.linear_m(final_output_m)
+            final_output_g = model.linear_g(final_output_g)
+
             final_output = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)  # (B, 3, D)
             final_output = model.attn_layer(final_output)  # (B, 3, D)
             final_output = final_output[:, 0, :]  # (B, D) iid_emb 토큰의 출력만 취함
@@ -384,7 +390,8 @@ def diffusion_loss_fn_parallel(
 
         if model.parallel["set_loss"] == 0:
             # ! mf 임베딩과 유사해지도록 통일
-            return F.smooth_l1_loss(x_0_m, final_output) + model.task_lambda * task_loss
+            # return F.smooth_l1_loss(x_0_m, final_output) + model.task_lambda * task_loss
+            return F.smooth_l1_loss(x_0_m, final_output_m) + F.smooth_l1_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
         elif model.parallel["set_loss"] == 1:
             return F.smooth_l1_loss(x_0_g, final_output) + model.task_lambda * task_loss
         elif model.parallel["set_loss"] == 2:
