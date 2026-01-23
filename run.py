@@ -665,6 +665,9 @@ class Run:
                 model[1].smooth_user_emb_src = smooth_user_emb_src
                 model[1].smooth_user_emb_tgt = smooth_user_emb_tgt
 
+                y_all = []
+                mae_all = []
+
                 for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                     model[0].eval()
                     model[1].eval()
@@ -672,6 +675,16 @@ class Run:
                     y_input = X[-1]
                     targets.extend(y_input.squeeze(1).tolist())
                     predicts.extend(pred.tolist())
+
+                    mae = (pred.view(-1) - y_input.squeeze(1)).abs()
+                    y_all.append(y_input.squeeze(1).cpu())
+                    mae_all.append(mae.cpu())
+
+                y_all = torch.cat(y_all).numpy()
+                mae_all = torch.cat(mae_all).numpy()
+
+                df_score_summary = mae_summary_by_score(y_all, mae_all)
+                print(df_score_summary)
 
             elif stage in ("test_ss"):
                 for X, y in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
@@ -1140,3 +1153,57 @@ class Run:
             # optimizer_diff: DiffParallel 의 파라미터만 포함, model에 있는 user/item embedding update X
             self.Diff_Parallel(model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"])
             self.result_print(["diff_parallel"])
+
+
+def mae_hist_by_score(y_true: np.ndarray, mae: np.ndarray, mae_bins=None):  # (N,) ground-truth score, e.g. 1~5  # (N,) |pred - y|
+    """
+    score별 MAE bin 분포를 table로 반환
+    """
+    y_true = np.asarray(y_true).reshape(-1)
+    mae = np.asarray(mae).reshape(-1)
+
+    assert len(y_true) == len(mae)
+
+    if mae_bins is None:
+        # 기본: 0~3까지 0.05 간격 (필요하면 조절)
+        mae_bins = np.arange(0.0, 3.01, 0.05)
+
+    rows = []
+
+    for score in sorted(np.unique(y_true)):
+        mask = y_true == score
+        mae_s = mae[mask]
+
+        counts, edges = np.histogram(mae_s, bins=mae_bins)
+
+        for i in range(len(counts)):
+            if counts[i] == 0:
+                continue
+            rows.append(
+                {
+                    "score": int(score),
+                    "mae_min": edges[i],
+                    "mae_max": edges[i + 1],
+                    "count": int(counts[i]),
+                }
+            )
+
+    df = pd.DataFrame(rows)
+    return df
+
+
+def mae_summary_by_score(y_true, mae):
+    rows = []
+    for s in sorted(np.unique(y_true)):
+        m = mae[y_true == s]
+        rows.append(
+            {
+                "score": int(s),
+                "count": len(m),
+                "mae_mean": m.mean(),
+                "mae_median": np.median(m),
+                "mae_q75": np.quantile(m, 0.75),
+                "mae_q90": np.quantile(m, 0.90),
+            }
+        )
+    return pd.DataFrame(rows)

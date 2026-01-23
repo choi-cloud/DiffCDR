@@ -107,7 +107,7 @@ if __name__ == "__main__":
     )
 
     print()
-    print("model.get_al_emb도 빼고 그냥 tgt_mf랑 tgt_aggr를 더했을 때는")
+    print("점수별로 얼마나 잘 맞추고 못 맞추는지를 봐보자")
     print()
 
     logfile = utils.make_dir(f"{args.experiment}")
