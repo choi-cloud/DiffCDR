@@ -292,21 +292,13 @@ class MFBasedModel(torch.nn.Module):
 
             ### [TEST] 1️. Diff1, Diff2 noised x_0 설정에 따라 denoising
             if diff_model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
-                trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(
-                    diff_model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0
-                )  # 디노이징 된 user emb_m / item emb
-                trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(
-                    diff_model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1
-                )  # 디노이징 된 user emb_g / item emb
+                trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0)
+                trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1)
 
             elif diff_model.parallel["set_init"] == 1:  # 각각 MF, Aggr
                 # ! 각각 MF, Aggr인 파트만 수정
-                trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(
-                    diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0
-                )  # 디노이징 된 user emb_m / item emb
-                trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(
-                    diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1
-                )  # 디노이징 된 user emb_g / item emb
+                trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0)
+                trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1)
 
             ### [TEST] 2. Diff1, Diff2 결과 aggregation
             if diff_model.parallel["set_aggr"] == "attn":
@@ -322,10 +314,11 @@ class MFBasedModel(torch.nn.Module):
                 final_output = torch.stack([iid_emb, trans_emb_m, trans_emb_g], dim=1)
                 trans_emb = diff_model.attn_layer(final_output)
                 trans_emb = trans_emb[:, 0, :]
+                # trans_emb = trans_emb_m + trans_emb_g
 
             ### [TEST] 3. ALM 모듈 통과
-            if diff_model.parallel["set_proj"] == 1:
-                trans_emb = diff_model.get_al_emb(trans_emb).to(device)
+            # if diff_model.parallel["set_proj"] == 1:
+            #     trans_emb = diff_model.get_al_emb(trans_emb).to(device)
 
             ### [TEST] 4. rating 예측
             x = torch.sum(trans_emb * iid_emb, dim=1)  # user, item emb 내적해서 예측

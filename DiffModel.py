@@ -350,12 +350,8 @@ def diffusion_loss_fn_parallel(
             final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1)
         elif model.parallel["set_init"] == 1:  # 각각 MF, Aggr
             # ! 각각 MF, Aggr인 파트만 수정
-            final_output_m, iid_emb = p_sample_loop_parallel(
-                model, cond_emb1, q_embs1, iid_emb, device, diff_id=0
-            )  # 디노이징 된 user emb_m / item emb
-            final_output_g, iid_emb = p_sample_loop_parallel(
-                model, cond_emb2, q_embs2, iid_emb, device, diff_id=1
-            )  # 디노이징 된 user emb_g / item emb
+            final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, q_embs1, iid_emb, device, diff_id=0)
+            final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb2, q_embs2, iid_emb, device, diff_id=1)
 
         ### [TRAIN-ALM] 2. Diff1, Diff2 결과 aggregation
         if model.parallel["set_aggr"] == "attn":
@@ -371,16 +367,18 @@ def diffusion_loss_fn_parallel(
             final_output = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)  # (B, 3, D)
             final_output = model.attn_layer(final_output)  # (B, 3, D)
             final_output = final_output[:, 0, :]  # (B, D) iid_emb 토큰의 출력만 취함
+            # final_output = final_output_m + final_output_g
 
         ### [TRAIN-ALM] 3. ALM 모듈 통과
-        if model.parallel["set_proj"] == 1:
-            final_output = model.get_al_emb(final_output).to(device)
+        # if model.parallel["set_proj"] == 1:
+        #     final_output = model.get_al_emb(final_output).to(device)
 
         ### [TRAIN-ALM] 4. rating 예측
         y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
 
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
+
         # RMSE
         # task_loss =   (y_pred - y_input.squeeze().float()).square().sum().sqrt() / y_pred.shape[0]
 

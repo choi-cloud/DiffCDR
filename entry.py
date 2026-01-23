@@ -106,6 +106,10 @@ if __name__ == "__main__":
         )
     )
 
+    print()
+    print("model.get_al_emb도 빼고 그냥 tgt_mf랑 tgt_aggr를 더했을 때는")
+    print()
+
     logfile = utils.make_dir(f"{args.experiment}")
     logging.basicConfig(
         format="%(asctime)s - %(filename)s[line:%(lineno)d] - %(levelname)s: %(message)s",
