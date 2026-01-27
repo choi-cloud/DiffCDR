@@ -203,6 +203,10 @@ class DiffParallel(nn.Module):
         self.linear_m = nn.Linear(input_dim, input_dim, False)
         self.linear_g = nn.Linear(input_dim, input_dim, False)
 
+        self.ln_iid = nn.LayerNorm(input_dim)
+        self.ln_m = nn.LayerNorm(input_dim)
+        self.ln_g = nn.LayerNorm(input_dim)
+
         if self.parallel["set_aggr"] in ["attn", "item_attn"]:
             self.attn_layer = AttentionLayer(in_dim=input_dim * 2, out_dim=input_dim)
         elif self.parallel["set_aggr"] == "item_cls":
@@ -372,8 +376,9 @@ def diffusion_loss_fn_parallel(
             final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1), query=torch.cat([iid_emb, iid_emb], dim=1))
 
         elif model.parallel["set_aggr"] == "item_cls":
-            final_output_m = model.linear_m(final_output_m)
-            final_output_g = model.linear_g(final_output_g)
+            iid_emb = model.ln_iid(iid_emb)
+            final_output_m = model.ln_m(model.linear_m(final_output_m))
+            final_output_g = model.ln_g(model.linear_g(final_output_g))
 
             uid = uid.long()  # (B,)
 

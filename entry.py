@@ -107,7 +107,7 @@ if __name__ == "__main__":
     )
 
     print()
-    print("유저의 레이팅 스타일(bias) 정보를 추가한다면?")
+    print("레이어 정규화 모두 추가")
     print()
 
     logfile = utils.make_dir(f"{args.experiment}")

@@ -311,10 +311,12 @@ class MFBasedModel(torch.nn.Module):
 
             elif diff_model.parallel["set_aggr"] == "item_cls":
                 # 아이템 포함해서 self attn -> 아이템 출력만 사용
-                trans_emb_m = diff_model.linear_m(trans_emb_m)
-                trans_emb_g = diff_model.linear_g(trans_emb_g)
+                iid_emb = diff_model.ln_iid(iid_emb)
+                trans_emb_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
+                trans_emb_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
 
                 uid = tgt_uid.long()
+
                 # style token
                 style_src = style_src.to(trans_emb_g.device)
                 style_u = style_src[uid]  # (B, F)
