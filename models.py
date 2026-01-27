@@ -134,7 +134,7 @@ class MFBasedModel(torch.nn.Module):
         bottom = self.user_proto_cache["bottom"][uid]
         return top, bottom
 
-    def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False, item_cond=False):
+    def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False, item_cond=False, style_src=None):
         if stage == "train_src":
             emb = self.src_model.forward(x)
             x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
