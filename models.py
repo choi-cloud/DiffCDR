@@ -134,7 +134,7 @@ class MFBasedModel(torch.nn.Module):
         bottom = self.user_proto_cache["bottom"][uid]
         return top, bottom
 
-    def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False, item_cond=False, style_src=None):
+    def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False, item_cond=False):
         if stage == "train_src":
             emb = self.src_model.forward(x)
             x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
@@ -230,13 +230,14 @@ class MFBasedModel(torch.nn.Module):
             tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)  # Aggr
 
             # Diff1: MF 유저 임베딩, Diff2: Aggr 유저 임베딩
-            src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
-            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
-
-            if item_cond == True:
+            src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze() # MF
+            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False) # Aggr
+            
+            if item_cond==True:
                 top_proto, bottom_proto = self.get_top_bottom_item_prototypes(tgt_uid)
                 cond_emb1 = top_proto
                 cond_emb2 = bottom_proto
+
             else:
                 cond_emb1 = src_uid_emb1
                 cond_emb2 = src_uid_emb2
@@ -276,7 +277,7 @@ class MFBasedModel(torch.nn.Module):
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
             src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
 
-            if item_cond == True:
+            if item_cond==True:
                 top_proto, bottom_proto = self.get_top_bottom_item_prototypes(tgt_uid)
                 cond_emb1 = top_proto
                 cond_emb2 = bottom_proto
@@ -292,15 +293,23 @@ class MFBasedModel(torch.nn.Module):
 
             ### [TEST] 1️. Diff1, Diff2 noised x_0 설정에 따라 denoising
             if diff_model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
-                trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0)
-                trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1)
+                trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(
+                    diff_model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0
+                )  # 디노이징 된 user emb_m / item emb
+                trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(
+                    diff_model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1
+                )  # 디노이징 된 user emb_g / item emb
 
             elif diff_model.parallel["set_init"] == 1:  # 각각 MF, Aggr
                 # ! 각각 MF, Aggr인 파트만 수정
-                trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0)
-                trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1)
+                trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(
+                    diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0
+                )  # 디노이징 된 user emb_m / item emb
+                trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(
+                    diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1
+                )  # 디노이징 된 user emb_g / item emb
 
-            ### [TEST] 2. Diff1, Diff2 결과 aggregation
+            ### [TEST] 2. Diff1, Diff2 결과 aggregation 
             if diff_model.parallel["set_aggr"] == "attn":
                 # ! 어텐션으로 최종 임베딩 종합
                 trans_emb = diff_model.attn_layer(torch.cat([trans_emb_m, trans_emb_g], dim=1))
@@ -325,13 +334,8 @@ class MFBasedModel(torch.nn.Module):
                 style_tok = diff_model.style_scale * style_tok  # (B, D)
 
                 final_output = torch.stack([iid_emb, trans_emb_m, trans_emb_g, style_tok], dim=1)
-                trans_emb = diff_model.attn_layer(final_output)
+                trans_emb = diff_model.attn_layer(final_output, query=iid_emb.unsqueeze(1))
                 trans_emb = trans_emb[:, 0, :]
-                # trans_emb = trans_emb_m + trans_emb_g
-
-            ### [TEST] 3. ALM 모듈 통과
-            # if diff_model.parallel["set_proj"] == 1:
-            #     trans_emb = diff_model.get_al_emb(trans_emb).to(device)
 
             ### [TEST] 4. rating 예측
             x = torch.sum(trans_emb * iid_emb, dim=1)  # user, item emb 내적해서 예측

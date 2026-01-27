@@ -52,13 +52,15 @@ class ResidualQuantizer(nn.Module):
             idx = torch.argmin(dist, dim=-1)  # [B]
             chosen = codebook_l[idx]  # [B, D]
 
+            rq_loss = rq_loss +  F.mse_loss(chosen, residual.detach())
+
             all_level_vectors.append(chosen)
 
             # residual 업데이트
             residual = residual - chosen
 
             # 간단한 commitment loss (residual이 너무 크지 않도록)
-            rq_loss = rq_loss + F.mse_loss(residual, torch.zeros_like(residual))
+            # rq_loss = rq_loss + F.mse_loss(residual, torch.zeros_like(residual))
 
         # [L, B, D]
         all_level_vectors = torch.stack(all_level_vectors, dim=0)
