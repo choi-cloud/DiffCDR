@@ -134,7 +134,7 @@ class MFBasedModel(torch.nn.Module):
         bottom = self.user_proto_cache["bottom"][uid]
         return top, bottom
 
-    def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False, item_cond=False):
+    def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False, item_cond=False, style_src=None):
         if stage == "train_src":
             emb = self.src_model.forward(x)
             x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
@@ -199,7 +199,6 @@ class MFBasedModel(torch.nn.Module):
             emb[:, 0, :] = uid_emb
             x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
             return x
-
         elif stage == "train_diff":  # DiffCDR - train
 
             tgt_uid, iid_input, y_input = x
@@ -211,7 +210,6 @@ class MFBasedModel(torch.nn.Module):
 
             loss = Diff.diffusion_loss_fn(diff_model, tgt_emb, cond_emb, iid_emb, y_input, device, is_task)
             return loss  # is_task=False: 노이즈 예측 , is_task=True: ALS, pred 로스
-
         elif stage == "test_diff":  # DiffCDR - test
 
             tgt_uid, iid_input, _ = x
@@ -264,6 +262,8 @@ class MFBasedModel(torch.nn.Module):
                 # ! is_taks가 True일 때만 양자화된 컨디션을 시간축에 따라 이용
                 q_embs1=all_level_vectors1,
                 q_embs2=all_level_vectors2,
+                style_src=style_src,
+                uid=tgt_uid,
             )
 
             total_loss = loss + diff_model.rqvae["alpha_rq"] * (rq_loss1 + rq_loss2)
@@ -314,7 +314,15 @@ class MFBasedModel(torch.nn.Module):
                 trans_emb_m = diff_model.linear_m(trans_emb_m)
                 trans_emb_g = diff_model.linear_g(trans_emb_g)
 
-                final_output = torch.stack([iid_emb, trans_emb_m, trans_emb_g], dim=1)
+                uid = tgt_uid.long()
+                # style token
+                style_src = style_src.to(trans_emb_g.device)
+                style_u = style_src[uid]  # (B, F)
+                style_tok = diff_model.style_encoder(style_u)  # (B, D)
+                style_tok = diff_model.style_ln(style_tok)  # (B, D)
+                style_tok = diff_model.style_scale * style_tok  # (B, D)
+
+                final_output = torch.stack([iid_emb, trans_emb_m, trans_emb_g, style_tok], dim=1)
                 trans_emb = diff_model.attn_layer(final_output)
                 trans_emb = trans_emb[:, 0, :]
                 # trans_emb = trans_emb_m + trans_emb_g

@@ -107,7 +107,7 @@ if __name__ == "__main__":
     )
 
     print()
-    print("복원된 tgt_mf와 tgt_aggr를 각각 원본 tgt_mf와 tgt_aggr와 가까워지도록 하는 로스 추가")
+    print("유저의 레이팅 스타일(bias) 정보를 추가한다면?")
     print()
 
     logfile = utils.make_dir(f"{args.experiment}")

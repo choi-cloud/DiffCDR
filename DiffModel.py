@@ -211,6 +211,10 @@ class DiffParallel(nn.Module):
         self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
         self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
 
+        self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+        self.style_ln = nn.LayerNorm(input_dim)  # optional
+        self.style_scale = nn.Parameter(torch.tensor(0.1))  # optional
+
     def forward(self, x, t, cond_emb, cond_mask, diff_id):
 
         for idx in range(self.num_layers):
@@ -303,6 +307,8 @@ def diffusion_loss_fn_parallel(
     is_task,
     q_embs1=None,
     q_embs2=None,
+    style_src=None,
+    uid=None,
 ):  # DIM(reconstruction) loss
 
     num_steps = model.num_steps
@@ -366,14 +372,23 @@ def diffusion_loss_fn_parallel(
             final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1), query=torch.cat([iid_emb, iid_emb], dim=1))
 
         elif model.parallel["set_aggr"] == "item_cls":
-            # 아이템 포함해서 self attn -> 아이템 출력만 사용
             final_output_m = model.linear_m(final_output_m)
             final_output_g = model.linear_g(final_output_g)
 
-            final_output = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)  # (B, 3, D)
-            final_output = model.attn_layer(final_output)  # (B, 3, D)
-            final_output = final_output[:, 0, :]  # (B, D) iid_emb 토큰의 출력만 취함
-            # final_output = final_output_m + final_output_g
+            uid = uid.long()  # (B,)
+
+            # style token
+            style_src = style_src.to(final_output_m.device)
+            style_u = style_src[uid]  # (B, F)
+            style_tok = model.style_encoder(style_u)  # (B, D)
+            style_tok = model.style_ln(style_tok)  # (B, D)
+            style_tok = model.style_scale * style_tok  # (B, D)
+
+            tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok], dim=1)  # (B, 4, D)
+
+            # 추천: query를 iid로 고정
+            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            final_output = out[:, 0, :]  # (B, D)
 
         ### [TRAIN-ALM] 3. ALM 모듈 통과
         # if model.parallel["set_proj"] == 1:

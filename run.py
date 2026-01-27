@@ -638,7 +638,7 @@ class Run:
             optimizer_diff = torch.optim.Adam(params=diff_model.parameters(), lr=self.diff_lr)
             return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_diff, optimizer_map
 
-    def eval_mae(self, model, data_loader, stage, graph_test=None):
+    def eval_mae(self, model, data_loader, stage, graph_test=None, style_src=None):
         print("Evaluating MAE:")
 
         targets, predicts = list(), list()
@@ -671,7 +671,7 @@ class Run:
                 for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                     model[0].eval()
                     model[1].eval()
-                    pred = model[0](X, stage, self.device, diff_model=model[1], item_cond=self.item_cond)
+                    pred = model[0](X, stage, self.device, diff_model=model[1], item_cond=self.item_cond, style_src=style_src)
                     y_input = X[-1]
                     targets.extend(y_input.squeeze(1).tolist())
                     predicts.extend(pred.tolist())
@@ -716,7 +716,9 @@ class Run:
 
         return loss(targets, predicts).item(), torch.sqrt(mse_loss(targets, predicts)).item()
 
-    def train(self, data_loader, model, criterion, optimizer, epoch, stage, mapping=False, diff=False, ss=False, la=False, graph_train=None):
+    def train(
+        self, data_loader, model, criterion, optimizer, epoch, stage, mapping=False, diff=False, ss=False, la=False, graph_train=None, style_src=None
+    ):
         print("Training Epoch {}:".format(epoch + 1))
 
         loss_ls = []
@@ -789,7 +791,7 @@ class Run:
                 _ = torch.nn.utils.clip_grad_norm_(model[1].parameters(), 1.0)
                 optimizer.step()
 
-                task_loss = model[0](X, stage, self.device, diff_model=model[1], is_task=True, item_cond=self.item_cond)
+                task_loss = model[0](X, stage, self.device, diff_model=model[1], is_task=True, item_cond=self.item_cond, style_src=style_src)
                 model[1].zero_grad()
                 task_loss.backward()
                 _ = torch.nn.utils.clip_grad_norm_(model[1].parameters(), 1.0)
@@ -958,14 +960,23 @@ class Run:
             self.update_results(mae, rmse, "diff")
             write(f"DIFF LOSS {loss.item()}, TASK LOSS {task_loss.item()}, MAE: {mae} RMSE: {rmse}")
 
-    def Diff_Parallel(self, model, diff_model, data_diff, data_test, optimizer, graph_train, graph_test):
+    def Diff_Parallel(self, model, diff_model, data_diff, data_test, optimizer, graph_train, graph_test, style_src):
         write("=========Diff_Parallel========")
         for i in range(self.epoch):
             loss, task_loss = self.train(
-                data_diff, [model, diff_model], None, optimizer, i, stage="train_diff_parallel", mapping=False, diff=True, graph_train=graph_train
+                data_diff,
+                [model, diff_model],
+                None,
+                optimizer,
+                i,
+                stage="train_diff_parallel",
+                mapping=False,
+                diff=True,
+                graph_train=graph_train,
+                style_src=style_src,
             )
 
-            mae, rmse = self.eval_mae([model, diff_model], data_test, stage="test_diff_parallel", graph_test=graph_test)
+            mae, rmse = self.eval_mae([model, diff_model], data_test, stage="test_diff_parallel", graph_test=graph_test, style_src=style_src)
             self.update_results(mae, rmse, "diff_parallel")
             write(f"DIFF LOSS {loss.item()}, TASK LOSS {task_loss.item()}, MAE: {mae} RMSE: {rmse}")
 
@@ -1069,6 +1080,15 @@ class Run:
 
         data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test, graph_data = self.get_data()
 
+        print()
+        print(f"소스 도메인 내 유저의 레이팅 스타일 정보 추출")
+        print()
+        style_src, info = build_src_user_rating_style_from_loader(
+            data_src=data_src, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, device="cpu"
+        )
+        # print(info["feature_names"])
+        # print("user0 style:", style_src[0])
+
         criterion = torch.nn.MSELoss()
 
         if exp_part == "None_CDR":
@@ -1151,7 +1171,7 @@ class Run:
             model.build_user_prototype_cache(self.device, 0.5, 0.5, user_batch=1024)
             print("None_CDR model loaded")
             # optimizer_diff: DiffParallel 의 파라미터만 포함, model에 있는 user/item embedding update X
-            self.Diff_Parallel(model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"])
+            self.Diff_Parallel(model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"], style_src)
             self.result_print(["diff_parallel"])
 
 
@@ -1207,3 +1227,88 @@ def mae_summary_by_score(y_true, mae):
             }
         )
     return pd.DataFrame(rows)
+
+
+@torch.no_grad()
+def build_src_user_rating_style_from_loader(
+    data_src,
+    num_users: int,
+    rating_min: float = 1.0,
+    rating_max: float = 5.0,
+    device: str = "cpu",
+):
+    """
+    data_src yields: (X, y)
+      - X: torch.Size([B, 2]) where X[:,0]=uid, X[:,1]=iid
+      - y: torch.Size([B, 1]) rating
+
+    Returns
+    -------
+    style: FloatTensor [num_users, 9]
+      style[u] = [mean, var, std, min, max, cnt, frac_min, frac_max, frac_extreme]
+    info: dict
+    """
+    # 누적 통계 (double로 안전하게)
+    sums = torch.zeros(num_users, dtype=torch.float64)
+    sumsqs = torch.zeros(num_users, dtype=torch.float64)
+    cnts = torch.zeros(num_users, dtype=torch.float64)
+
+    mins = torch.full((num_users,), float("inf"), dtype=torch.float64)
+    maxs = torch.full((num_users,), float("-inf"), dtype=torch.float64)
+
+    cnt_min = torch.zeros(num_users, dtype=torch.float64)
+    cnt_max = torch.zeros(num_users, dtype=torch.float64)
+
+    for X, y in data_src:
+        # X: [B,2], y: [B,1]
+        uid = X[:, 0].detach().to("cpu").long().view(-1)  # [B]
+        r = y.detach().to("cpu").double().view(-1)  # [B]
+
+        if uid.numel() != r.numel():
+            raise ValueError(f"uid/rating mismatch: uid={uid.shape}, r={r.shape}")
+
+        # sum, sumsq, count
+        sums.index_add_(0, uid, r)
+        sumsqs.index_add_(0, uid, r * r)
+        cnts.index_add_(0, uid, torch.ones_like(r, dtype=torch.float64))
+
+        # min/max (유저별 배치 내부 min/max로 갱신)
+        uniq = torch.unique(uid)
+        for u in uniq.tolist():
+            mask = uid == u
+            rv = r[mask]
+            mins[u] = torch.minimum(mins[u], rv.min())
+            maxs[u] = torch.maximum(maxs[u], rv.max())
+
+        # extreme counts
+        is_min = r <= rating_min + 1e-12
+        is_max = r >= rating_max - 1e-12
+        cnt_min.index_add_(0, uid, is_min.double())
+        cnt_max.index_add_(0, uid, is_max.double())
+
+    # 통계 계산
+    eps = 1e-12
+    cnt_safe = torch.clamp(cnts, min=1.0)
+
+    mean = sums / cnt_safe
+    ex2 = sumsqs / cnt_safe
+    var = torch.clamp(ex2 - mean * mean, min=0.0)
+    std = torch.sqrt(var + eps)
+
+    rmin = torch.where(cnts > 0, mins, torch.zeros_like(mins))
+    rmax = torch.where(cnts > 0, maxs, torch.zeros_like(maxs))
+
+    frac_min = cnt_min / cnt_safe
+    frac_max = cnt_max / cnt_safe
+    frac_extreme = (cnt_min + cnt_max) / cnt_safe
+
+    # [U, 9]
+    style = torch.stack([mean, var, std, rmin, rmax, cnts, frac_min, frac_max, frac_extreme], dim=1).to(torch.float32).to(device)
+
+    info = {
+        "feature_names": ["mean", "var", "std", "min", "max", "cnt", "frac_min", "frac_max", "frac_extreme"],
+        "rating_min": rating_min,
+        "rating_max": rating_max,
+        "num_users": num_users,
+    }
+    return style, info
