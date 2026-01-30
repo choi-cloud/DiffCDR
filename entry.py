@@ -15,7 +15,7 @@ def prepare_1():
     parser.add_argument("--task", default="1")
     parser.add_argument("--base_model", default="MF")
     parser.add_argument("--seed", type=int, default=1)
-    parser.add_argument("--ratio", default="[0.8, 0.2]")
+    parser.add_argument("--ratio", default="[0.2, 0.8]")
     parser.add_argument("--gpu", default="0")
     parser.add_argument("--epoch", type=int, default=10)
     parser.add_argument("--lr", type=float, default=0.01)
@@ -24,7 +24,7 @@ def prepare_1():
 
     parser.add_argument("--root", default="./")
     parser.add_argument("--exp_part", default="None_CDR")
-    parser.add_argument("--save_path", default="./model_save_default/model.pth")
+    parser.add_argument("--save_path", default="/home/schoi/DiffCDR/model_save_default/model_1_[0.2, 0.8].pth")
     parser.add_argument("--use_cuda", default=1)
 
     args = parser.parse_args()

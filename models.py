@@ -12,10 +12,38 @@ class LookupEmbedding(torch.nn.Module):
         super().__init__()
         self.uid_embedding = torch.nn.Embedding(uid_all, emb_dim)
         self.iid_embedding = torch.nn.Embedding(iid_all + 1, emb_dim)
+        self.user_linear1 = torch.nn.Linear(emb_dim, emb_dim)
+        self.user_linear2 = torch.nn.Linear(emb_dim, emb_dim)
+        self.user_linear3 = torch.nn.Linear(emb_dim, emb_dim)
+        self.item_linear1 = torch.nn.Linear(emb_dim, emb_dim)
+        self.item_linear2 = torch.nn.Linear(emb_dim, emb_dim)
+        self.item_linear3 = torch.nn.Linear(emb_dim, emb_dim)
+
+    def get_linear_emb(self, x, is_user=True):
+        if is_user:
+            uid_emb = self.user_linear1(x)
+            uid_emb = F.relu(uid_emb)
+            uid_emb = self.user_linear2(uid_emb)
+            uid_emb = F.relu(uid_emb)
+            uid_emb = self.user_linear3(uid_emb)
+            uid_emb = F.relu(uid_emb)
+            return uid_emb
+        else:
+            iid_emb = self.item_linear1(x)
+            iid_emb = F.relu(iid_emb)
+            iid_emb = self.item_linear2(iid_emb)
+            iid_emb = F.relu(iid_emb)
+            iid_emb = self.item_linear3(iid_emb)
+            iid_emb = F.relu(iid_emb)
+            return iid_emb
 
     def forward(self, x):
         uid_emb = self.uid_embedding(x[:, 0].unsqueeze(1))
         iid_emb = self.iid_embedding(x[:, 1].unsqueeze(1))
+
+        uid_emb = self.get_linear_emb(uid_emb, is_user=True)
+        iid_emb = self.get_linear_emb(iid_emb, is_user=False)
+
         emb = torch.cat([uid_emb, iid_emb], dim=1)
         return emb
 
@@ -53,14 +81,17 @@ class MFBasedModel(torch.nn.Module):
             emb = self.src_model.forward(x)
             x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
             return x
+
         elif stage in ["train_tgt", "test_tgt"]:
             emb = self.tgt_model.forward(x)
             x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
             return x
+
         elif stage in ["train_aug", "test_aug"]:
             emb = self.aug_model.forward(x)
             x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
             return x
+
         elif stage in ["train_meta", "test_meta"]:
             iid_emb = self.tgt_model.iid_embedding(x[:, 1].unsqueeze(1))
             uid_emb_src = self.src_model.uid_embedding(x[:, 0].unsqueeze(1))
@@ -70,11 +101,13 @@ class MFBasedModel(torch.nn.Module):
             emb = torch.cat([uid_emb, iid_emb], 1)
             output = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
             return output
+
         elif stage == "train_map":
             src_emb = self.src_model.uid_embedding(x.unsqueeze(1)).squeeze()
             src_emb = self.mapping.forward(src_emb)
             tgt_emb = self.tgt_model.uid_embedding(x.unsqueeze(1)).squeeze()
             return src_emb, tgt_emb
+
         elif stage == "test_map":
             uid_emb = self.mapping.forward(self.src_model.uid_embedding(x[:, 0].unsqueeze(1)).squeeze())
             emb = self.tgt_model.forward(x)
@@ -83,23 +116,20 @@ class MFBasedModel(torch.nn.Module):
             return x
 
         elif stage == "train_diff":
-
             tgt_uid, iid_input, y_input = x
 
-            tgt_emb = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
-            cond_emb = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
-
-            iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
+            tgt_emb = self.tgt_model.get_linear_emb(self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze(), is_user=True)
+            iid_emb = self.tgt_model.get_linear_emb(self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze(), is_user=False)
+            cond_emb = self.src_model.get_linear_emb(self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze(), is_user=True)
 
             loss = Diff.diffusion_loss_fn(diff_model, tgt_emb, cond_emb, iid_emb, y_input, device, is_task)
             return loss
 
         elif stage == "test_diff":
-
             tgt_uid, iid_input, _ = x
 
-            cond_emb = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
-            iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
+            iid_emb = self.tgt_model.get_linear_emb(self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze(), is_user=False)
+            cond_emb = self.src_model.get_linear_emb(self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze(), is_user=True)
 
             trans_emb, iid_emb_out = Diff.p_sample_loop(diff_model, cond_emb, iid_emb, device)
 

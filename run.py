@@ -588,7 +588,7 @@ class Run:
             self.TgtOnly(model, data_tgt, data_test, criterion, optimizer_tgt)
             self.SrcOnly(model, data_src, criterion, optimizer_src)
             # CMF
-            self.DataAug(model, data_aug, data_test, criterion, optimizer_aug)
+            # self.DataAug(model, data_aug, data_test, criterion, optimizer_aug)
             self.result_print(["tgt", "aug"])
             self.model_save(model, path=save_path)
 
