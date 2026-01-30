@@ -53,6 +53,11 @@ class Run:
         self.src_path = self.input_root + "/train_src.csv"
         self.tgt_path = self.input_root + "/train_tgt.csv"
 
+        print()
+        print(self.src_path)
+        print(self.tgt_path)
+        print()
+
         self.meta_path = self.input_root + "/train_meta.csv"
         self.test_path = self.input_root + "/test.csv"
 

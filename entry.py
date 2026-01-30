@@ -56,7 +56,7 @@ if __name__ == "__main__":
     config_path = args.root + "config.json"
 
     config = prepare_2(args, config_path)
-    config["root"] = args.root + "data/"
+    # config["root"] = args.root + "data/"
     config["use_cuda"] = 0 if args.use_cuda == "0" else 1
 
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
@@ -78,6 +78,8 @@ if __name__ == "__main__":
             config["diff_steps"], config["diff_sample_steps"], config["diff_scale"], config["diff_dim"], config["diff_task_lambda"]
         )
     )
+
+    print(f"\n비선형 레이어 추가한 MF 베이스 모델 이용. 아무것도 안 해도 DMCDR 정도 나옴\n")
 
     if not args.process_data_mid and not args.process_data_ready:
         Run(config).main(args.exp_part, args.save_path)
