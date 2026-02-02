@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 import math
 
@@ -11,7 +12,6 @@ from rqvae import ResidualQuantizer
 noise_schedule = NoiseScheduleVP(schedule="linear")
 
 
-# ---------------------------------------------------------
 def get_timestep_embedding(timesteps, embedding_dim: int):
     """
     From Fairseq.
@@ -35,6 +35,7 @@ def get_timestep_embedding(timesteps, embedding_dim: int):
     assert emb.shape == torch.Size([timesteps.shape[0], embedding_dim])
     return emb
 
+
 class SinusoidalPositionEmbeddings(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -48,8 +49,6 @@ class SinusoidalPositionEmbeddings(nn.Module):
         embeddings = time[:, None] * embeddings[None, :]
         embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
         return embeddings
-
-
 
 
 class DiffParallel(nn.Module):
@@ -115,14 +114,14 @@ class DiffParallel(nn.Module):
             [
                 nn.ModuleList(
                     [  # diff model 1 -- MF condition
-                        nn.Linear(input_dim*3, input_dim),
+                        nn.Linear(input_dim * 3, input_dim),
                         # nn.Linear(diff_dim, diff_dim),
                         # nn.Linear(diff_dim, input_dim),
                     ]
                 ),
                 nn.ModuleList(
                     [  # diff model 2 -- Aggr condition
-                        nn.Linear(input_dim*3, input_dim),
+                        nn.Linear(input_dim * 3, input_dim),
                         # nn.Linear(diff_dim, diff_dim),
                         # nn.Linear(diff_dim, input_dim),
                     ]
@@ -155,8 +154,12 @@ class DiffParallel(nn.Module):
         self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
 
         self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
-        self.style_ln = nn.LayerNorm(input_dim)  # optional
-        self.style_scale = nn.Parameter(torch.tensor(0.1))  # optional
+        self.style_ln = nn.LayerNorm(input_dim)
+        self.style_scale = nn.Parameter(torch.tensor(0.1))
+
+        self.item_style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+        self.item_style_ln = nn.LayerNorm(input_dim)
+        self.item_style_scale = nn.Parameter(torch.tensor(0.1))
 
     def forward(self, x, t, cond_emb, cond_mask, diff_id):
 
@@ -166,8 +169,8 @@ class DiffParallel(nn.Module):
             t_embedding = self.step_mlp(t)
 
             cond_embedding = self.cond_emb_linear[idx](cond_emb)  # condition(user emb from src) -> linear 통과
-    
-            x= torch.cat([t_embedding,cond_embedding* cond_mask.unsqueeze(-1) ,x],axis=1) #* cond_mask.unsqueeze(-1)
+
+            x = torch.cat([t_embedding, cond_embedding * cond_mask.unsqueeze(-1), x], axis=1)  # * cond_mask.unsqueeze(-1)
 
             x = self.diff_models[diff_id][0](x)  # reverse -- 3 FC를 통해 denosing.
             # x = self.diff_models[diff_id][1](x)
@@ -177,11 +180,6 @@ class DiffParallel(nn.Module):
 
     def get_al_emb(self, emb):
         return self.al_linear(emb)
-
-
-# ---------------------------------------------------------
-# loss
-import torch.nn.functional as F
 
 
 def q_x_fn(model, x_0, t, device):  # forward
@@ -195,20 +193,8 @@ def q_x_fn(model, x_0, t, device):  # forward
 
 
 def diffusion_loss_fn_parallel(
-    model,
-    x_0_m,
-    x_0_g,
-    cond_emb1,
-    cond_emb2,
-    iid_emb,
-    y_input,
-    device,
-    is_task,
-    q_embs1=None,
-    q_embs2=None,
-    style_src=None,
-    uid=None,
-):  # DIM(reconstruction) loss
+    model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_emb, y_input, device, is_task, q_embs1=None, q_embs2=None, style_src=None, uid=None, iid=None
+):
 
     num_steps = model.num_steps
     mask_rate = model.mask_rate
@@ -277,24 +263,22 @@ def diffusion_loss_fn_parallel(
 
             uid = uid.long()  # (B,)
 
-            # style token
             style_src = style_src.to(final_output_m.device)
             style_u = style_src[uid]  # (B, F)
             style_tok = model.style_encoder(style_u)  # (B, D)
             style_tok = model.style_ln(style_tok)  # (B, D)
-            style_tok = model.style_scale * style_tok  # (B, D)
+            style_tok_u = model.style_scale * style_tok  # (B, D)
 
-            tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok], dim=1)  # (B, 4, D)
+            style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+            style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
+            item_style_tok = model.item_style_encoder(style_i)  # (B, D)
+            item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
+            item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
 
-            # 추천: query를 iid로 고정
+            tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
             out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
             final_output = out[:, 0, :]  # (B, D)
 
-        ### [TRAIN-ALM] 3. ALM 모듈 통과
-        # if model.parallel["set_proj"] == 1:
-        #     final_output = model.get_al_emb(final_output).to(device)
-
-        ### [TRAIN-ALM] 4. rating 예측
         y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
 
         # MSE
@@ -312,10 +296,7 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_loss"] == 2:
             return F.mse_loss((x_0_m + x_0_g) / 2, final_output) + model.task_lambda * task_loss
         elif model.parallel["set_loss"] == 3:
-            return (
-                F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
-            )  # ALM 로스 + task loss
-
+            return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss  # ALM 로스 + task loss
 
 
 def _get_ddpm_sampler(model, device):
@@ -323,22 +304,23 @@ def _get_ddpm_sampler(model, device):
     model.num_steps, model.betas를 그대로 사용해서 diffusion sampler를 구성.
     w는 0으로 둬서 guidance 끔 (원하면 model.parallel['w'] 같은 걸로 바꿔도 됨)
     """
+
     class _Diffusion:
         def __init__(self, betas, w, device):
             self.device = device
             self.w = w
             self.betas = betas.to(device)
 
-            self.alphas = 1. - self.betas
+            self.alphas = 1.0 - self.betas
             self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
             self.alphas_cumprod_prev = F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0)
 
             self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
-            self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - self.alphas_cumprod)
+            self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - self.alphas_cumprod)
 
-            self.posterior_mean_coef1 = self.betas * torch.sqrt(self.alphas_cumprod_prev) / (1. - self.alphas_cumprod)
-            self.posterior_mean_coef2 = (1. - self.alphas_cumprod_prev) * torch.sqrt(self.alphas) / (1. - self.alphas_cumprod)
-            self.posterior_variance = self.betas * (1. - self.alphas_cumprod_prev) / (1. - self.alphas_cumprod)
+            self.posterior_mean_coef1 = self.betas * torch.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
+            self.posterior_mean_coef2 = (1.0 - self.alphas_cumprod_prev) * torch.sqrt(self.alphas) / (1.0 - self.alphas_cumprod)
+            self.posterior_variance = self.betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
 
         def _extract(self, a, t, x_shape):
             # t: (B,) long
@@ -350,10 +332,7 @@ def _get_ddpm_sampler(model, device):
             # x_start = predicted x0
             x_start = (1 + self.w) * model_forward(x, h, t) - self.w * model_forward_uncon(x, t)
 
-            model_mean = (
-                self._extract(self.posterior_mean_coef1, t, x.shape) * x_start +
-                self._extract(self.posterior_mean_coef2, t, x.shape) * x
-            )
+            model_mean = self._extract(self.posterior_mean_coef1, t, x.shape) * x_start + self._extract(self.posterior_mean_coef2, t, x.shape) * x
 
             if t_index == 0:
                 return model_mean
@@ -366,9 +345,7 @@ def _get_ddpm_sampler(model, device):
             x = x_t
             T = self.betas.shape[0]
 
-            step_indices = torch.linspace(
-                T - 1, 0, h.shape[0], device=self.device
-            ).long()
+            step_indices = torch.linspace(T - 1, 0, h.shape[0], device=self.device).long()
 
             for i, n in enumerate(step_indices):
                 t = torch.full((x.shape[0],), n, device=self.device, dtype=torch.long)
@@ -392,7 +369,7 @@ def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):
     total_T = model.num_steps
     sample_steps = model.sample_steps  # = 30
 
-    use_hier = (cond_emb.dim() == 3)  # (L,B,D)
+    use_hier = cond_emb.dim() == 3  # (L,B,D)
 
     # ----------------------------
     # ✅ hier_conds 미리 계산: (S,B,D)
@@ -417,34 +394,15 @@ def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):
     # ✅ sampler에 h로 넣고, model_forward는 h_를 그대로 cond로 사용
     # ----------------------------
     x0 = sampler.sample(
-        model_forward=lambda x_, h_, t_: model.forward(
-            x_,
-            t_,
-            h_,               # step마다 바뀌는 condition
-            cond_mask,
-            diff_id=diff_id
-        ),
-        model_forward_uncon=lambda x_, t_: model.forward(
-            x_,
-            t_,
-            torch.zeros_like(x_),
-            torch.zeros(B, device=device),
-            diff_id=diff_id
-        ),
-        h=hier_conds,          # (S,B,D) or (B,D)
-        x_t=x
+        model_forward=lambda x_, h_, t_: model.forward(x_, t_, h_, cond_mask, diff_id=diff_id),  # step마다 바뀌는 condition
+        model_forward_uncon=lambda x_, t_: model.forward(x_, t_, torch.zeros_like(x_), torch.zeros(B, device=device), diff_id=diff_id),
+        h=hier_conds,  # (S,B,D) or (B,D)
+        x_t=x,
     )
 
     return x0.to(device), iid_emb
 
-def p_sample_loop_parallel(model, start_emb, cond_emb, iid_input, device, diff_id):
-    cur_x, iid_emb_out = p_sample_parallel(
-        model=model,
-        cond_emb=cond_emb,
-        x=start_emb,
-        iid_emb=iid_input,
-        device=device,
-        diff_id=diff_id
-    )
-    return cur_x, iid_emb_out
 
+def p_sample_loop_parallel(model, start_emb, cond_emb, iid_input, device, diff_id):
+    cur_x, iid_emb_out = p_sample_parallel(model=model, cond_emb=cond_emb, x=start_emb, iid_emb=iid_input, device=device, diff_id=diff_id)
+    return cur_x, iid_emb_out

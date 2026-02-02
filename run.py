@@ -960,8 +960,11 @@ class Run:
             self.update_results(mae, rmse, "diff")
             write(f"DIFF LOSS {loss.item()}, TASK LOSS {task_loss.item()}, MAE: {mae} RMSE: {rmse}")
 
-    def Diff_Parallel(self, model, diff_model, data_diff, data_test, optimizer, graph_train, graph_test, style_src):
+    def Diff_Parallel(self, model, diff_model, data_diff, data_test, optimizer, graph_train, graph_test, style_src, style_tgt_item):
         write("=========Diff_Parallel========")
+
+        diff_model.style_tgt_item = style_tgt_item
+
         for i in range(self.epoch):
             loss, task_loss = self.train(
                 data_diff,
@@ -1080,14 +1083,25 @@ class Run:
 
         data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test, graph_data = self.get_data()
 
-        print()
-        print(f"소스 도메인 내 유저의 레이팅 스타일 정보 추출")
-        print()
+        print(f"\n소스 도메인 내 유저의 레이팅 스타일 정보 추출\n")
         style_src, info = build_src_user_rating_style_from_loader(
             data_src=data_src, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, device="cpu"
         )
-        # print(info["feature_names"])
-        # print("user0 style:", style_src[0])
+
+        # print("\n소스 유저 percentile-style 추출\n")
+        # style_src, info_u = build_src_user_percentile_style_from_loader(
+        #     data_src=data_src, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, alpha=0.1, device="cpu"
+        # )
+
+        print(f"\n타겟 도메인 내 아이템의 레이팅 스타일 정보 추출\n")
+        style_tgt_item, info_tgt = build_tgt_item_rating_style_from_loader(
+            data_tgt=data_tgt, num_items_total=self.iid_all + 1, rating_min=1.0, rating_max=5.0, device="cpu"
+        )
+
+        # print("\n타겟 아이템 percentile-style 추출\n")
+        # style_tgt_item, info_i = build_tgt_item_percentile_style_from_loader(
+        #     data_tgt=data_tgt, num_items_total=self.iid_all, rating_min=1.0, rating_max=5.0, alpha=0.1, device="cpu"  # 전역 아이템 개수
+        # )
 
         criterion = torch.nn.MSELoss()
 
@@ -1171,7 +1185,9 @@ class Run:
             model.build_user_prototype_cache(self.device, 0.5, 0.5, user_batch=1024)
             print("None_CDR model loaded")
             # optimizer_diff: DiffParallel 의 파라미터만 포함, model에 있는 user/item embedding update X
-            self.Diff_Parallel(model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"], style_src)
+            self.Diff_Parallel(
+                model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"], style_src, style_tgt_item
+            )
             self.result_print(["diff_parallel"])
 
 
@@ -1312,3 +1328,272 @@ def build_src_user_rating_style_from_loader(
         "num_users": num_users,
     }
     return style, info
+
+
+@torch.no_grad()
+def build_tgt_item_rating_style_from_loader(
+    data_tgt,
+    num_items_total: int,
+    rating_min: float = 1.0,
+    rating_max: float = 5.0,
+    device: str = "cpu",
+):
+    """
+    data_tgt yields: (X, y)
+      - X: torch.Size([B, 2]) where X[:,0]=uid, X[:,1]=iid (GLOBAL item index)
+      - y: torch.Size([B, 1]) rating
+
+    Returns
+    -------
+    style_item: FloatTensor [num_items_total, 9]
+      style_item[i] = [mean, var, std, min, max, cnt, frac_min, frac_max, frac_extreme]
+      - only target items that appear in data_tgt will have non-zero stats.
+    info: dict
+    """
+    # 누적 통계 (double로 안전하게)
+    sums = torch.zeros(num_items_total, dtype=torch.float64)
+    sumsqs = torch.zeros(num_items_total, dtype=torch.float64)
+    cnts = torch.zeros(num_items_total, dtype=torch.float64)
+
+    mins = torch.full((num_items_total,), float("inf"), dtype=torch.float64)
+    maxs = torch.full((num_items_total,), float("-inf"), dtype=torch.float64)
+
+    cnt_min = torch.zeros(num_items_total, dtype=torch.float64)
+    cnt_max = torch.zeros(num_items_total, dtype=torch.float64)
+
+    for X, y in data_tgt:
+        # X: [B,2], y: [B,1]
+        iid = X[:, 1].detach().to("cpu").long().view(-1)  # [B]
+        r = y.detach().to("cpu").double().view(-1)  # [B]
+
+        if iid.numel() != r.numel():
+            raise ValueError(f"iid/rating mismatch: iid={iid.shape}, r={r.shape}")
+
+        # 안전 체크: 전역 iid가 num_items_total 범위 안인지
+        if iid.numel() > 0:
+            if iid.min().item() < 0 or iid.max().item() >= num_items_total:
+                raise ValueError(f"iid out of range: min={iid.min().item()}, max={iid.max().item()}, " f"num_items_total={num_items_total}")
+
+        # sum, sumsq, count
+        sums.index_add_(0, iid, r)
+        sumsqs.index_add_(0, iid, r * r)
+        cnts.index_add_(0, iid, torch.ones_like(r, dtype=torch.float64))
+
+        # min/max (아이템별 배치 내부 min/max로 갱신)
+        uniq = torch.unique(iid)
+        for it in uniq.tolist():
+            mask = iid == it
+            rv = r[mask]
+            mins[it] = torch.minimum(mins[it], rv.min())
+            maxs[it] = torch.maximum(maxs[it], rv.max())
+
+        # extreme counts
+        is_min = r <= rating_min + 1e-12
+        is_max = r >= rating_max - 1e-12
+        cnt_min.index_add_(0, iid, is_min.double())
+        cnt_max.index_add_(0, iid, is_max.double())
+
+    # 통계 계산
+    eps = 1e-12
+    cnt_safe = torch.clamp(cnts, min=1.0)
+
+    mean = sums / cnt_safe
+    ex2 = sumsqs / cnt_safe
+    var = torch.clamp(ex2 - mean * mean, min=0.0)
+    std = torch.sqrt(var + eps)
+
+    rmin = torch.where(cnts > 0, mins, torch.zeros_like(mins))
+    rmax = torch.where(cnts > 0, maxs, torch.zeros_like(maxs))
+
+    frac_min = cnt_min / cnt_safe
+    frac_max = cnt_max / cnt_safe
+    frac_extreme = (cnt_min + cnt_max) / cnt_safe
+
+    # [I_total, 9]
+    style_item = torch.stack([mean, var, std, rmin, rmax, cnts, frac_min, frac_max, frac_extreme], dim=1).to(torch.float32).to(device)
+
+    info = {
+        "feature_names": ["mean", "var", "std", "min", "max", "cnt", "frac_min", "frac_max", "frac_extreme"],
+        "rating_min": rating_min,
+        "rating_max": rating_max,
+        "num_items_total": num_items_total,
+    }
+    return style_item, info
+
+
+@torch.no_grad()
+def build_src_user_percentile_style_from_loader(
+    data_src,
+    num_users: int,
+    rating_min: float = 1.0,
+    rating_max: float = 5.0,
+    device: str = "cpu",
+    alpha: float = 0.1,  # low/high 구간(예: 하위 10%, 상위 10%)
+):
+    """
+    Percentile-style features per user computed from rating histograms.
+
+    Returns
+    -------
+    style: FloatTensor [num_users, 9]
+      style[u] = [p_mean, p_var, p_std, p_min, p_max, cnt,
+                  frac_low, frac_high, frac_extreme]
+      - p_* are computed on percentile values in [0,1]
+    info: dict
+    """
+    # ---- rating levels: assumes integer levels in [rating_min, rating_max]
+    # (너 데이터가 1~5 정수 평점이라는 전제. half-step이면 levels를 바꿔야 함)
+    levels = torch.arange(int(rating_min), int(rating_max) + 1, dtype=torch.long)  # [K]
+    K = levels.numel()
+
+    # per-user histogram counts: [U, K]
+    hist = torch.zeros((num_users, K), dtype=torch.float64)
+
+    for X, y in data_src:
+        uid = X[:, 0].detach().to("cpu").long().view(-1)  # [B]
+        r = y.detach().to("cpu").view(-1)  # [B]
+
+        if uid.numel() != r.numel():
+            raise ValueError(f"uid/rating mismatch: uid={uid.shape}, r={r.shape}")
+
+        # rating을 레벨 인덱스로 변환 (정수 평점 전제)
+        r_int = r.round().long()  # 혹시 float여도 1~5 근처면 반올림
+        if r_int.numel() > 0:
+            if r_int.min().item() < levels.min().item() or r_int.max().item() > levels.max().item():
+                raise ValueError(f"rating out of level range: min={r_int.min().item()}, max={r_int.max().item()}")
+
+        ridx = (r_int - levels.min()).clamp(0, K - 1)  # [B]
+
+        # scatter-add로 히스토그램 누적
+        # hist[uid, ridx] += 1
+        hist.index_put_((uid, ridx), torch.ones_like(ridx, dtype=torch.float64), accumulate=True)
+
+    # ---- counts per user
+    cnts = hist.sum(dim=1)  # [U]
+    cnt_safe = torch.clamp(cnts, min=1.0)
+
+    # ---- build percentile per level per user (mid-rank)
+    # cum_less: cumulative counts strictly less than level k
+    cum = torch.cumsum(hist, dim=1)  # [U,K] cumulative including self
+    cum_less = cum - hist  # [U,K]
+    p_level = (cum_less + 0.5 * hist) / cnt_safe.unsqueeze(1)  # [U,K] in [0,1]
+
+    # ---- stats on percentile values, weighted by hist
+    # mean_p = sum_k count_k * p_k / N
+    mean_p = (hist * p_level).sum(dim=1) / cnt_safe  # [U]
+    ex2_p = (hist * (p_level**2)).sum(dim=1) / cnt_safe  # [U]
+    var_p = torch.clamp(ex2_p - mean_p * mean_p, min=0.0)  # [U]
+    std_p = torch.sqrt(var_p + 1e-12)  # [U]
+
+    # p_min/p_max: among levels that exist
+    has = hist > 0
+    pmin = torch.where(has, p_level, torch.full_like(p_level, float("inf"))).min(dim=1).values
+    pmax = torch.where(has, p_level, torch.full_like(p_level, float("-inf"))).max(dim=1).values
+    pmin = torch.where(cnts > 0, pmin, torch.zeros_like(pmin))
+    pmax = torch.where(cnts > 0, pmax, torch.zeros_like(pmax))
+
+    # low/high/extreme fractions based on percentile thresholds
+    low_mask = p_level <= alpha
+    high_mask = p_level >= (1.0 - alpha)
+
+    frac_low = (hist * low_mask.double()).sum(dim=1) / cnt_safe
+    frac_high = (hist * high_mask.double()).sum(dim=1) / cnt_safe
+    frac_extreme = frac_low + frac_high
+
+    # [U, 9]
+    style = torch.stack([mean_p, var_p, std_p, pmin, pmax, cnts, frac_low, frac_high, frac_extreme], dim=1).to(torch.float32).to(device)
+
+    info = {
+        "feature_names": ["p_mean", "p_var", "p_std", "p_min", "p_max", "cnt", "frac_low", "frac_high", "frac_extreme"],
+        "alpha": alpha,
+        "rating_min": rating_min,
+        "rating_max": rating_max,
+        "levels": levels.tolist(),
+        "num_users": num_users,
+        "note": "percentile is computed within each user's rating distribution (mid-rank).",
+    }
+    return style, info
+
+
+@torch.no_grad()
+def build_tgt_item_percentile_style_from_loader(
+    data_tgt,
+    num_items_total: int,
+    rating_min: float = 1.0,
+    rating_max: float = 5.0,
+    device: str = "cpu",
+    alpha: float = 0.1,
+):
+    """
+    Percentile-style features per item computed from rating histograms.
+
+    Returns
+    -------
+    style_item: FloatTensor [num_items_total, 9]
+      style_item[i] = [p_mean, p_var, p_std, p_min, p_max, cnt,
+                       frac_low, frac_high, frac_extreme]
+      - percentile is computed within each item's rating distribution (across users)
+    info: dict
+    """
+    levels = torch.arange(int(rating_min), int(rating_max) + 1, dtype=torch.long)  # [K]
+    K = levels.numel()
+
+    hist = torch.zeros((num_items_total, K), dtype=torch.float64)
+
+    for X, y in data_tgt:
+        iid = X[:, 1].detach().to("cpu").long().view(-1)  # [B] global iid
+        r = y.detach().to("cpu").view(-1)  # [B]
+
+        if iid.numel() != r.numel():
+            raise ValueError(f"iid/rating mismatch: iid={iid.shape}, r={r.shape}")
+
+        if iid.numel() > 0:
+            if iid.min().item() < 0 or iid.max().item() >= num_items_total:
+                raise ValueError(f"iid out of range: min={iid.min().item()}, max={iid.max().item()}, num_items_total={num_items_total}")
+
+        r_int = r.round().long()
+        if r_int.numel() > 0:
+            if r_int.min().item() < levels.min().item() or r_int.max().item() > levels.max().item():
+                raise ValueError(f"rating out of level range: min={r_int.min().item()}, max={r_int.max().item()}")
+
+        ridx = (r_int - levels.min()).clamp(0, K - 1)
+
+        hist.index_put_((iid, ridx), torch.ones_like(ridx, dtype=torch.float64), accumulate=True)
+
+    cnts = hist.sum(dim=1)
+    cnt_safe = torch.clamp(cnts, min=1.0)
+
+    cum = torch.cumsum(hist, dim=1)
+    cum_less = cum - hist
+    p_level = (cum_less + 0.5 * hist) / cnt_safe.unsqueeze(1)
+
+    mean_p = (hist * p_level).sum(dim=1) / cnt_safe
+    ex2_p = (hist * (p_level**2)).sum(dim=1) / cnt_safe
+    var_p = torch.clamp(ex2_p - mean_p * mean_p, min=0.0)
+    std_p = torch.sqrt(var_p + 1e-12)
+
+    has = hist > 0
+    pmin = torch.where(has, p_level, torch.full_like(p_level, float("inf"))).min(dim=1).values
+    pmax = torch.where(has, p_level, torch.full_like(p_level, float("-inf"))).max(dim=1).values
+    pmin = torch.where(cnts > 0, pmin, torch.zeros_like(pmin))
+    pmax = torch.where(cnts > 0, pmax, torch.zeros_like(pmax))
+
+    low_mask = p_level <= alpha
+    high_mask = p_level >= (1.0 - alpha)
+
+    frac_low = (hist * low_mask.double()).sum(dim=1) / cnt_safe
+    frac_high = (hist * high_mask.double()).sum(dim=1) / cnt_safe
+    frac_extreme = frac_low + frac_high
+
+    style_item = torch.stack([mean_p, var_p, std_p, pmin, pmax, cnts, frac_low, frac_high, frac_extreme], dim=1).to(torch.float32).to(device)
+
+    info = {
+        "feature_names": ["p_mean", "p_var", "p_std", "p_min", "p_max", "cnt", "frac_low", "frac_high", "frac_extreme"],
+        "alpha": alpha,
+        "rating_min": rating_min,
+        "rating_max": rating_max,
+        "levels": levels.tolist(),
+        "num_items_total": num_items_total,
+        "note": "percentile is computed within each item's rating distribution (mid-rank).",
+    }
+    return style_item, info

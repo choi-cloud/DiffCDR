@@ -107,7 +107,7 @@ if __name__ == "__main__":
     )
 
     print()
-    print("레이어 정규화 모두 추가")
+    print("타겟 데이터를 바탕으로 타겟 아이템에 대한 통계 정보를 활용")
     print()
 
     logfile = utils.make_dir(f"{args.experiment}")
