@@ -348,6 +348,8 @@ class MFBasedModel(torch.nn.Module):
                 final_output = out[:, 0, :]
 
             y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+            mu_t = diff_model.tgt_global_bias
+            y_pred = y_pred + mu_t
 
             return y_pred
 

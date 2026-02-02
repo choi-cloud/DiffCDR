@@ -161,6 +161,8 @@ class DiffParallel(nn.Module):
         self.item_style_ln = nn.LayerNorm(input_dim)
         self.item_style_scale = nn.Parameter(torch.tensor(0.1))
 
+        self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
+
     def forward(self, x, t, cond_emb, cond_mask, diff_id):
 
         for idx in range(self.num_layers):
@@ -280,6 +282,8 @@ def diffusion_loss_fn_parallel(
             final_output = out[:, 0, :]  # (B, D)
 
         y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+        mu_t = model.tgt_global_bias
+        y_pred = y_pred + mu_t
 
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
