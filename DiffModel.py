@@ -132,7 +132,7 @@ class DiffParallel(nn.Module):
         # time embedding
         # self.step_emb_linear = nn.ModuleList([nn.Linear(diff_dim, input_dim)])
 
-        # self.cond_emb_linear = nn.ModuleList([nn.Linear(input_dim, input_dim)])
+        self.cond_emb_linear = nn.ModuleList([nn.Linear(input_dim, input_dim)])
 
         self.num_layers = 1
 
@@ -165,7 +165,7 @@ class DiffParallel(nn.Module):
             # t_embedding = self.step_emb_linear[idx](t_embedding)  # linear 통과 -> time embedding
             t_embedding = self.step_mlp(t)
 
-            cond_embedding = cond_emb # self.cond_emb_linear[idx](cond_emb)  # condition(user emb from src) -> linear 통과
+            cond_embedding = self.cond_emb_linear[idx](cond_emb)  # condition(user emb from src) -> linear 통과
     
             x= torch.cat([t_embedding,cond_embedding* cond_mask.unsqueeze(-1) ,x],axis=1) #* cond_mask.unsqueeze(-1)
 
@@ -364,17 +364,16 @@ def _get_ddpm_sampler(model, device):
         @torch.no_grad()
         def sample(self, model_forward, model_forward_uncon, h, x_t):
             x = x_t
-
             T = self.betas.shape[0]
 
-            sample_steps = 30 
             step_indices = torch.linspace(
-                T - 1, 0, sample_steps, device=self.device
+                T - 1, 0, h.shape[0], device=self.device
             ).long()
 
             for i, n in enumerate(step_indices):
-                t = torch.full((h.shape[0],), n, device=self.device, dtype=torch.long)
-                x = self.p_sample(model_forward, model_forward_uncon, x, h, t, i)
+                t = torch.full((x.shape[0],), n, device=self.device, dtype=torch.long)
+                h_i = h[i] if h.dim() == 3 else h
+                x = self.p_sample(model_forward, model_forward_uncon, x, h_i, t, i)
 
             return x
 
@@ -386,58 +385,42 @@ def _get_ddpm_sampler(model, device):
 
 
 def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):
-
-    def _hier_cond_from_qembs(q_embs, t, total_T, mode="cumsum"):   ######## 여기는 dmcdr에서 없는 부분 (time step별로 condtion 다르게 주기 위해)
-        """
-        q_embs: (L, B, D)
-        t: (B,) long  (배치 내 동일 timestep이면 t[0] 써도 OK)
-        total_T: model.num_steps
-        mode:
-          - "last": level 하나만 선택
-          - "cumsum": q0..qk 누적합 (추천)
-          - "weighted": 누적 가중합
-        return: (B, D)
-        """
-        L = q_embs.shape[0]
-        t_scalar = int(t[0].item()) if t.dim() > 0 else int(t.item())
-
-        # progress: 0(초기, noisy) -> 1(후반, clean)
-        progress = 1.0 - (t_scalar / max(total_T - 1, 1))
-        k = int(progress * (L - 1))
-        k = max(0, min(k, L - 1))
-
-        if mode == "last":
-            return q_embs[k]  # (B, D)
-
-        if mode == "cumsum":
-            return q_embs[:k+1].sum(dim=0)  # (B, D)
-
-        if mode == "weighted":
-            w = torch.linspace(0.3, 1.0, L, device=q_embs.device)
-            w = w / w.sum()
-            ww = w[:k+1].view(-1, 1, 1)
-            return (q_embs[:k+1] * ww).sum(dim=0)
-
-        raise ValueError(f"Unknown mode: {mode}")
-
-    # ----------------------------
-    # sampler 준비
-    # ----------------------------
     B = x.shape[0]
     cond_mask = torch.ones(B, device=device)
 
     sampler = _get_ddpm_sampler(model, device)
     total_T = model.num_steps
+    sample_steps = model.sample_steps  # = 30
 
-    use_hier = (cond_emb.dim() == 3)  # (L,B,D)면 hierarchical
+    use_hier = (cond_emb.dim() == 3)  # (L,B,D)
 
+    # ----------------------------
+    # ✅ hier_conds 미리 계산: (S,B,D)
+    # ----------------------------
+    if use_hier:
+        # cond_emb: (L,B,D)
+        L = cond_emb.shape[0]
+        cond_cumsum = torch.cumsum(cond_emb, dim=0)  # (L,B,D)
+
+        # sampler loop와 동일한 step index 만들기
+        step_indices = torch.linspace(total_T - 1, 0, sample_steps, device=device).long()  # (S,)
+
+        # timestep -> level id 매핑 (coarse->fine)
+        progress = 1.0 - step_indices.float() / (total_T - 1)  # 0->1
+        level_ids = torch.clamp((progress * (L - 1)).long(), 0, L - 1)  # (S,)
+
+        hier_conds = cond_cumsum[level_ids]  # (S,B,D)
+    else:
+        hier_conds = cond_emb  # (B,D)
+
+    # ----------------------------
+    # ✅ sampler에 h로 넣고, model_forward는 h_를 그대로 cond로 사용
+    # ----------------------------
     x0 = sampler.sample(
-        model_forward=lambda x_, h_unused, t_: model.forward(
+        model_forward=lambda x_, h_, t_: model.forward(
             x_,
             t_,
-            (_hier_cond_from_qembs(cond_emb, t_, total_T,
-                                   mode=model.rqvae.get("hier_mode", "cumsum"))
-             if use_hier else cond_emb),
+            h_,               # step마다 바뀌는 condition
             cond_mask,
             diff_id=diff_id
         ),
@@ -448,7 +431,7 @@ def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):
             torch.zeros(B, device=device),
             diff_id=diff_id
         ),
-        h=torch.zeros_like(x),  # sampler 인터페이스용 더미
+        h=hier_conds,          # (S,B,D) or (B,D)
         x_t=x
     )
 
