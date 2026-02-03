@@ -236,7 +236,7 @@ def diffusion_loss_fn_parallel(
         output1 = model(x_m, t.squeeze(-1), cond_emb1, cond_mask1, diff_id=0)  # x_t, c1 -> noise
         output2 = model(x_g, t.squeeze(-1), cond_emb2, cond_mask2, diff_id=1)  # x_t, c2 -> noise
 
-        return F.mse_loss(x_m, output1) + F.mse_loss(x_g, output2)  # 예측 노이즈와 실제 노이즈 비교 L1 loss
+        return F.mse_loss(x_0_m, output1) + F.mse_loss(x_0_g, output2)  # 예측 노이즈와 실제 노이즈 비교 L1 loss
 
     elif is_task:  # task loss ALM 수행
 
