@@ -44,6 +44,8 @@ def prepare_1():
 
     # item cond
     parser.add_argument("--item_cond", type=bool, default=False, help="아이템 조건 사용 여부")
+    parser.add_argument("--w", type=float, default=0.0, help="Diffusion inference - uncond 가중치 w")
+    parser.add_argument("--emb_dim", type=int, default=10, help="MF emb dim")
 
     args = parser.parse_args()
 
@@ -72,6 +74,8 @@ def prepare_2(args, config_path):
         config["codebook_num"] = args.codebook_num
         config["codebook_size"] = args.codebook_size
         config["alpha_rq"] = args.alpha_rq
+        config["w"] = args.w
+        config["emb_dim"] = args.emb_dim
 
     return config
 
@@ -135,6 +139,9 @@ if __name__ == "__main__":
         write(f"⭐ Diff loss 계산: ({args.set_loss}) {set_loss[args.set_loss]}")
         write(f"⭐ Project 위치  : ({args.set_proj}) {set_proj[args.set_proj]}")
         write(f"⭐ Aggrgation   : {args.set_aggr}")
+
+    write(f"emb dim: {args.emb_dim}")
+    write(f"w = {args.w}")
 
     if not args.process_data_mid and not args.process_data_ready:
         Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth")

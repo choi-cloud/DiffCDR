@@ -63,6 +63,7 @@ class DiffParallel(nn.Module):
         diff_mask_rate=0.1,
         parallel=None,
         rqvae=None,
+        w=0.0,
     ):
         super(DiffParallel, self).__init__()
 
@@ -101,6 +102,8 @@ class DiffParallel(nn.Module):
 
         # RQVAE setting
         self.rqvae = rqvae
+
+        self.w = w
 
         self.step_mlp = nn.Sequential(
             SinusoidalPositionEmbeddings(self.input_dim),
@@ -361,7 +364,7 @@ def _get_ddpm_sampler(model, device):
     if hasattr(model, "_ddpm_sampler") and model._ddpm_sampler is not None:
         return model._ddpm_sampler
 
-    model._ddpm_sampler = _Diffusion(model.betas, w=0.0, device=device)
+    model._ddpm_sampler = _Diffusion(model.betas, w=model.w, device=device)
     return model._ddpm_sampler
 
 

@@ -12,6 +12,7 @@ import lacdr_model as LACDR
 
 import pickle
 import json
+import os
 
 from utils import write
 import ast
@@ -65,6 +66,10 @@ class Run:
         self.warm_train_path = self.input_root + "/warm_start_train.csv"
         self.warm_test_path = self.input_root + "/warm_start_test.csv"
 
+        self.stylecache_root = (
+            self.root + "stylecache/_" + str(int(self.ratio[0] * 10)) + "_" + str(int(self.ratio[1] * 10)) + "/tgt_" + self.tgt + "_src_" + self.src
+        )
+
         self.results = {
             "tgt_mae": 10,
             "tgt_rmse": 10,
@@ -95,6 +100,7 @@ class Run:
             "codebook_size": config["codebook_size"],
             "alpha_rq": config["alpha_rq"],
         }
+        self.w = config["w"]
 
         self.device = "cuda" if config["use_cuda"] else "cpu"
 
@@ -638,7 +644,7 @@ class Run:
             optimizer_diff = torch.optim.Adam(params=diff_model.parameters(), lr=self.diff_lr)
             return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_diff, optimizer_map
 
-    def eval_mae(self, model, data_loader, stage, graph_test=None, style_src=None):
+    def eval_mae(self, model, data_loader, stage, style_src=None):
         print("Evaluating MAE:")
 
         targets, predicts = list(), list()
@@ -657,14 +663,6 @@ class Run:
                     predicts.extend(pred.tolist())
 
             elif stage in ("test_diff_parallel"):
-                src_graph = graph_test.get("src")
-                tgt_graph = graph_test.get("tgt")
-                shared_graph = graph_test.get("shared")
-                smooth_user_emb_src, _ = self.compute_user_graph_embeddings(model[0], model[1], src_graph, use_target=False)
-                smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model[0], model[1], tgt_graph, use_target=True)
-                model[1].smooth_user_emb_src = smooth_user_emb_src
-                model[1].smooth_user_emb_tgt = smooth_user_emb_tgt
-
                 y_all = []
                 mae_all = []
 
@@ -772,15 +770,6 @@ class Run:
             return torch.tensor(loss_ls).mean()
 
         elif diff == True:
-            if graph_train is not None:  # DiffParallel else DiffCDR
-                src_graph = graph_train.get("src")
-                tgt_graph = graph_train.get("tgt")
-                shared_graph = graph_train.get("shared")
-                smooth_user_emb_src, _ = self.compute_user_graph_embeddings(model[0], model[1], src_graph, use_target=False)
-                smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model[0], model[1], tgt_graph, use_target=True)
-                model[1].smooth_user_emb_src = smooth_user_emb_src
-                model[1].smooth_user_emb_tgt = smooth_user_emb_tgt
-
             task_loss_ls = []
             for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                 model[1].train()
@@ -965,6 +954,15 @@ class Run:
 
         diff_model.style_tgt_item = style_tgt_item
 
+        
+        src_graph = graph_train.get("src")
+        tgt_graph = graph_train.get("tgt")
+        shared_graph = graph_train.get("shared")
+        smooth_user_emb_src, _ = self.compute_user_graph_embeddings(model, diff_model, src_graph, use_target=False)
+        smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model, diff_model, tgt_graph, use_target=True)
+        diff_model.smooth_user_emb_src = smooth_user_emb_src
+        diff_model.smooth_user_emb_tgt = smooth_user_emb_tgt
+
         for i in range(self.epoch):
             loss, task_loss = self.train(
                 data_diff,
@@ -975,11 +973,10 @@ class Run:
                 stage="train_diff_parallel",
                 mapping=False,
                 diff=True,
-                graph_train=graph_train,
                 style_src=style_src,
             )
 
-            mae, rmse = self.eval_mae([model, diff_model], data_test, stage="test_diff_parallel", graph_test=graph_test, style_src=style_src)
+            mae, rmse = self.eval_mae([model, diff_model], data_test, stage="test_diff_parallel", style_src=style_src)
             self.update_results(mae, rmse, "diff_parallel")
             write(f"DIFF LOSS {loss.item()}, TASK LOSS {task_loss.item()}, MAE: {mae} RMSE: {rmse}")
 
@@ -1056,6 +1053,7 @@ class Run:
                 self.diff_mask_rate,
                 parallel=self.parallel_setting,
                 rqvae=self.rqvae_setting,
+                w=self.w,
             )
             diff_model = diff_model.cuda() if self.use_cuda else diff_model
 
@@ -1084,9 +1082,16 @@ class Run:
         data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test, graph_data = self.get_data()
 
         print(f"\n소스 도메인 내 유저의 레이팅 스타일 정보 추출\n")
-        style_src, info = build_src_user_rating_style_from_loader(
-            data_src=data_src, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, device="cpu"
-        )
+        cache_path = f"{self.stylecache_root}.pt"
+        if os.path.exists(cache_path):
+            ckpt = torch.load(cache_path, map_location="cpu", weights_only=True)
+            style_src = ckpt["style"]
+            info = ckpt["info"]
+        else: 
+            style_src, info = build_src_user_rating_style_from_loader(
+                data_src=data_src, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, device="cpu",
+                cache_path=cache_path
+            )
 
         # print("\n소스 유저 percentile-style 추출\n")
         # style_src, info_u = build_src_user_percentile_style_from_loader(
@@ -1094,9 +1099,16 @@ class Run:
         # )
 
         print(f"\n타겟 도메인 내 아이템의 레이팅 스타일 정보 추출\n")
-        style_tgt_item, info_tgt = build_tgt_item_rating_style_from_loader(
-            data_tgt=data_tgt, num_items_total=self.iid_all + 1, rating_min=1.0, rating_max=5.0, device="cpu"
-        )
+        cache_path = f"{self.stylecache_root}_tgt_item.pt"
+        if os.path.exists(cache_path):
+            ckpt = torch.load(cache_path, map_location="cpu", weights_only=True)
+            style_tgt_item = ckpt["style_tgt_item"]
+            info_tgt = ckpt["info_tgt"]
+        else:
+            style_tgt_item, info_tgt = build_tgt_item_rating_style_from_loader(
+                data_tgt=data_tgt, num_items_total=self.iid_all + 1, rating_min=1.0, rating_max=5.0, device="cpu",
+                cache_path=cache_path
+            )
 
         # print("\n타겟 아이템 percentile-style 추출\n")
         # style_tgt_item, info_i = build_tgt_item_percentile_style_from_loader(
@@ -1182,7 +1194,7 @@ class Run:
 
         elif exp_part == "diff_parallel":
             self.model_load(model, path=save_path)
-            model.build_user_prototype_cache(self.device, 0.5, 0.5, user_batch=1024)
+            # model.build_user_prototype_cache(self.device, 0.5, 0.5, user_batch=1024)
             print("None_CDR model loaded")
             # optimizer_diff: DiffParallel 의 파라미터만 포함, model에 있는 user/item embedding update X
             self.Diff_Parallel(
@@ -1252,6 +1264,7 @@ def build_src_user_rating_style_from_loader(
     rating_min: float = 1.0,
     rating_max: float = 5.0,
     device: str = "cpu",
+    cache_path = ""
 ):
     """
     data_src yields: (X, y)
@@ -1327,6 +1340,16 @@ def build_src_user_rating_style_from_loader(
         "rating_max": rating_max,
         "num_users": num_users,
     }
+
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    torch.save(
+        {
+            "style": style.cpu(),   # 저장은 CPU 권장
+            "info": info,
+        },
+        cache_path,
+    )
+
     return style, info
 
 
@@ -1337,6 +1360,7 @@ def build_tgt_item_rating_style_from_loader(
     rating_min: float = 1.0,
     rating_max: float = 5.0,
     device: str = "cpu",
+    cache_path="",
 ):
     """
     data_tgt yields: (X, y)
@@ -1418,6 +1442,17 @@ def build_tgt_item_rating_style_from_loader(
         "rating_max": rating_max,
         "num_items_total": num_items_total,
     }
+
+    
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    torch.save(
+        {
+            "style_tgt_item": style_item.cpu(),   # 저장은 CPU 권장
+            "info_tgt": info,
+        },
+        cache_path,
+    )
+
     return style_item, info
 
 
