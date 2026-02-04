@@ -53,6 +53,9 @@ class Run:
         self.src_path = self.input_root + "/train_src.csv"
         self.tgt_path = self.input_root + "/train_tgt.csv"
 
+        print(f"\nsrc: {self.src_path}")
+        print(f"tgt: {self.src_path}\n")
+
         self.meta_path = self.input_root + "/train_meta.csv"
         self.test_path = self.input_root + "/test.csv"
 
@@ -588,7 +591,7 @@ class Run:
             self.TgtOnly(model, data_tgt, data_test, criterion, optimizer_tgt)
             self.SrcOnly(model, data_src, criterion, optimizer_src)
             # CMF
-            self.DataAug(model, data_aug, data_test, criterion, optimizer_aug)
+            # self.DataAug(model, data_aug, data_test, criterion, optimizer_aug)
             self.result_print(["tgt", "aug"])
             self.model_save(model, path=save_path)
 
