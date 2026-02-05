@@ -9,20 +9,6 @@ from rqvae import ResidualQuantizer
 from utils import AttentionLayer
 
 
-class LookupEmbedding(torch.nn.Module):
-
-    def __init__(self, uid_all, iid_all, emb_dim):
-        super().__init__()
-        self.uid_embedding = torch.nn.Embedding(uid_all, emb_dim)
-        self.iid_embedding = torch.nn.Embedding(iid_all + 1, emb_dim)
-
-    def forward(self, x):
-        uid_emb = self.uid_embedding(x[:, 0].unsqueeze(1))
-        iid_emb = self.iid_embedding(x[:, 1].unsqueeze(1))
-        emb = torch.cat([uid_emb, iid_emb], dim=1)
-        return emb
-
-
 class MetaNet(torch.nn.Module):
     def __init__(self, emb_dim, meta_dim):
         super().__init__()
@@ -40,6 +26,74 @@ class MetaNet(torch.nn.Module):
         return output.squeeze(1)
 
 
+def build_mlp(in_dim: int, hidden_dims, out_dim: int, dropout: float = 0.0):
+    layers = []
+    d = in_dim
+    for h in hidden_dims:
+        layers.append(nn.Linear(d, h))
+        layers.append(nn.ReLU())
+        if dropout > 0:
+            layers.append(nn.Dropout(dropout))
+        d = h
+    layers.append(nn.Linear(d, out_dim))
+    return nn.Sequential(*layers)
+
+
+class StyleEncoder(nn.Module):
+    def __init__(self, in_dim: int, z_dim: int, hidden=(64, 32), dropout: float = 0.0, use_layernorm=True):
+        super().__init__()
+        self.net = build_mlp(in_dim, hidden, z_dim, dropout=dropout)
+        self.norm = nn.LayerNorm(z_dim) if use_layernorm else nn.Identity()
+
+    def forward(self, x_style: torch.Tensor) -> torch.Tensor:
+        z = self.net(x_style)
+        return self.norm(z)
+
+
+class StyleDecoderLoss(nn.Module):
+    """
+    네 코드 스타일 그대로:
+      style_loss = style_decoder(style_emb, style_y)
+    즉, forward가 재구성 loss를 바로 반환.
+    """
+
+    def __init__(self, z_dim: int, out_dim: int, hidden=(32, 64), dropout: float = 0.0, recon_type="mse"):
+        super().__init__()
+        self.net = build_mlp(z_dim, hidden, out_dim, dropout=dropout)
+        assert recon_type in ["mse", "l1"]
+        self.recon_type = recon_type
+
+    def forward(self, z_style: torch.Tensor, x_style: torch.Tensor) -> torch.Tensor:
+        x_hat = self.net(z_style)
+        if self.recon_type == "mse":
+            return F.mse_loss(x_hat, x_style)
+        else:
+            return F.l1_loss(x_hat, x_style)
+
+
+class StyleBiasHead(nn.Module):
+    def __init__(self, z_dim: int, hidden=(32,), dropout: float = 0.0):
+        super().__init__()
+        self.net = build_mlp(z_dim, hidden, 1, dropout=dropout)
+
+    def forward(self, z_style: torch.Tensor) -> torch.Tensor:
+        return self.net(z_style).squeeze(-1)  # (B,)
+
+
+class LookupEmbedding(torch.nn.Module):
+
+    def __init__(self, uid_all, iid_all, emb_dim):
+        super().__init__()
+        self.uid_embedding = torch.nn.Embedding(uid_all, emb_dim)
+        self.iid_embedding = torch.nn.Embedding(iid_all + 1, emb_dim)
+
+    def forward(self, x):
+        uid_emb = self.uid_embedding(x[:, 0].unsqueeze(1))
+        iid_emb = self.iid_embedding(x[:, 1].unsqueeze(1))
+        emb = torch.cat([uid_emb, iid_emb], dim=1)
+        return emb
+
+
 class MFBasedModel(torch.nn.Module):
     def __init__(self, uid_all, iid_all, emb_dim, meta_dim_0):
         super().__init__()
@@ -50,6 +104,12 @@ class MFBasedModel(torch.nn.Module):
 
         self.meta_net = MetaNet(emb_dim, meta_dim_0)
         self.mapping = torch.nn.Linear(emb_dim, emb_dim, False)
+
+        style_in_dim = 9
+        style_z_dim = 32
+        self.style_encoder = StyleEncoder(in_dim=style_in_dim, z_dim=style_z_dim, hidden=(64, 32), dropout=0.1)
+        self.style_decoder = StyleDecoderLoss(z_dim=style_z_dim, out_dim=style_in_dim, hidden=(32, 64), dropout=0.1, recon_type="mse")
+        self.style_head = StyleBiasHead(z_dim=style_z_dim, hidden=(32,), dropout=0.1)
 
         # ! mf 소스 임베딩과 aggr 소스 임베딩 각각을 양자화하기 위한 모듈
         self.rq_mf = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
@@ -136,14 +196,80 @@ class MFBasedModel(torch.nn.Module):
 
     def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False, item_cond=False, style_src=None):
         if stage == "train_src":
-            emb = self.src_model.forward(x)
-            x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
-            return x
+            emb = self.src_model.forward(x)  # (B, 2, D) 가정
+            y_pred = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)  # (B,)
 
-        elif stage in ["train_tgt", "test_tgt"]:
+            uid = x[:, 0].long()
+
+            # ===== 스타일 테이블 조회 (src: user only) =====
+            uid_cpu = uid.cpu()
+
+            style_y_user = self.style_src[uid_cpu].to(uid.device)  # 다시 GPU로
+
+            # ===== 스타일 임베딩 =====
+            style_emb_user = self.style_encoder(style_y_user)  # (B, Z)
+
+            # ===== AE 재구성 loss =====
+            style_loss_user = self.style_decoder(style_emb_user, style_y_user)  # scalar
+
+            # ===== bias =====
+            bias_u = self.style_head(style_emb_user)  # (B,)
+
+            # 학습 루프를 깔끔하게 하려면 항상 (pred, style_loss)로 통일 추천
+            return (y_pred + bias_u), style_loss_user
+
+        elif stage == "train_tgt":
+            emb = self.tgt_model.forward(x)  # (B, 2, D)
+            y_pred = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)  # (B,)
+
+            uid, iid = x[:, 0].long(), x[:, 1].long()
+
+            # ===== 스타일 테이블 조회 =====
+            uid_cpu = uid.cpu()
+            iid_cpu = iid.cpu()
+
+            style_y_user = self.style_tgt[uid_cpu].to(uid.device)  # 다시 GPU로
+            style_y_item = self.style_tgt_item[iid_cpu].to(uid.device)
+
+            # ===== 스타일 임베딩 =====
+            style_emb_user = self.style_encoder(style_y_user)  # (B, Z)
+            style_emb_item = self.style_encoder(style_y_item)  # (B, Z)
+
+            # ===== bias =====
+            bias_u = self.style_head(style_emb_user)  # (B,)
+            bias_i = self.style_head(style_emb_item)  # (B,)
+
+            # ===== AE 재구성 loss =====
+            style_loss_user = self.style_decoder(style_emb_user, style_y_user)  # scalar
+            style_loss_item = self.style_decoder(style_emb_item, style_y_item)  # scalar
+
+            # user+item 둘 다 쓰니까 평균으로 스케일 맞추기(추천)
+            style_loss = 0.5 * (style_loss_user + style_loss_item)
+
+            return (y_pred + bias_u + bias_i), style_loss
+
+        elif stage == "test_tgt":
             emb = self.tgt_model.forward(x)
-            x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
-            return x
+            y_pred = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
+
+            uid, iid = x[:, 0].long(), x[:, 1].long()
+
+            uid_cpu = uid.cpu()
+            iid_cpu = iid.cpu()
+
+            style_y_user = self.style_tgt[uid_cpu].to(uid.device)  # 다시 GPU로
+            style_y_item = self.style_tgt_item[iid_cpu].to(uid.device)
+
+            # 평가에서는 그래프 만들 필요 없음 (속도/메모리)
+            with torch.no_grad():
+                style_emb_user = self.style_encoder(style_y_user)
+                style_emb_item = self.style_encoder(style_y_item)
+                bias_u = self.style_head(style_emb_user)
+                bias_i = self.style_head(style_emb_item)
+
+            # 테스트도 (pred, style_loss)로 통일하면 루프가 더 깔끔해짐
+            # return (y_pred + bias_u + bias_i), torch.zeros((), device=y_pred.device)
+            return y_pred + bias_u + bias_i
 
         elif stage in ["train_aug", "test_aug"]:
             emb = self.aug_model.forward(x)

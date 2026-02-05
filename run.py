@@ -622,8 +622,27 @@ class Run:
         return model.cuda() if self.use_cuda else model
 
     def get_optimizer(self, model, diff_model=None, ss_model=None, la_model=None):
-        optimizer_src = torch.optim.Adam(params=model.src_model.parameters(), lr=self.lr, weight_decay=self.wd)
-        optimizer_tgt = torch.optim.Adam(params=model.tgt_model.parameters(), lr=self.lr, weight_decay=self.wd)
+        optimizer_src = torch.optim.Adam(
+            params=[
+                {"params": model.src_model.parameters()},
+                {"params": model.style_encoder.parameters()},
+                {"params": model.style_decoder.parameters()},
+                {"params": model.style_head.parameters()},
+            ],
+            lr=self.lr,
+            weight_decay=self.wd,
+        )
+
+        optimizer_tgt = torch.optim.Adam(
+            params=[
+                {"params": model.tgt_model.parameters()},
+                {"params": model.style_encoder.parameters()},
+                {"params": model.style_decoder.parameters()},
+                {"params": model.style_head.parameters()},
+            ],
+            lr=self.lr,
+            weight_decay=self.wd,
+        )
         optimizer_meta = torch.optim.Adam(params=model.meta_net.parameters(), lr=self.lr, weight_decay=self.wd)
         optimizer_aug = torch.optim.Adam(params=model.aug_model.parameters(), lr=self.lr, weight_decay=self.wd)
 
@@ -656,11 +675,11 @@ class Run:
                 for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                     model[0].eval()
                     model[1].eval()
-                    pred = model[0](X, stage, self.device, diff_model=model[1])
+                    y_pred = model[0](X, stage, self.device, diff_model=model[1])
 
                     y_input = X[-1]
                     targets.extend(y_input.squeeze(1).tolist())
-                    predicts.extend(pred.tolist())
+                    predicts.extend(y_pred.tolist())
 
             elif stage in ("test_diff_parallel"):
                 y_all = []
@@ -735,8 +754,9 @@ class Run:
                 else:
                     model.train()
 
-                    pred = model(X, stage, self.device)
-                    loss = criterion(pred, y.squeeze().float())
+                    y_pred, style_loss = model(X, stage, self.device)
+                    loss = criterion(y_pred, y.squeeze().float())
+                    loss = loss + 0.05 * style_loss
 
                     model.zero_grad()
                     loss.backward()
@@ -954,7 +974,6 @@ class Run:
 
         diff_model.style_tgt_item = style_tgt_item
 
-        
         src_graph = graph_train.get("src")
         tgt_graph = graph_train.get("tgt")
         shared_graph = graph_train.get("shared")
@@ -1081,24 +1100,29 @@ class Run:
 
         data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test, graph_data = self.get_data()
 
-        print(f"\n소스 도메인 내 유저의 레이팅 스타일 정보 추출\n")
+        print(f"\n소스 도메인 내 유저의 레이팅 스타일 정보 추출")
         cache_path = f"{self.stylecache_root}.pt"
         if os.path.exists(cache_path):
             ckpt = torch.load(cache_path, map_location="cpu", weights_only=True)
             style_src = ckpt["style"]
             info = ckpt["info"]
-        else: 
+        else:
             style_src, info = build_src_user_rating_style_from_loader(
-                data_src=data_src, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, device="cpu",
-                cache_path=cache_path
+                data_src=data_src, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, device="cpu", cache_path=cache_path
             )
 
-        # print("\n소스 유저 percentile-style 추출\n")
-        # style_src, info_u = build_src_user_percentile_style_from_loader(
-        #     data_src=data_src, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, alpha=0.1, device="cpu"
-        # )
+        print(f"타겟 도메인 내 유저의 레이팅 스타일 정보 추출")
+        cache_path = f"{self.stylecache_root}_tgt_user.pt"
+        if os.path.exists(cache_path):
+            ckpt = torch.load(cache_path, map_location="cpu", weights_only=True)
+            style_tgt = ckpt["style"]
+            info = ckpt["info"]
+        else:
+            style_tgt, info = build_src_user_rating_style_from_loader(
+                data_src=data_tgt, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, device="cpu", cache_path=cache_path
+            )
 
-        print(f"\n타겟 도메인 내 아이템의 레이팅 스타일 정보 추출\n")
+        print(f"타겟 도메인 내 아이템의 레이팅 스타일 정보 추출\n")
         cache_path = f"{self.stylecache_root}_tgt_item.pt"
         if os.path.exists(cache_path):
             ckpt = torch.load(cache_path, map_location="cpu", weights_only=True)
@@ -1106,18 +1130,16 @@ class Run:
             info_tgt = ckpt["info_tgt"]
         else:
             style_tgt_item, info_tgt = build_tgt_item_rating_style_from_loader(
-                data_tgt=data_tgt, num_items_total=self.iid_all + 1, rating_min=1.0, rating_max=5.0, device="cpu",
-                cache_path=cache_path
+                data_tgt=data_tgt, num_items_total=self.iid_all + 1, rating_min=1.0, rating_max=5.0, device="cpu", cache_path=cache_path
             )
-
-        # print("\n타겟 아이템 percentile-style 추출\n")
-        # style_tgt_item, info_i = build_tgt_item_percentile_style_from_loader(
-        #     data_tgt=data_tgt, num_items_total=self.iid_all, rating_min=1.0, rating_max=5.0, alpha=0.1, device="cpu"  # 전역 아이템 개수
-        # )
 
         criterion = torch.nn.MSELoss()
 
         if exp_part == "None_CDR":
+            model.style_src = style_src
+            model.style_tgt = style_tgt
+            model.style_tgt_item = style_tgt_item
+
             self.TgtOnly(model, data_tgt, data_test, criterion, optimizer_tgt)
             self.SrcOnly(model, data_src, criterion, optimizer_src)
             # CMF
@@ -1194,6 +1216,11 @@ class Run:
 
         elif exp_part == "diff_parallel":
             self.model_load(model, path=save_path)
+
+            diff_model.style_src = style_src
+            diff_model.style_tgt = style_tgt
+            diff_model.style_tgt_item = style_tgt_item
+
             # model.build_user_prototype_cache(self.device, 0.5, 0.5, user_batch=1024)
             print("None_CDR model loaded")
             # optimizer_diff: DiffParallel 의 파라미터만 포함, model에 있는 user/item embedding update X
@@ -1259,12 +1286,7 @@ def mae_summary_by_score(y_true, mae):
 
 @torch.no_grad()
 def build_src_user_rating_style_from_loader(
-    data_src,
-    num_users: int,
-    rating_min: float = 1.0,
-    rating_max: float = 5.0,
-    device: str = "cpu",
-    cache_path = ""
+    data_src, num_users: int, rating_min: float = 1.0, rating_max: float = 5.0, device: str = "cpu", cache_path=""
 ):
     """
     data_src yields: (X, y)
@@ -1344,7 +1366,7 @@ def build_src_user_rating_style_from_loader(
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     torch.save(
         {
-            "style": style.cpu(),   # 저장은 CPU 권장
+            "style": style.cpu(),  # 저장은 CPU 권장
             "info": info,
         },
         cache_path,
@@ -1443,192 +1465,13 @@ def build_tgt_item_rating_style_from_loader(
         "num_items_total": num_items_total,
     }
 
-    
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     torch.save(
         {
-            "style_tgt_item": style_item.cpu(),   # 저장은 CPU 권장
+            "style_tgt_item": style_item.cpu(),  # 저장은 CPU 권장
             "info_tgt": info,
         },
         cache_path,
     )
 
-    return style_item, info
-
-
-@torch.no_grad()
-def build_src_user_percentile_style_from_loader(
-    data_src,
-    num_users: int,
-    rating_min: float = 1.0,
-    rating_max: float = 5.0,
-    device: str = "cpu",
-    alpha: float = 0.1,  # low/high 구간(예: 하위 10%, 상위 10%)
-):
-    """
-    Percentile-style features per user computed from rating histograms.
-
-    Returns
-    -------
-    style: FloatTensor [num_users, 9]
-      style[u] = [p_mean, p_var, p_std, p_min, p_max, cnt,
-                  frac_low, frac_high, frac_extreme]
-      - p_* are computed on percentile values in [0,1]
-    info: dict
-    """
-    # ---- rating levels: assumes integer levels in [rating_min, rating_max]
-    # (너 데이터가 1~5 정수 평점이라는 전제. half-step이면 levels를 바꿔야 함)
-    levels = torch.arange(int(rating_min), int(rating_max) + 1, dtype=torch.long)  # [K]
-    K = levels.numel()
-
-    # per-user histogram counts: [U, K]
-    hist = torch.zeros((num_users, K), dtype=torch.float64)
-
-    for X, y in data_src:
-        uid = X[:, 0].detach().to("cpu").long().view(-1)  # [B]
-        r = y.detach().to("cpu").view(-1)  # [B]
-
-        if uid.numel() != r.numel():
-            raise ValueError(f"uid/rating mismatch: uid={uid.shape}, r={r.shape}")
-
-        # rating을 레벨 인덱스로 변환 (정수 평점 전제)
-        r_int = r.round().long()  # 혹시 float여도 1~5 근처면 반올림
-        if r_int.numel() > 0:
-            if r_int.min().item() < levels.min().item() or r_int.max().item() > levels.max().item():
-                raise ValueError(f"rating out of level range: min={r_int.min().item()}, max={r_int.max().item()}")
-
-        ridx = (r_int - levels.min()).clamp(0, K - 1)  # [B]
-
-        # scatter-add로 히스토그램 누적
-        # hist[uid, ridx] += 1
-        hist.index_put_((uid, ridx), torch.ones_like(ridx, dtype=torch.float64), accumulate=True)
-
-    # ---- counts per user
-    cnts = hist.sum(dim=1)  # [U]
-    cnt_safe = torch.clamp(cnts, min=1.0)
-
-    # ---- build percentile per level per user (mid-rank)
-    # cum_less: cumulative counts strictly less than level k
-    cum = torch.cumsum(hist, dim=1)  # [U,K] cumulative including self
-    cum_less = cum - hist  # [U,K]
-    p_level = (cum_less + 0.5 * hist) / cnt_safe.unsqueeze(1)  # [U,K] in [0,1]
-
-    # ---- stats on percentile values, weighted by hist
-    # mean_p = sum_k count_k * p_k / N
-    mean_p = (hist * p_level).sum(dim=1) / cnt_safe  # [U]
-    ex2_p = (hist * (p_level**2)).sum(dim=1) / cnt_safe  # [U]
-    var_p = torch.clamp(ex2_p - mean_p * mean_p, min=0.0)  # [U]
-    std_p = torch.sqrt(var_p + 1e-12)  # [U]
-
-    # p_min/p_max: among levels that exist
-    has = hist > 0
-    pmin = torch.where(has, p_level, torch.full_like(p_level, float("inf"))).min(dim=1).values
-    pmax = torch.where(has, p_level, torch.full_like(p_level, float("-inf"))).max(dim=1).values
-    pmin = torch.where(cnts > 0, pmin, torch.zeros_like(pmin))
-    pmax = torch.where(cnts > 0, pmax, torch.zeros_like(pmax))
-
-    # low/high/extreme fractions based on percentile thresholds
-    low_mask = p_level <= alpha
-    high_mask = p_level >= (1.0 - alpha)
-
-    frac_low = (hist * low_mask.double()).sum(dim=1) / cnt_safe
-    frac_high = (hist * high_mask.double()).sum(dim=1) / cnt_safe
-    frac_extreme = frac_low + frac_high
-
-    # [U, 9]
-    style = torch.stack([mean_p, var_p, std_p, pmin, pmax, cnts, frac_low, frac_high, frac_extreme], dim=1).to(torch.float32).to(device)
-
-    info = {
-        "feature_names": ["p_mean", "p_var", "p_std", "p_min", "p_max", "cnt", "frac_low", "frac_high", "frac_extreme"],
-        "alpha": alpha,
-        "rating_min": rating_min,
-        "rating_max": rating_max,
-        "levels": levels.tolist(),
-        "num_users": num_users,
-        "note": "percentile is computed within each user's rating distribution (mid-rank).",
-    }
-    return style, info
-
-
-@torch.no_grad()
-def build_tgt_item_percentile_style_from_loader(
-    data_tgt,
-    num_items_total: int,
-    rating_min: float = 1.0,
-    rating_max: float = 5.0,
-    device: str = "cpu",
-    alpha: float = 0.1,
-):
-    """
-    Percentile-style features per item computed from rating histograms.
-
-    Returns
-    -------
-    style_item: FloatTensor [num_items_total, 9]
-      style_item[i] = [p_mean, p_var, p_std, p_min, p_max, cnt,
-                       frac_low, frac_high, frac_extreme]
-      - percentile is computed within each item's rating distribution (across users)
-    info: dict
-    """
-    levels = torch.arange(int(rating_min), int(rating_max) + 1, dtype=torch.long)  # [K]
-    K = levels.numel()
-
-    hist = torch.zeros((num_items_total, K), dtype=torch.float64)
-
-    for X, y in data_tgt:
-        iid = X[:, 1].detach().to("cpu").long().view(-1)  # [B] global iid
-        r = y.detach().to("cpu").view(-1)  # [B]
-
-        if iid.numel() != r.numel():
-            raise ValueError(f"iid/rating mismatch: iid={iid.shape}, r={r.shape}")
-
-        if iid.numel() > 0:
-            if iid.min().item() < 0 or iid.max().item() >= num_items_total:
-                raise ValueError(f"iid out of range: min={iid.min().item()}, max={iid.max().item()}, num_items_total={num_items_total}")
-
-        r_int = r.round().long()
-        if r_int.numel() > 0:
-            if r_int.min().item() < levels.min().item() or r_int.max().item() > levels.max().item():
-                raise ValueError(f"rating out of level range: min={r_int.min().item()}, max={r_int.max().item()}")
-
-        ridx = (r_int - levels.min()).clamp(0, K - 1)
-
-        hist.index_put_((iid, ridx), torch.ones_like(ridx, dtype=torch.float64), accumulate=True)
-
-    cnts = hist.sum(dim=1)
-    cnt_safe = torch.clamp(cnts, min=1.0)
-
-    cum = torch.cumsum(hist, dim=1)
-    cum_less = cum - hist
-    p_level = (cum_less + 0.5 * hist) / cnt_safe.unsqueeze(1)
-
-    mean_p = (hist * p_level).sum(dim=1) / cnt_safe
-    ex2_p = (hist * (p_level**2)).sum(dim=1) / cnt_safe
-    var_p = torch.clamp(ex2_p - mean_p * mean_p, min=0.0)
-    std_p = torch.sqrt(var_p + 1e-12)
-
-    has = hist > 0
-    pmin = torch.where(has, p_level, torch.full_like(p_level, float("inf"))).min(dim=1).values
-    pmax = torch.where(has, p_level, torch.full_like(p_level, float("-inf"))).max(dim=1).values
-    pmin = torch.where(cnts > 0, pmin, torch.zeros_like(pmin))
-    pmax = torch.where(cnts > 0, pmax, torch.zeros_like(pmax))
-
-    low_mask = p_level <= alpha
-    high_mask = p_level >= (1.0 - alpha)
-
-    frac_low = (hist * low_mask.double()).sum(dim=1) / cnt_safe
-    frac_high = (hist * high_mask.double()).sum(dim=1) / cnt_safe
-    frac_extreme = frac_low + frac_high
-
-    style_item = torch.stack([mean_p, var_p, std_p, pmin, pmax, cnts, frac_low, frac_high, frac_extreme], dim=1).to(torch.float32).to(device)
-
-    info = {
-        "feature_names": ["p_mean", "p_var", "p_std", "p_min", "p_max", "cnt", "frac_low", "frac_high", "frac_extreme"],
-        "alpha": alpha,
-        "rating_min": rating_min,
-        "rating_max": rating_max,
-        "levels": levels.tolist(),
-        "num_items_total": num_items_total,
-        "note": "percentile is computed within each item's rating distribution (mid-rank).",
-    }
     return style_item, info

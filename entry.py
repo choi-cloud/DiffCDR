@@ -27,7 +27,8 @@ def prepare_1():
 
     parser.add_argument("--root", default="./")
     parser.add_argument("--exp_part", default="None_CDR")
-    parser.add_argument("--save_path", default="/home/shared/cjp/model_save_default/model")
+    # parser.add_argument("--save_path", default="/home/shared/cjp/model_save_default/model")
+    parser.add_argument("--save_path", default="/home/schoi/DiffCDR/model_save_default/model")
     parser.add_argument("--use_cuda", default=1)
     parser.add_argument("--experiment", default="DiffCDR")
 
@@ -110,9 +111,7 @@ if __name__ == "__main__":
         )
     )
 
-    print()
-    print("tgt_global_bias 학습")
-    print()
+    print("\nmf 모델부터 다시 학습시켜야 해\n")
 
     logfile = utils.make_dir(f"{args.experiment}")
     logging.basicConfig(
