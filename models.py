@@ -192,31 +192,31 @@ class MFBasedModel(torch.nn.Module):
 
         user_feat = self.encode_all_users().to(device)
 
-        with torch.no_grad():
-            # 1-hop: items aggregate from users
-            item_msg = torch.sparse.mm(vu_adj, user_feat)  # [num_items, d]
+        # with torch.no_grad():
+        # 1-hop: items aggregate from users
+        item_msg = torch.sparse.mm(vu_adj, user_feat)  # [num_items, d]
 
-            # 2-hop: users aggregate from items
-            user_2hop = torch.sparse.mm(uv_adj, item_msg)  # [num_users, d]
+        # 2-hop: users aggregate from items
+        user_2hop = torch.sparse.mm(uv_adj, item_msg)  # [num_users, d]
 
-            # remove self 1-hop contribution (user -> item -> user)
-            user_deg = torch.sparse.sum(uv_adj, dim=1).to_dense().unsqueeze(1)
-            user_2hop = user_2hop - user_deg * user_feat  # self-removal
+        # remove self 1-hop contribution (user -> item -> user)
+        user_deg = torch.sparse.sum(uv_adj, dim=1).to_dense().unsqueeze(1)
+        user_2hop = user_2hop - user_deg * user_feat  # self-removal
 
-            # count real 2-hop neighbors: user -> item -> other_users
-            item_deg = torch.sparse.sum(vu_adj, dim=1).to_dense()
-            item_other = torch.relu(item_deg - 1)  # max(deg-1, 0)
-            two_hop_counts = torch.sparse.mm(uv_adj, item_other[:, None]).to_dense()
+        # count real 2-hop neighbors: user -> item -> other_users
+        item_deg = torch.sparse.sum(vu_adj, dim=1).to_dense()
+        item_other = torch.relu(item_deg - 1)  # max(deg-1, 0)
+        two_hop_counts = torch.sparse.mm(uv_adj, item_other[:, None]).to_dense()
 
-            # normalization (avoid division by zero)
-            norm = torch.where(two_hop_counts == 0, torch.ones_like(two_hop_counts), two_hop_counts)
+        # normalization (avoid division by zero)
+        norm = torch.where(two_hop_counts == 0, torch.ones_like(two_hop_counts), two_hop_counts)
 
-            # final 2-hop embedding
-            user_emb = user_2hop / norm
+        # final 2-hop embedding
+        user_emb = user_2hop / norm
 
-            # fallback: if no 2-hop neighbors, keep original embedding
-            zero_mask = two_hop_counts.squeeze(1) == 0
-            user_emb[zero_mask] = user_feat[zero_mask]
+        # fallback: if no 2-hop neighbors, keep original embedding
+        zero_mask = two_hop_counts.squeeze(1) == 0
+        user_emb[zero_mask] = user_feat[zero_mask]
 
         return user_emb
     
