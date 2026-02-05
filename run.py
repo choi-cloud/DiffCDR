@@ -641,7 +641,13 @@ class Run:
             return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_la, optimizer_map
 
         elif diff_model is not None:
-            optimizer_diff = torch.optim.Adam(params=diff_model.parameters(), lr=self.diff_lr)
+            # optimizer_diff = torch.optim.Adam(params=diff_model.parameters(), lr=self.diff_lr)
+            optimizer_diff = torch.optim.Adam(
+                params=list(diff_model.parameters()) +
+                    list(model.user_embedding.parameters()) +
+                    list(model.item_embedding.parameters()),
+                lr=self.diff_lr
+            )
             return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_diff, optimizer_map
 
     def eval_mae(self, model, data_loader, stage, style_src=None):
@@ -774,18 +780,18 @@ class Run:
             for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                 model[1].train()
                 # diff first, then task
-                loss = model[0](X, stage, self.device, diff_model=model[1], is_task=False, item_cond=self.item_cond)
-                model[1].zero_grad()
-                loss.backward()
-                _ = torch.nn.utils.clip_grad_norm_(model[1].parameters(), 1.0)
-                optimizer.step()
+                # loss = model[0](X, stage, self.device, diff_model=model[1], is_task=False, item_cond=self.item_cond)
+                # model[1].zero_grad()
+                # loss.backward()
+                # _ = torch.nn.utils.clip_grad_norm_(model[1].parameters(), 1.0)
+                # optimizer.step()
 
                 task_loss = model[0](X, stage, self.device, diff_model=model[1], is_task=True, item_cond=self.item_cond, style_src=style_src)
                 model[1].zero_grad()
                 task_loss.backward()
                 _ = torch.nn.utils.clip_grad_norm_(model[1].parameters(), 1.0)
                 optimizer.step()
-
+                loss = torch.zeros(1, device=task_loss.device)
                 loss_ls.append(loss.item())
                 task_loss_ls.append(task_loss.item())
             # return torch.tensor(loss_ls).mean()
@@ -958,10 +964,17 @@ class Run:
         src_graph = graph_train.get("src")
         tgt_graph = graph_train.get("tgt")
         shared_graph = graph_train.get("shared")
-        smooth_user_emb_src, _ = self.compute_user_graph_embeddings(model, diff_model, src_graph, use_target=False)
-        smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model, diff_model, tgt_graph, use_target=True)
-        diff_model.smooth_user_emb_src = smooth_user_emb_src
-        diff_model.smooth_user_emb_tgt = smooth_user_emb_tgt
+        # smooth_user_emb_src, _ = self.compute_user_graph_embeddings(model, diff_model, src_graph, use_target=False)
+        # smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model, diff_model, tgt_graph, use_target=True)
+        # diff_model.smooth_user_emb_src = smooth_user_emb_src
+        # diff_model.smooth_user_emb_tgt = smooth_user_emb_tgt
+        model.graph_shared_train = graph_train.get("shared")
+        model.graph_shared_test = graph_test.get("shared")
+        model.graph_src = src_graph
+        #         graph_data = {
+        #     "train": {"src": graph_src_train, "tgt": graph_tgt_train, "shared": graph_shared_train},
+        #     "test": {"src": graph_src_test, "tgt": graph_tgt_test, "shared": graph_shared_test},
+        # }
 
         for i in range(self.epoch):
             loss, task_loss = self.train(

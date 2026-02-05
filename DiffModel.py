@@ -204,106 +204,146 @@ def diffusion_loss_fn_parallel(
     num_steps = model.num_steps
     mask_rate = model.mask_rate
 
-    if is_task == False:  # DIM loss 먼저
+    # if is_task == False:  # DIM loss 먼저
 
-        # ------------------------
-        # sampling
-        # ------------------------
-        batch_size = x_0_m.shape[0]
+    # ------------------------
+    # sampling
+    # ------------------------
+    batch_size = x_0_m.shape[0]
 
-        ### [TRAIN-DIM] 1. sample t, timestep t를 랜덤하게 추출.
-        t = torch.randint(0, num_steps, size=(batch_size // 2,), device=device)
-        if batch_size % 2 == 0:
-            t = torch.cat([t, num_steps - 1 - t], dim=0)
-        else:
-            extra_t = torch.randint(0, num_steps, size=(1,), device=device)
-            t = torch.cat([t, num_steps - 1 - t, extra_t], dim=0)
-        t = t.unsqueeze(-1)
+    ### [TRAIN-DIM] 1. sample t, timestep t를 랜덤하게 추출.
+    t = torch.randint(0, num_steps, size=(batch_size // 2,), device=device)
+    if batch_size % 2 == 0:
+        t = torch.cat([t, num_steps - 1 - t], dim=0)
+    else:
+        extra_t = torch.randint(0, num_steps, size=(1,), device=device)
+        t = torch.cat([t, num_steps - 1 - t, extra_t], dim=0)
+    t = t.unsqueeze(-1)
 
-        ### [TRAIN-DIM] 2. Diff1, Diff2 noised x_0, noise (e) 생성
-        if model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
-            x_m, e_m = q_x_fn(model, x_0_m, t, device)
-            x_g, e_g = x_m, e_m
-        elif model.parallel["set_init"] == 1:  # 각각 MF, Aggr
-            x_m, e_m = q_x_fn(model, x_0_m, t, device)
-            x_g, e_g = q_x_fn(model, x_0_g, t, device)
+    ### [TRAIN-DIM] 2. Diff1, Diff2 noised x_0, noise (e) 생성
+    x_m, e_m = q_x_fn(model, x_0_m, t, device)
+    x_g, e_g = q_x_fn(model, x_0_g, t, device)
+    
+    num_steps = model.num_steps            
+    t_discrete = 1000.0 * torch.max(
+                t - 1.0 / num_steps,
+                torch.zeros_like(t).to(t),
+            ).squeeze()
 
-        # random mask
-        cond_mask1 = 1 * (torch.rand(cond_emb1.shape[0], device=device) <= mask_rate)
-        cond_mask1 = 1 - cond_mask1.int()
+    # ! 양자화된 컨디션 임베딩을 시간축에 따라 분할
+    # ! 초기에는 추상적인 정보, 후기에는 구체적인 정보
+    from dpm_solver_pytorch import hierarchical_cond_from_levels
+    cond_emb_quantized_1 = hierarchical_cond_from_levels(q_embs1, t, noise_schedule)  # [B, D]
+    cond_emb_quantized_2 = hierarchical_cond_from_levels(q_embs2, t, noise_schedule)  # [B, D]
 
-        cond_mask2 = 1 * (torch.rand(cond_emb2.shape[0], device=device) <= mask_rate)
-        cond_mask2 = 1 - cond_mask2.int()
+    cond_mask1 = 1 * (torch.rand(cond_emb_quantized_1.shape[0], device=device) <= mask_rate)
+    cond_mask1 = 1 - cond_mask1.int()
 
-        # [TRAIN-DIM] 3. Diff1, Diff2 -> noise 예측
-        output1 = model(x_m, t.squeeze(-1), cond_emb1, cond_mask1, diff_id=0)  # x_t, c1 -> noise
-        output2 = model(x_g, t.squeeze(-1), cond_emb2, cond_mask2, diff_id=1)  # x_t, c2 -> noise
+    cond_mask2 = 1 * (torch.rand(cond_emb_quantized_2.shape[0], device=device) <= mask_rate)
+    cond_mask2 = 1 - cond_mask2.int()
 
-        return F.mse_loss(x_0_m, output1) + F.mse_loss(x_0_g, output2)  # 예측 노이즈와 실제 노이즈 비교 L1 loss
+    output1 = model(x_m, t.squeeze(-1), cond_emb_quantized_1, cond_mask1, diff_id=0)  # x_t, c1 -> noise
+    output2 = model(x_g, t.squeeze(-1), cond_emb_quantized_2, cond_mask2, diff_id=1)  # x_t, c2 -> noise
 
-    elif is_task:  # task loss ALM 수행
+    # [TRAIN-DIM] 3. Diff1, Diff2 -> noise 예측
+    diff_loss =  F.mse_loss(x_0_m, output1) + F.mse_loss(x_0_g, output2)  # 예측 노이즈와 실제 노이즈 비교 L1 loss
 
-        ### [TRAIN-ALM] 1. noised x_0 설정에 따라 denoising
-        if model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
-            final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0)
-            final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1)
-        elif model.parallel["set_init"] == 1:  # 각각 MF, Aggr
-            # ! 각각 MF, Aggr인 파트만 수정
-            final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, q_embs1, iid_emb, device, diff_id=0)
-            final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb2, q_embs2, iid_emb, device, diff_id=1)
+    iid_emb = model.ln_iid(iid_emb)
+    final_output_m = model.ln_m(model.linear_m(output1))
+    final_output_g = model.ln_g(model.linear_g(output2))
 
-        ### [TRAIN-ALM] 2. Diff1, Diff2 결과 aggregation
-        if model.parallel["set_aggr"] == "attn":
-            # ! 어텐션으로 최종 임베딩 종합
-            final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1))
+    uid = uid.long()  # (B,)
 
-        elif model.parallel["set_aggr"] == "item_attn":
-            # 아이템을 쿼리로 사용
-            final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1), query=torch.cat([iid_emb, iid_emb], dim=1))
+    style_src = style_src.to(final_output_m.device)
+    style_u = style_src[uid]  # (B, F)
+    style_tok = model.style_encoder(style_u)  # (B, D)
+    style_tok = model.style_ln(style_tok)  # (B, D)
+    style_tok_u = model.style_scale * style_tok  # (B, D)
 
-        elif model.parallel["set_aggr"] == "item_cls":
-            iid_emb = model.ln_iid(iid_emb)
-            final_output_m = model.ln_m(model.linear_m(final_output_m))
-            final_output_g = model.ln_g(model.linear_g(final_output_g))
+    style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+    style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
+    item_style_tok = model.item_style_encoder(style_i)  # (B, D)
+    item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
+    item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
 
-            uid = uid.long()  # (B,)
+    tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+    out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+    final_output = out[:, 0, :]  # (B, D)
 
-            style_src = style_src.to(final_output_m.device)
-            style_u = style_src[uid]  # (B, F)
-            style_tok = model.style_encoder(style_u)  # (B, D)
-            style_tok = model.style_ln(style_tok)  # (B, D)
-            style_tok_u = model.style_scale * style_tok  # (B, D)
+    y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+    mu_t = model.tgt_global_bias
+    y_pred = y_pred + mu_t
 
-            style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
-            style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
-            item_style_tok = model.item_style_encoder(style_i)  # (B, D)
-            item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
-            item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
+    # MSE
+    task_loss = (y_pred - y_input.squeeze().float()).square().mean()
 
-            tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
-            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
-            final_output = out[:, 0, :]  # (B, D)
+    return diff_loss +  F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
 
-        y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
-        mu_t = model.tgt_global_bias
-        y_pred = y_pred + mu_t
 
-        # MSE
-        task_loss = (y_pred - y_input.squeeze().float()).square().mean()
 
-        # RMSE
-        # task_loss =   (y_pred - y_input.squeeze().float()).square().sum().sqrt() / y_pred.shape[0]
+    # elif is_task:  # task loss ALM 수행
 
-        if model.parallel["set_loss"] == 0:
-            # ! mf 임베딩과 유사해지도록 통일
-            # return F.smooth_l1_loss(x_0_m, final_output) + model.task_lambda * task_loss
-            return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
-        elif model.parallel["set_loss"] == 1:
-            return F.mse_loss(x_0_g, final_output) + model.task_lambda * task_loss
-        elif model.parallel["set_loss"] == 2:
-            return F.mse_loss((x_0_m + x_0_g) / 2, final_output) + model.task_lambda * task_loss
-        elif model.parallel["set_loss"] == 3:
-            return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss  # ALM 로스 + task loss
+    #     ### [TRAIN-ALM] 1. noised x_0 설정에 따라 denoising
+    #     if model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
+    #         final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0)
+    #         final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1)
+    #     elif model.parallel["set_init"] == 1:  # 각각 MF, Aggr
+    #         # ! 각각 MF, Aggr인 파트만 수정
+    #         final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, q_embs1, iid_emb, device, diff_id=0)
+    #         final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb2, q_embs2, iid_emb, device, diff_id=1)
+
+    #     ### [TRAIN-ALM] 2. Diff1, Diff2 결과 aggregation
+    #     if model.parallel["set_aggr"] == "attn":
+    #         # ! 어텐션으로 최종 임베딩 종합
+    #         final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1))
+
+    #     elif model.parallel["set_aggr"] == "item_attn":
+    #         # 아이템을 쿼리로 사용
+    #         final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1), query=torch.cat([iid_emb, iid_emb], dim=1))
+
+    #     elif model.parallel["set_aggr"] == "item_cls":
+    #         iid_emb = model.ln_iid(iid_emb)
+    #         final_output_m = model.ln_m(model.linear_m(final_output_m))
+    #         final_output_g = model.ln_g(model.linear_g(final_output_g))
+
+    #         uid = uid.long()  # (B,)
+
+    #         style_src = style_src.to(final_output_m.device)
+    #         style_u = style_src[uid]  # (B, F)
+    #         style_tok = model.style_encoder(style_u)  # (B, D)
+    #         style_tok = model.style_ln(style_tok)  # (B, D)
+    #         style_tok_u = model.style_scale * style_tok  # (B, D)
+
+    #         style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+    #         style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
+    #         item_style_tok = model.item_style_encoder(style_i)  # (B, D)
+    #         item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
+    #         item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
+
+    #         tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+    #         out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+    #         final_output = out[:, 0, :]  # (B, D)
+
+    #     y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+    #     mu_t = model.tgt_global_bias
+    #     y_pred = y_pred + mu_t
+
+    #     # MSE
+    #     task_loss = (y_pred - y_input.squeeze().float()).square().mean()
+
+    #     # RMSE
+    #     # task_loss =   (y_pred - y_input.squeeze().float()).square().sum().sqrt() / y_pred.shape[0]
+
+    #     if model.parallel["set_loss"] == 0:
+    #         # ! mf 임베딩과 유사해지도록 통일
+    #         # return F.smooth_l1_loss(x_0_m, final_output) + model.task_lambda * task_loss
+    #         return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
+    #     elif model.parallel["set_loss"] == 1:
+    #         return F.mse_loss(x_0_g, final_output) + model.task_lambda * task_loss
+    #     elif model.parallel["set_loss"] == 2:
+    #         return F.mse_loss((x_0_m + x_0_g) / 2, final_output) + model.task_lambda * task_loss
+    #     elif model.parallel["set_loss"] == 3:
+    #         return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss  # ALM 로스 + task loss
 
 
 def _get_ddpm_sampler(model, device):

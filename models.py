@@ -8,7 +8,6 @@ import lacdr_model as LACDR
 from rqvae import ResidualQuantizer
 from utils import AttentionLayer
 
-
 class LookupEmbedding(torch.nn.Module):
 
     def __init__(self, uid_all, iid_all, emb_dim):
@@ -40,6 +39,43 @@ class MetaNet(torch.nn.Module):
         return output.squeeze(1)
 
 
+class uidEmbedding(torch.nn.Module):
+
+    def __init__(self, uid_all, emb_dim):
+        super().__init__()
+        self.uid_embedding = torch.nn.Embedding(uid_all, emb_dim)
+        self.linear_1 = torch.nn.Linear(emb_dim, emb_dim)
+        self.linear_2 = torch.nn.Linear(emb_dim, emb_dim)
+        self.linear_3 = torch.nn.Linear(emb_dim, emb_dim)
+
+    def forward(self, x):
+        uid_emb = self.uid_embedding(x)
+        uid_emb = self.linear_1(uid_emb)
+        uid_emb = F.relu(uid_emb)
+        uid_emb = self.linear_2(uid_emb)
+        uid_emb = F.relu(uid_emb)
+        uid_emb = self.linear_3(uid_emb)
+        return F.relu(uid_emb)
+    
+class iidEmbedding(torch.nn.Module):
+
+    def __init__(self, iid_all, emb_dim):
+        super().__init__() 
+        self.iid_embedding = torch.nn.Embedding(iid_all + 1, emb_dim)  
+        self.linear_1 = torch.nn.Linear(emb_dim, emb_dim)
+        self.linear_2 = torch.nn.Linear(emb_dim, emb_dim)
+        self.linear_3 = torch.nn.Linear(emb_dim, emb_dim)
+
+    def forward(self, x):
+        iid_emb = self.iid_embedding(x)
+        iid_emb = self.linear_1(iid_emb)
+        iid_emb = F.relu(iid_emb)
+        iid_emb = self.linear_2(iid_emb)
+        iid_emb = F.relu(iid_emb)
+        iid_emb = self.linear_3(iid_emb)
+        return F.relu(iid_emb)
+    
+
 class MFBasedModel(torch.nn.Module):
     def __init__(self, uid_all, iid_all, emb_dim, meta_dim_0):
         super().__init__()
@@ -48,21 +84,25 @@ class MFBasedModel(torch.nn.Module):
         self.tgt_model = LookupEmbedding(uid_all, iid_all, emb_dim)
         self.aug_model = LookupEmbedding(uid_all, iid_all, emb_dim)
 
+        self.user_embedding = uidEmbedding(uid_all, emb_dim)
+        self.item_embedding = iidEmbedding(iid_all, emb_dim)
+        self.num_embeddings = uid_all
+
         self.meta_net = MetaNet(emb_dim, meta_dim_0)
         self.mapping = torch.nn.Linear(emb_dim, emb_dim, False)
 
         # ! mf 소스 임베딩과 aggr 소스 임베딩 각각을 양자화하기 위한 모듈
-        self.rq_mf = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
-        self.rq_aggr = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
+        # self.rq_mf = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
+        # self.rq_aggr = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
 
-        self.user_proto_cache = None  # 🔥 추가
+        # self.user_proto_cache = None  # 🔥 추가
 
-        self.proto_to_cond = torch.nn.Linear(emb_dim, emb_dim, bias=False)
+        # self.proto_to_cond = torch.nn.Linear(emb_dim, emb_dim, bias=False)
 
-        self.alpha_top = nn.Parameter(torch.zeros(emb_dim))
-        self.alpha_bot = nn.Parameter(torch.zeros(emb_dim))
+        # self.alpha_top = nn.Parameter(torch.zeros(emb_dim))
+        # self.alpha_bot = nn.Parameter(torch.zeros(emb_dim))
 
-        self.item_cond = False
+        # self.item_cond = False
 
     @torch.no_grad()
     def build_user_prototype_cache(
@@ -134,6 +174,52 @@ class MFBasedModel(torch.nn.Module):
         bottom = self.user_proto_cache["bottom"][uid]
         return top, bottom
 
+    def encode_all_users(self, device='cuda'):
+        all_uid = torch.arange(self.num_embeddings, device=device)
+        user_feat = self.user_embedding(all_uid)   # ⭐ forward 통과
+        return user_feat   
+
+    def compute_user_graph_embeddings(self, is_train=False, device='cuda'):
+        if is_train: 
+            graph_data = self.graph_shared_train
+        else:
+            graph_data = self.graph_shared_test
+        # graph_data = self.graph_src
+        # 단순 2홉 aggr
+        # simple 2-hop aggregation (user -> items -> users) excluding 1-hop self contribution
+        uv_adj = graph_data["uv_adj"].to(device)
+        vu_adj = graph_data["vu_adj"].to(device)
+
+        user_feat = self.encode_all_users().to(device)
+
+        with torch.no_grad():
+            # 1-hop: items aggregate from users
+            item_msg = torch.sparse.mm(vu_adj, user_feat)  # [num_items, d]
+
+            # 2-hop: users aggregate from items
+            user_2hop = torch.sparse.mm(uv_adj, item_msg)  # [num_users, d]
+
+            # remove self 1-hop contribution (user -> item -> user)
+            user_deg = torch.sparse.sum(uv_adj, dim=1).to_dense().unsqueeze(1)
+            user_2hop = user_2hop - user_deg * user_feat  # self-removal
+
+            # count real 2-hop neighbors: user -> item -> other_users
+            item_deg = torch.sparse.sum(vu_adj, dim=1).to_dense()
+            item_other = torch.relu(item_deg - 1)  # max(deg-1, 0)
+            two_hop_counts = torch.sparse.mm(uv_adj, item_other[:, None]).to_dense()
+
+            # normalization (avoid division by zero)
+            norm = torch.where(two_hop_counts == 0, torch.ones_like(two_hop_counts), two_hop_counts)
+
+            # final 2-hop embedding
+            user_emb = user_2hop / norm
+
+            # fallback: if no 2-hop neighbors, keep original embedding
+            zero_mask = two_hop_counts.squeeze(1) == 0
+            user_emb[zero_mask] = user_feat[zero_mask]
+
+        return user_emb
+    
     def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False, item_cond=False, style_src=None):
         if stage == "train_src":
             emb = self.src_model.forward(x)
@@ -236,24 +322,19 @@ class MFBasedModel(torch.nn.Module):
         elif stage == "train_diff_parallel":  # DiffParallel - train
 
             tgt_uid, iid_input, y_input = x
-
-            tgt_emb1 = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
-            tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)  # Aggr
+            
+            # tgt_emb1 = self.user_embdding(tgt_uid.unsqueeze(1)).squeeze()  # MF
+            # tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)  # Aggr
 
             # Diff1: MF 유저 임베딩, Diff2: Aggr 유저 임베딩
-            src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
-            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
+            # src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
+            uid_emb1 = self.user_embedding(tgt_uid.unsqueeze(1)).squeeze()
+            uid_emb2 = self.compute_user_graph_embeddings(is_train=True)[tgt_uid]  # Aggr
 
-            if item_cond == True:
-                top_proto, bottom_proto = self.get_top_bottom_item_prototypes(tgt_uid)
-                cond_emb1 = top_proto
-                cond_emb2 = bottom_proto
+            cond_emb1 = uid_emb1
+            cond_emb2 = uid_emb2
 
-            else:
-                cond_emb1 = src_uid_emb1
-                cond_emb2 = src_uid_emb2
-
-            iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
+            iid_emb = self.item_embedding(iid_input.unsqueeze(1)).squeeze()
 
             # ! mf 임베딩과 aggr 임베딩 양자화
             quantized, all_level_vectors1, rq_loss1 = diff_model.rq_mf(cond_emb1)
@@ -262,11 +343,11 @@ class MFBasedModel(torch.nn.Module):
             # is_task=False: 노이즈 예측 , is_task=True: ALS + task 로스
             loss = Diff.diffusion_loss_fn_parallel(
                 diff_model,
-                tgt_emb1,
-                tgt_emb2,
+                uid_emb1,
+                uid_emb2,
                 # ! diff_loss 계산 시에는 양자화하지 않은 기존 소스 임베딩을 컨디션으로 이용
-                src_uid_emb1,
-                src_uid_emb2,
+                cond_emb1,
+                cond_emb2,
                 iid_emb,
                 y_input,
                 device,
@@ -286,66 +367,46 @@ class MFBasedModel(torch.nn.Module):
 
             tgt_uid, iid_input, _ = x
 
-            src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
-            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
+            uid_emb1 = self.user_embedding(tgt_uid.unsqueeze(1)).squeeze()
+            uid_emb2 = self.compute_user_graph_embeddings(is_train=False)[tgt_uid]  # Aggr
 
-            if item_cond == True:
-                top_proto, bottom_proto = self.get_top_bottom_item_prototypes(tgt_uid)
-                cond_emb1 = top_proto
-                cond_emb2 = bottom_proto
-            else:
-                cond_emb1 = src_uid_emb1
-                cond_emb2 = src_uid_emb2
+            cond_emb1 = uid_emb1
+            cond_emb2 = uid_emb2
+
+            iid_emb = self.item_embedding(iid_input.unsqueeze(1)).squeeze()
 
             # ! mf 임베딩과 aggr 임베딩 양자화
             quantized, all_level_vectors1, _ = diff_model.rq_mf(cond_emb1)  # [L, B, D]
             quantized, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
 
-            iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
-
             ### [TEST] 1️. Diff1, Diff2 noised x_0 설정에 따라 denoising
-            if diff_model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
-                trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0)
-                trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1)
-
-            elif diff_model.parallel["set_init"] == 1:  # 각각 MF, Aggr
-                # ! 각각 MF, Aggr인 파트만 수정
-                trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0)
-                trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1)
+            trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0)
+            trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1)
 
             ### [TEST] 2. Diff1, Diff2 결과 aggregation
-            if diff_model.parallel["set_aggr"] == "attn":
-                # ! 어텐션으로 최종 임베딩 종합
-                trans_emb = diff_model.attn_layer(torch.cat([trans_emb_m, trans_emb_g], dim=1))
+            # 아이템 포함해서 self attn -> 아이템 출력만 사용
+            iid_emb = diff_model.ln_iid(iid_emb)
+            final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
+            final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
 
-            elif diff_model.parallel["set_aggr"] == "item_attn":
-                # 아이템을 쿼리로 사용
-                trans_emb = diff_model.attn_layer(torch.cat([trans_emb_m, trans_emb_g], dim=1), query=torch.cat([iid_emb, iid_emb], dim=1))
+            uid = tgt_uid.long()
 
-            elif diff_model.parallel["set_aggr"] == "item_cls":
-                # 아이템 포함해서 self attn -> 아이템 출력만 사용
-                iid_emb = diff_model.ln_iid(iid_emb)
-                final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
-                final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
+            # style token
+            style_src = style_src.to(trans_emb_g.device)
+            style_u = style_src[uid]  # (B, F)
+            style_tok = diff_model.style_encoder(style_u)  # (B, D)
+            style_tok = diff_model.style_ln(style_tok)  # (B, D)
+            style_tok_u = diff_model.style_scale * style_tok  # (B, D)
 
-                uid = tgt_uid.long()
+            style_tgt_item = diff_model.style_tgt_item.to(trans_emb_g.device)  # [I_total, F_item]
+            style_i = style_tgt_item[iid_input.squeeze(1)]  # (B, F_item)
+            item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
+            item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
+            item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
 
-                # style token
-                style_src = style_src.to(trans_emb_g.device)
-                style_u = style_src[uid]  # (B, F)
-                style_tok = diff_model.style_encoder(style_u)  # (B, D)
-                style_tok = diff_model.style_ln(style_tok)  # (B, D)
-                style_tok_u = diff_model.style_scale * style_tok  # (B, D)
-
-                style_tgt_item = diff_model.style_tgt_item.to(trans_emb_g.device)  # [I_total, F_item]
-                style_i = style_tgt_item[iid_input.squeeze(1)]  # (B, F_item)
-                item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
-                item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
-                item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
-
-                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
-                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))
-                final_output = out[:, 0, :]
+            tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+            out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))
+            final_output = out[:, 0, :]
 
             y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
             mu_t = diff_model.tgt_global_bias
