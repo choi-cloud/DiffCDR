@@ -400,9 +400,9 @@ class MFBasedModel(torch.nn.Module):
                 # ! is_taks가 True일 때만 양자화된 컨디션을 시간축에 따라 이용
                 q_embs1=all_level_vectors1,
                 q_embs2=all_level_vectors2,
-                style_src=style_src,
                 uid=tgt_uid,
                 iid=iid_input,
+                base_model=self,
             )
 
             total_loss = loss + diff_model.rqvae["alpha_rq"] * (rq_loss1 + rq_loss2)
@@ -455,27 +455,21 @@ class MFBasedModel(torch.nn.Module):
                 final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
 
                 uid = tgt_uid.long()
+                iid = iid_input.long()
 
-                # style token
-                style_src = style_src.to(trans_emb_g.device)
-                style_u = style_src[uid]  # (B, F)
-                style_tok = diff_model.style_encoder(style_u)  # (B, D)
-                style_tok = diff_model.style_ln(style_tok)  # (B, D)
-                style_tok_u = diff_model.style_scale * style_tok  # (B, D)
+                style_emb_src = diff_model.style_mapper(self.style_encoder(diff_model.style_src[uid]))
+                style_emb_tgt_item = self.style_encoder(diff_model.style_tgt_item[iid])
 
-                style_tgt_item = diff_model.style_tgt_item.to(trans_emb_g.device)  # [I_total, F_item]
-                style_i = style_tgt_item[iid_input.squeeze(1)]  # (B, F_item)
-                item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
-                item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
-                item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
+                bias_u = self.style_head(style_emb_src).squeeze(-1)  # ✅ (B,)
+                bias_i = self.style_head(style_emb_tgt_item).squeeze(-1)  # ✅ (B,)
 
-                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
-                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))
-                final_output = out[:, 0, :]
+                tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
+                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+                final_output = out[:, 0, :]  # (B, D)
 
             y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
             mu_t = diff_model.tgt_global_bias
-            y_pred = y_pred + mu_t
+            y_pred = y_pred + mu_t + 0.03 * bias_u + 0.03 * bias_i
 
             return y_pred
 

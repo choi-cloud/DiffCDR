@@ -51,6 +51,23 @@ class SinusoidalPositionEmbeddings(nn.Module):
         return embeddings
 
 
+class StyleMapper(nn.Module):
+    def __init__(self, z_dim, hidden_dim=64, dropout=0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(z_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, z_dim),
+        )
+        self.norm = nn.LayerNorm(z_dim)
+
+    def forward(self, z_src):
+        # residual mapping (안정성 핵심)
+        z = z_src + self.net(z_src)
+        return self.norm(z)
+
+
 class DiffParallel(nn.Module):
     def __init__(
         self,
@@ -166,6 +183,9 @@ class DiffParallel(nn.Module):
 
         self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
 
+        style_z_dim = 32
+        self.style_mapper = StyleMapper(z_dim=style_z_dim, hidden_dim=64, dropout=0.1)
+
     def forward(self, x, t, cond_emb, cond_mask, diff_id):
 
         for idx in range(self.num_layers):
@@ -198,7 +218,7 @@ def q_x_fn(model, x_0, t, device):  # forward
 
 
 def diffusion_loss_fn_parallel(
-    model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_emb, y_input, device, is_task, q_embs1=None, q_embs2=None, style_src=None, uid=None, iid=None
+    model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_emb, y_input, device, is_task, q_embs1=None, q_embs2=None, uid=None, iid=None, base_model=None
 ):
 
     num_steps = model.num_steps
@@ -266,27 +286,24 @@ def diffusion_loss_fn_parallel(
             final_output_m = model.ln_m(model.linear_m(final_output_m))
             final_output_g = model.ln_g(model.linear_g(final_output_g))
 
-            uid = uid.long()  # (B,)
+            uid = uid.long()
+            iid = iid.long()
 
-            style_src = style_src.to(final_output_m.device)
-            style_u = style_src[uid]  # (B, F)
-            style_tok = model.style_encoder(style_u)  # (B, D)
-            style_tok = model.style_ln(style_tok)  # (B, D)
-            style_tok_u = model.style_scale * style_tok  # (B, D)
+            style_emb_src = model.style_mapper(base_model.style_encoder(model.style_src[uid]))
+            style_emb_tgt = base_model.style_encoder(model.style_tgt[uid])
+            style_emb_tgt_item = base_model.style_encoder(model.style_tgt_item[iid])
+            cont_loss = get_cont_loss(style_emb_src, style_emb_tgt.detach())
 
-            style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
-            style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
-            item_style_tok = model.item_style_encoder(style_i)  # (B, D)
-            item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
-            item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
+            bias_u = base_model.style_head(style_emb_src).squeeze(-1)  # ✅ (B,)
+            bias_i = base_model.style_head(style_emb_tgt_item).squeeze(-1)  # ✅ (B,)
 
-            tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+            tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
             out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
             final_output = out[:, 0, :]  # (B, D)
 
         y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
         mu_t = model.tgt_global_bias
-        y_pred = y_pred + mu_t
+        y_pred = y_pred + mu_t + 0.03 * bias_u + 0.03 * bias_i
 
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
@@ -295,9 +312,7 @@ def diffusion_loss_fn_parallel(
         # task_loss =   (y_pred - y_input.squeeze().float()).square().sum().sqrt() / y_pred.shape[0]
 
         if model.parallel["set_loss"] == 0:
-            # ! mf 임베딩과 유사해지도록 통일
-            # return F.smooth_l1_loss(x_0_m, final_output) + model.task_lambda * task_loss
-            return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
+            return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss + 0.05 * cont_loss
         elif model.parallel["set_loss"] == 1:
             return F.mse_loss(x_0_g, final_output) + model.task_lambda * task_loss
         elif model.parallel["set_loss"] == 2:
@@ -413,3 +428,20 @@ def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):
 def p_sample_loop_parallel(model, start_emb, cond_emb, iid_input, device, diff_id):
     cur_x, iid_emb_out = p_sample_parallel(model=model, cond_emb=cond_emb, x=start_emb, iid_emb=iid_input, device=device, diff_id=diff_id)
     return cur_x, iid_emb_out
+
+
+def get_cont_loss(z_src, z_tgt, temperature=0.1):
+    """
+    z_src: (B, D) mapped source style
+    z_tgt: (B, D) target style
+    """
+    z_src = F.normalize(z_src, dim=1)
+    z_tgt = F.normalize(z_tgt, dim=1)
+
+    logits = torch.matmul(z_src, z_tgt.t()) / temperature  # (B, B)
+    labels = torch.arange(z_src.size(0), device=z_src.device)
+
+    loss_src2tgt = F.cross_entropy(logits, labels)
+    loss_tgt2src = F.cross_entropy(logits.t(), labels)
+
+    return 0.5 * (loss_src2tgt + loss_tgt2src)

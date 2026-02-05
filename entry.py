@@ -111,7 +111,7 @@ if __name__ == "__main__":
         )
     )
 
-    print("\nmf 모델부터 다시 학습시켜야 해\n")
+    print("\nbias 추가한 diff_parallel\n")
 
     logfile = utils.make_dir(f"{args.experiment}")
     logging.basicConfig(

@@ -972,8 +972,6 @@ class Run:
     def Diff_Parallel(self, model, diff_model, data_diff, data_test, optimizer, graph_train, graph_test, style_src, style_tgt_item):
         write("=========Diff_Parallel========")
 
-        diff_model.style_tgt_item = style_tgt_item
-
         src_graph = graph_train.get("src")
         tgt_graph = graph_train.get("tgt")
         shared_graph = graph_train.get("shared")
@@ -1074,7 +1072,6 @@ class Run:
                 rqvae=self.rqvae_setting,
                 w=self.w,
             )
-            diff_model = diff_model.cuda() if self.use_cuda else diff_model
 
             model = self.get_model()
 
@@ -1217,9 +1214,10 @@ class Run:
         elif exp_part == "diff_parallel":
             self.model_load(model, path=save_path)
 
-            diff_model.style_src = style_src
-            diff_model.style_tgt = style_tgt
-            diff_model.style_tgt_item = style_tgt_item
+            diff_model.register_buffer("style_src", style_src.float())
+            diff_model.register_buffer("style_tgt", style_tgt.float())
+            diff_model.register_buffer("style_tgt_item", style_tgt_item.float())
+            diff_model = diff_model.cuda() if self.use_cuda else diff_model
 
             # model.build_user_prototype_cache(self.device, 0.5, 0.5, user_batch=1024)
             print("None_CDR model loaded")
