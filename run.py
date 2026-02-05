@@ -775,27 +775,43 @@ class Run:
                 loss_ls.append(loss.item())
             return torch.tensor(loss_ls).mean()
 
-        elif diff == True:
-            task_loss_ls = []
-            for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
-                model[1].train()
-                # diff first, then task
-                # loss = model[0](X, stage, self.device, diff_model=model[1], is_task=False, item_cond=self.item_cond)
-                # model[1].zero_grad()
-                # loss.backward()
-                # _ = torch.nn.utils.clip_grad_norm_(model[1].parameters(), 1.0)
-                # optimizer.step()
+    elif diff == True:
+        task_loss_ls = []
 
-                task_loss = model[0](X, stage, self.device, diff_model=model[1], is_task=True, item_cond=self.item_cond, style_src=style_src)
-                model[1].zero_grad()
-                task_loss.backward()
-                _ = torch.nn.utils.clip_grad_norm_(model[1].parameters(), 1.0)
-                optimizer.step()
-                loss = torch.zeros(1, device=task_loss.device)
-                loss_ls.append(loss.item())
-                task_loss_ls.append(task_loss.item())
-            # return torch.tensor(loss_ls).mean()
-            return torch.tensor(loss_ls).mean(), torch.tensor(task_loss_ls).mean()
+        for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
+            # 1️⃣ train mode
+            model[0].train()   # MF + user_embedding + item_embedding
+            model[1].train()   # diff_model
+
+            # 2️⃣ optimizer 기준으로 grad 초기화
+            optimizer.zero_grad(set_to_none=True)
+
+            # 3️⃣ forward
+            task_loss = model[0](
+                X,
+                stage,
+                self.device,
+                diff_model=model[1],
+                is_task=True,
+                item_cond=self.item_cond,
+                style_src=style_src,
+            )
+
+            # 4️⃣ backward
+            task_loss.backward()
+
+            # 5️⃣ gradient clipping (optimizer 기준)
+            torch.nn.utils.clip_grad_norm_(
+                optimizer.param_groups[0]["params"], 1.0
+            )
+
+            # 6️⃣ update
+            optimizer.step()
+
+            task_loss_ls.append(task_loss.item())
+
+        dummy_loss = torch.zeros(1, device=self.device)
+        return dummy_loss.mean(), torch.tensor(task_loss_ls).mean()
 
     def update_results(self, mae, rmse, phase):
 
