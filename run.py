@@ -544,46 +544,6 @@ class Run:
 
         return data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test, graph_data
 
-    def compute_user_graph_embeddings(self, base_model, diff_model, graph_data, use_target=False):
-        if graph_data is None:
-            return None, None
-
-        # 단순 2홉 aggr
-        # simple 2-hop aggregation (user -> items -> users) excluding 1-hop self contribution
-        uv_adj = graph_data["uv_adj"].to(self.device)
-        vu_adj = graph_data["vu_adj"].to(self.device)
-        if use_target:
-            user_feat = base_model.tgt_model.uid_embedding.weight.detach().to(self.device)
-        else:
-            user_feat = base_model.src_model.uid_embedding.weight.detach().to(self.device)
-        with torch.no_grad():
-            # 1-hop: items aggregate from users
-            item_msg = torch.sparse.mm(vu_adj, user_feat)  # [num_items, d]
-
-            # 2-hop: users aggregate from items
-            user_2hop = torch.sparse.mm(uv_adj, item_msg)  # [num_users, d]
-
-            # remove self 1-hop contribution (user -> item -> user)
-            user_deg = torch.sparse.sum(uv_adj, dim=1).to_dense().unsqueeze(1)
-            user_2hop = user_2hop - user_deg * user_feat  # self-removal
-
-            # count real 2-hop neighbors: user -> item -> other_users
-            item_deg = torch.sparse.sum(vu_adj, dim=1).to_dense()
-            item_other = torch.relu(item_deg - 1)  # max(deg-1, 0)
-            two_hop_counts = torch.sparse.mm(uv_adj, item_other[:, None]).to_dense()
-
-            # normalization (avoid division by zero)
-            norm = torch.where(two_hop_counts == 0, torch.ones_like(two_hop_counts), two_hop_counts)
-
-            # final 2-hop embedding
-            user_emb = user_2hop / norm
-
-            # fallback: if no 2-hop neighbors, keep original embedding
-            zero_mask = two_hop_counts.squeeze(1) == 0
-            user_emb[zero_mask] = user_feat[zero_mask]
-
-        return user_emb, None
-
     def compute_item_aggregation_popularity(self, base_model, graph_data, src_item_num):
         uv_adj = graph_data["uv_adj"].to(self.device)  # [num_users, num_items]
 
@@ -641,7 +601,11 @@ class Run:
             return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_la, optimizer_map
 
         elif diff_model is not None:
-            optimizer_diff = torch.optim.Adam(params=diff_model.parameters(), lr=self.diff_lr)
+            # optimizer_diff = torch.optim.Adam(params=diff_model.parameters(), lr=self.diff_lr)
+            optimizer_diff = torch.optim.Adam(
+                params = list(model.parameters()) + list(diff_model.parameters()),
+                lr = self.diff_lr
+            )
             return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_diff, optimizer_map
 
     def eval_mae(self, model, data_loader, stage, style_src=None):
@@ -771,25 +735,43 @@ class Run:
 
         elif diff == True:
             task_loss_ls = []
+
+            # Clear cache at start of epoch (Lazy Update)
+            model[0].clear_graph_cache()
+
             for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
-                model[1].train()
-                # diff first, then task
-                loss = model[0](X, stage, self.device, diff_model=model[1], is_task=False, item_cond=self.item_cond)
-                model[1].zero_grad()
-                loss.backward()
-                _ = torch.nn.utils.clip_grad_norm_(model[1].parameters(), 1.0)
-                optimizer.step()
+                # 1️⃣ train mode
+                model[0].train()   # MF + user_embedding + item_embedding
+                model[1].train()   # diff_model
 
-                task_loss = model[0](X, stage, self.device, diff_model=model[1], is_task=True, item_cond=self.item_cond, style_src=style_src)
-                model[1].zero_grad()
+                # 2️⃣ optimizer 기준으로 grad 초기화
+                optimizer.zero_grad(set_to_none=True)
+
+                # 3️⃣ forward
+                task_loss = model[0](
+                    X,
+                    stage,
+                    self.device,
+                    diff_model=model[1],
+                    is_task=True,
+                    item_cond=self.item_cond,
+                    style_src=style_src,
+                )
+
+                # 4️⃣ backward
                 task_loss.backward()
-                _ = torch.nn.utils.clip_grad_norm_(model[1].parameters(), 1.0)
+
+                torch.nn.utils.clip_grad_norm_(
+                    list(model[0].parameters()) + list(model[1].parameters()),
+                    1.0
+                )
+                # 6️⃣ update
                 optimizer.step()
 
-                loss_ls.append(loss.item())
                 task_loss_ls.append(task_loss.item())
-            # return torch.tensor(loss_ls).mean()
-            return torch.tensor(loss_ls).mean(), torch.tensor(task_loss_ls).mean()
+
+            dummy_loss = torch.zeros(1, device=self.device)
+            return dummy_loss.mean(), torch.tensor(task_loss_ls).mean()
 
     def update_results(self, mae, rmse, phase):
 
@@ -958,12 +940,20 @@ class Run:
         src_graph = graph_train.get("src")
         tgt_graph = graph_train.get("tgt")
         shared_graph = graph_train.get("shared")
-        smooth_user_emb_src, _ = self.compute_user_graph_embeddings(model, diff_model, src_graph, use_target=False)
-        smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model, diff_model, tgt_graph, use_target=True)
-        diff_model.smooth_user_emb_src = smooth_user_emb_src
-        diff_model.smooth_user_emb_tgt = smooth_user_emb_tgt
+        # smooth_user_emb_src, _ = self.compute_user_graph_embeddings(model, diff_model, src_graph, use_target=False)
+        # smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model, diff_model, tgt_graph, use_target=True)
+        # diff_model.smooth_user_emb_src = smooth_user_emb_src
+        # diff_model.smooth_user_emb_tgt = smooth_user_emb_tgt
+
+        model.graph_src = graph_train.get("src")
+        model.graph_tgt = graph_train.get("tgt")
+        model.shared_graph = graph_train.get("shared")
 
         for i in range(self.epoch):
+
+            # diff_model.smooth_user_emb_src = smooth_user_emb_src
+            # diff_model.smooth_user_emb_tgt = smooth_user_emb_tgt
+
             loss, task_loss = self.train(
                 data_diff,
                 [model, diff_model],
@@ -1018,9 +1008,42 @@ class Run:
         if self.device == "cuda":
             # model.load_state_dict(torch.load(path))
             state = torch.load(path, map_location=self.device)
-            model.load_state_dict(state, strict=False)
+
+            new_state = {}
+            for k, v in state.items():
+                new_k = k
+                if "uid_embedding.weight" in k and "uid_embedding.uid_embedding.weight" not in k:
+
+                     if k.endswith("uid_embedding.weight"):
+                         new_k = k.replace("uid_embedding.weight", "uid_embedding.uid_embedding.weight")
+                         new_state[new_k] = v
+                         
+                     if k.endswith("iid_embedding.weight"):
+                         new_k = k.replace("iid_embedding.weight", "iid_embedding.iid_embedding.weight")
+                         new_state[new_k] = v
+                
+                new_state[k] = v
+                if new_k != k:
+                    new_state[new_k] = v
+
+            model.load_state_dict(new_state, strict=False)
         else:
-            model.load_state_dict(torch.load(path, map_location="cpu"))
+            state = torch.load(path, map_location="cpu")
+            new_state = {}
+            for k, v in state.items():
+                new_k = k
+                if k.endswith("uid_embedding.weight"):
+                     new_k = k.replace("uid_embedding.weight", "uid_embedding.uid_embedding.weight")
+                     new_state[new_k] = v
+                if k.endswith("iid_embedding.weight"):
+                     new_k = k.replace("iid_embedding.weight", "iid_embedding.iid_embedding.weight")
+                     new_state[new_k] = v
+                
+                new_state[k] = v
+                if new_k != k:
+                    new_state[new_k] = v
+
+            model.load_state_dict(new_state, strict=False)
 
     def result_print(self, phase):
         print_str = ""
@@ -1093,11 +1116,6 @@ class Run:
                 cache_path=cache_path
             )
 
-        # print("\n소스 유저 percentile-style 추출\n")
-        # style_src, info_u = build_src_user_percentile_style_from_loader(
-        #     data_src=data_src, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, alpha=0.1, device="cpu"
-        # )
-
         print(f"\n타겟 도메인 내 아이템의 레이팅 스타일 정보 추출\n")
         cache_path = f"{self.stylecache_root}_tgt_item.pt"
         if os.path.exists(cache_path):
@@ -1110,10 +1128,6 @@ class Run:
                 cache_path=cache_path
             )
 
-        # print("\n타겟 아이템 percentile-style 추출\n")
-        # style_tgt_item, info_i = build_tgt_item_percentile_style_from_loader(
-        #     data_tgt=data_tgt, num_items_total=self.iid_all, rating_min=1.0, rating_max=5.0, alpha=0.1, device="cpu"  # 전역 아이템 개수
-        # )
 
         criterion = torch.nn.MSELoss()
 

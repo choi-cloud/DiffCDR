@@ -53,14 +53,19 @@ class ResidualQuantizer(nn.Module):
             chosen = codebook_l[idx]  # [B, D]
 
             rq_loss = rq_loss +  F.mse_loss(chosen, residual.detach())
+            
+            # Commitment loss: 입력 임베딩(residual)을 선택된 코드북 벡터 근처로 끌어당겨
+            # 양자화 공간에 안정적으로 정착시키기 위한 loss
+            rq_loss = rq_loss + 0.25*F.mse_loss(residual, chosen.detach())
 
-            all_level_vectors.append(chosen)
+            # STE (Straight-Through Estimator): forward에서는 양자화된 벡터를 사용하되,
+            # backward에서는 gradient가 residual(z)로 그대로 흐르도록 만드는 장치
+            chosen_ste = residual + (chosen - residual).detach()
+
+            all_level_vectors.append(chosen_ste)
 
             # residual 업데이트
             residual = residual - chosen
-
-            # 간단한 commitment loss (residual이 너무 크지 않도록)
-            # rq_loss = rq_loss + F.mse_loss(residual, torch.zeros_like(residual))
 
         # [L, B, D]
         all_level_vectors = torch.stack(all_level_vectors, dim=0)

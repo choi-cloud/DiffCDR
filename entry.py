@@ -27,7 +27,7 @@ def prepare_1():
 
     parser.add_argument("--root", default="./")
     parser.add_argument("--exp_part", default="None_CDR")
-    parser.add_argument("--save_path", default="/home/shared/cjp/model_save_default/model")
+    parser.add_argument("--save_path", default="/home/shared/cjp/model_save_default_6/model")
     parser.add_argument("--use_cuda", default=1)
     parser.add_argument("--experiment", default="DiffCDR")
 

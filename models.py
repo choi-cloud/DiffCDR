@@ -22,6 +22,78 @@ class LookupEmbedding(torch.nn.Module):
         emb = torch.cat([uid_emb, iid_emb], dim=1)
         return emb
 
+class uidEmbedding(torch.nn.Module):
+
+    def __init__(self, uid_all, emb_dim):
+        super().__init__()
+        self.uid_embedding = torch.nn.Embedding(uid_all, emb_dim)
+        self.linear_1 = torch.nn.Linear(emb_dim, emb_dim)
+        self.linear_2 = torch.nn.Linear(emb_dim, emb_dim)
+        self.linear_3 = torch.nn.Linear(emb_dim, emb_dim)
+        
+        # ! Identity Init 처음에 MF 임베딩을 사용하기 위함.
+        torch.nn.init.eye_(self.linear_1.weight)
+        torch.nn.init.zeros_(self.linear_1.bias)
+        torch.nn.init.eye_(self.linear_2.weight)
+        torch.nn.init.zeros_(self.linear_2.bias)
+        torch.nn.init.eye_(self.linear_3.weight)
+        torch.nn.init.zeros_(self.linear_3.bias)
+
+    def forward(self, x):
+        uid_emb = self.uid_embedding(x)
+        uid_emb = self.linear_1(uid_emb)
+        uid_emb = F.relu(uid_emb)
+        uid_emb = self.linear_2(uid_emb)
+        uid_emb = F.relu(uid_emb)
+        uid_emb = self.linear_3(uid_emb)
+        return F.relu(uid_emb)
+
+    @property
+    def weight(self):
+        return self.uid_embedding.weight
+    
+class iidEmbedding(torch.nn.Module):
+
+    def __init__(self, iid_all, emb_dim):
+        super().__init__() 
+        self.iid_embedding = torch.nn.Embedding(iid_all + 1, emb_dim)  
+        self.linear_1 = torch.nn.Linear(emb_dim, emb_dim)
+        self.linear_2 = torch.nn.Linear(emb_dim, emb_dim)
+        self.linear_3 = torch.nn.Linear(emb_dim, emb_dim)
+        
+        # ! Identity Init 처음에 MF 임베딩을 사용하기 위함.
+        torch.nn.init.eye_(self.linear_1.weight)
+        torch.nn.init.zeros_(self.linear_1.bias)
+        torch.nn.init.eye_(self.linear_2.weight)
+        torch.nn.init.zeros_(self.linear_2.bias)
+        torch.nn.init.eye_(self.linear_3.weight)
+        torch.nn.init.zeros_(self.linear_3.bias)
+
+    def forward(self, x):
+        iid_emb = self.iid_embedding(x)
+        iid_emb = self.linear_1(iid_emb)
+        iid_emb = F.relu(iid_emb)
+        iid_emb = self.linear_2(iid_emb)
+        iid_emb = F.relu(iid_emb)
+        iid_emb = self.linear_3(iid_emb)
+        return F.relu(iid_emb)
+        
+    @property
+    def weight(self):
+        return self.iid_embedding.weight
+
+class GetEmbedding(torch.nn.Module):
+    def __init__(self, uid_all, iid_all, emb_dim):
+        super().__init__()
+        self.uid_embedding = uidEmbedding(uid_all, emb_dim)
+        self.iid_embedding = iidEmbedding(iid_all, emb_dim)
+
+    def forward(self, x):
+        uid_emb = self.uid_embedding(x[:, 0].unsqueeze(1))
+        iid_emb = self.iid_embedding(x[:, 1].unsqueeze(1))
+        emb = torch.cat([uid_emb, iid_emb], dim=1)
+        return emb
+
 
 class MetaNet(torch.nn.Module):
     def __init__(self, emb_dim, meta_dim):
@@ -44,9 +116,12 @@ class MFBasedModel(torch.nn.Module):
     def __init__(self, uid_all, iid_all, emb_dim, meta_dim_0):
         super().__init__()
         self.emb_dim = emb_dim
-        self.src_model = LookupEmbedding(uid_all, iid_all, emb_dim)
-        self.tgt_model = LookupEmbedding(uid_all, iid_all, emb_dim)
+        # self.src_model = LookupEmbedding(uid_all, iid_all, emb_dim)
+        # self.tgt_model = LookupEmbedding(uid_all, iid_all, emb_dim)
         self.aug_model = LookupEmbedding(uid_all, iid_all, emb_dim)
+        
+        self.src_model = GetEmbedding(uid_all, iid_all, emb_dim)
+        self.tgt_model = GetEmbedding(uid_all, iid_all, emb_dim)
 
         self.meta_net = MetaNet(emb_dim, meta_dim_0)
         self.mapping = torch.nn.Linear(emb_dim, emb_dim, False)
@@ -55,14 +130,10 @@ class MFBasedModel(torch.nn.Module):
         self.rq_mf = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
         self.rq_aggr = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
 
-        self.user_proto_cache = None  # 🔥 추가
+        self.graph_emb_cache = {} # 🔥 Cache for graph embeddings
 
-        self.proto_to_cond = torch.nn.Linear(emb_dim, emb_dim, bias=False)
-
-        self.alpha_top = nn.Parameter(torch.zeros(emb_dim))
-        self.alpha_bot = nn.Parameter(torch.zeros(emb_dim))
-
-        self.item_cond = False
+    def clear_graph_cache(self):
+        self.graph_emb_cache = {}
 
     @torch.no_grad()
     def build_user_prototype_cache(
@@ -133,6 +204,54 @@ class MFBasedModel(torch.nn.Module):
         top = self.user_proto_cache["top"][uid]
         bottom = self.user_proto_cache["bottom"][uid]
         return top, bottom
+
+    def compute_user_graph_embeddings(self, graph_data, use_target=False, device='cuda'):
+        if graph_data is None:
+            return None, None
+        
+        # Check cache first
+        cache_key = "tgt" if use_target else "src"
+        if cache_key in self.graph_emb_cache:
+            return self.graph_emb_cache[cache_key]
+
+        # 단순 2홉 aggr
+        # simple 2-hop aggregation (user -> items -> users) excluding 1-hop self contribution
+        uv_adj = graph_data["uv_adj"].to(device)
+        vu_adj = graph_data["vu_adj"].to(device)
+        if use_target:
+            user_feat = self.tgt_model.uid_embedding.weight#.detach().to(self.device)
+        else:
+            user_feat = self.src_model.uid_embedding.weight#.detach().to(self.device)
+        # with torch.no_grad():
+        # 1-hop: items aggregate from users
+        item_msg = torch.sparse.mm(vu_adj, user_feat)  # [num_items, d]
+
+        # 2-hop: users aggregate from items
+        user_2hop = torch.sparse.mm(uv_adj, item_msg)  # [num_users, d]
+
+        # remove self 1-hop contribution (user -> item -> user)
+        user_deg = torch.sparse.sum(uv_adj, dim=1).to_dense().unsqueeze(1)
+        user_2hop = user_2hop - user_deg * user_feat  # self-removal
+
+        # count real 2-hop neighbors: user -> item -> other_users
+        item_deg = torch.sparse.sum(vu_adj, dim=1).to_dense()
+        item_other = torch.relu(item_deg - 1)  # max(deg-1, 0)
+        two_hop_counts = torch.sparse.mm(uv_adj, item_other[:, None]).to_dense()
+
+        # normalization (avoid division by zero)
+        norm = torch.where(two_hop_counts == 0, torch.ones_like(two_hop_counts), two_hop_counts)
+
+        # final 2-hop embedding
+        user_emb = user_2hop / norm
+
+        # fallback: if no 2-hop neighbors, keep original embedding
+        zero_mask = two_hop_counts.squeeze(1) == 0
+        user_emb[zero_mask] = user_feat[zero_mask]
+        
+        # Store in cache (Detached to avoid graph memory explosion)
+        self.graph_emb_cache[cache_key] = user_emb.detach()
+
+        return user_emb
 
     def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False, item_cond=False, style_src=None):
         if stage == "train_src":
@@ -238,12 +357,14 @@ class MFBasedModel(torch.nn.Module):
             tgt_uid, iid_input, y_input = x
 
             tgt_emb1 = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
-            tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)  # Aggr
-
+            # tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)  # Aggr
+            tgt_emb2 = self.compute_user_graph_embeddings(self.graph_tgt, use_target=True, device=device)[tgt_uid]
+            
             # Diff1: MF 유저 임베딩, Diff2: Aggr 유저 임베딩
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
-            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
-
+            # src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
+            src_uid_emb2 = self.compute_user_graph_embeddings(self.graph_src, use_target=False, device=device)[tgt_uid]
+            
             if item_cond == True:
                 top_proto, bottom_proto = self.get_top_bottom_item_prototypes(tgt_uid)
                 cond_emb1 = top_proto
@@ -287,7 +408,8 @@ class MFBasedModel(torch.nn.Module):
             tgt_uid, iid_input, _ = x
 
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
-            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
+            # src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
+            src_uid_emb2 = self.compute_user_graph_embeddings(self.graph_src, use_target=False)[tgt_uid]
 
             if item_cond == True:
                 top_proto, bottom_proto = self.get_top_bottom_item_prototypes(tgt_uid)
