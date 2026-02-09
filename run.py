@@ -743,11 +743,23 @@ class Run:
                 # 1️⃣ train mode
                 model[0].train()   # MF + user_embedding + item_embedding
                 model[1].train()   # diff_model
-
                 # 2️⃣ optimizer 기준으로 grad 초기화
-                optimizer.zero_grad(set_to_none=True)
 
                 # 3️⃣ forward
+                loss = model[0](
+                    X,
+                    stage,
+                    self.device,
+                    diff_model=model[1],
+                    is_task=False,
+                    item_cond=self.item_cond,
+                    style_src=style_src,
+                )
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(list(model[0].parameters()) + list(model[1].parameters()), 1.0)
+                optimizer.step()
+
                 task_loss = model[0](
                     X,
                     stage,
@@ -757,16 +769,11 @@ class Run:
                     item_cond=self.item_cond,
                     style_src=style_src,
                 )
-
-                # 4️⃣ backward
+                optimizer.zero_grad(set_to_none=True)
                 task_loss.backward()
-
-                torch.nn.utils.clip_grad_norm_(
-                    list(model[0].parameters()) + list(model[1].parameters()),
-                    1.0
-                )
-                # 6️⃣ update
+                torch.nn.utils.clip_grad_norm_(list(model[0].parameters()) + list(model[1].parameters()), 1.0)
                 optimizer.step()
+
 
                 task_loss_ls.append(task_loss.item())
 
