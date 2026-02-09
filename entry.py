@@ -27,7 +27,7 @@ def prepare_1():
 
     parser.add_argument("--root", default="./")
     parser.add_argument("--exp_part", default="None_CDR")
-    parser.add_argument("--save_path", default="/home/shared/cjp/model_save_default/model")
+    parser.add_argument("--save_path", default="/home/shared/cjp/model_save_default_5/model")
     parser.add_argument("--use_cuda", default=1)
     parser.add_argument("--experiment", default="DiffCDR")
 
@@ -46,6 +46,7 @@ def prepare_1():
     parser.add_argument("--item_cond", type=bool, default=False, help="아이템 조건 사용 여부")
     parser.add_argument("--w", type=float, default=0.0, help="Diffusion inference - uncond 가중치 w")
     parser.add_argument("--emb_dim", type=int, default=10, help="MF emb dim")
+    parser.add_argument("--num_anchors", type=int, default=1, help="item agg anchor query 개수")
 
     args = parser.parse_args()
 
@@ -76,6 +77,7 @@ def prepare_2(args, config_path):
         config["alpha_rq"] = args.alpha_rq
         config["w"] = args.w
         config["emb_dim"] = args.emb_dim
+        config["num_anchors"] = args.num_anchors
 
     return config
 
@@ -131,7 +133,7 @@ if __name__ == "__main__":
     write(f"✅ Item  {args.item_cond}")
 
     if args.exp_part == "diff_parallel":
-        set_init = ["MF로 초기화", "Aggr로 초기화"]
+        set_init = ["MF로 초기화", "Aggr로 초기화", "item agg로 초기화"]
         set_loss = ["둘 다 MF", "둘 다 Aggr", "둘 다 MF+Aggr 평균", "따로따로"]
         set_proj = ["따로 Proj", "합치고 proj", "안 함"]
 
@@ -142,7 +144,11 @@ if __name__ == "__main__":
 
     write(f"emb dim: {args.emb_dim}")
     write(f"w = {args.w}")
+    write(f'num_anchors={args.num_anchors}')
 
     if not args.process_data_mid and not args.process_data_ready:
-        Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth")
+        if args.emb_dim == 10: 
+            Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth")
+        else: 
+            Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}_{args.emb_dim}dim.pth")
         write(f"==============================")

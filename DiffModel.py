@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import math
 
 from dpm_solver_pytorch import model_wrapper, model_wrapper_hierarchical_cond, NoiseScheduleVP, DPM_Solver
-from utils import AttentionLayer, SimilarityProjector
+from utils import AttentionLayer, SimilarityProjector, ItemZAttentionPooling
 
 from rqvae import ResidualQuantizer
 
@@ -64,6 +64,7 @@ class DiffParallel(nn.Module):
         parallel=None,
         rqvae=None,
         w=0.0,
+        num_anchors=1
     ):
         super(DiffParallel, self).__init__()
 
@@ -147,10 +148,14 @@ class DiffParallel(nn.Module):
         self.ln_iid = nn.LayerNorm(input_dim)
         self.ln_m = nn.LayerNorm(input_dim)
         self.ln_g = nn.LayerNorm(input_dim)
+        self.ln_z = nn.LayerNorm(input_dim)
+
+        
 
         if self.parallel["set_aggr"] in ["attn", "item_attn"]:
             self.attn_layer = AttentionLayer(in_dim=input_dim * 2, out_dim=input_dim)
-        elif self.parallel["set_aggr"] == "item_cls":
+        # elif self.parallel["set_aggr"] == "item_cls":
+        else:
             self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
 
         self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
@@ -165,6 +170,14 @@ class DiffParallel(nn.Module):
         self.item_style_scale = nn.Parameter(torch.tensor(0.1))
 
         self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
+
+        self.item_z_attn = ItemZAttentionPooling(z_dim=input_dim, q_dim=input_dim, out_dim=input_dim)
+        
+        self.num_anchors = num_anchors
+        self.anchor_queries = nn.Parameter(
+            torch.randn(self.num_anchors, input_dim)
+        )
+        self.ln_u_items = nn.LayerNorm(input_dim)
 
     def forward(self, x, t, cond_emb, cond_mask, diff_id):
 
@@ -185,7 +198,69 @@ class DiffParallel(nn.Module):
 
     def get_al_emb(self, emb):
         return self.al_linear(emb)
+    
+    def pool_user_z_attention_batch(
+        self,
+        pos_items,        # (B, L)
+        pos_mask,         # (B, L)
+        user_query_emb = None,   # (B, D)
+        iid_embeddings = None, 
+        is_mf=True,
+    ):
+        """
+        SetTransformer-style pooling:
+        - Query  : learnable anchor vectors (K)
+        - Key/Val: user-interacted item embeddings
+        """
 
+        B, L = pos_items.shape # 각 유저별 pos seq
+        K = self.num_anchors
+        D = self.input_dim
+
+        # --------------------------------------------------
+        # 1. item embeddings from interactions
+        # --------------------------------------------------
+        # (B, L, D)
+        # item_Z = self.item_Z_src
+        item_z = self.item_Z_src[pos_items]
+        item_z = self.ln_u_items(item_z)
+
+        # --------------------------------------------------
+        # 2. expand anchor queries per batch
+        # --------------------------------------------------
+        # (B, K, D)
+        Q = self.anchor_queries.unsqueeze(0).expand(B, K, D)
+
+        # projections
+        Q = self.item_z_attn.q(Q)        # (B, K, D)
+        K_item = self.item_z_attn.k(item_z)  # (B, L, D)
+        V_item = self.item_z_attn.v(item_z)  # (B, L, D)
+
+        # --------------------------------------------------
+        # 3. attention
+        # --------------------------------------------------
+        # score: (B, K, L)
+        score = torch.einsum("bkd,bld->bkl", Q, K_item)
+        score = score * self.item_z_attn.scale
+
+        # mask
+        score = score.masked_fill(~pos_mask.unsqueeze(1), -1e9)
+
+        attn = torch.softmax(score, dim=-1)  # (B, K, L)
+
+        # --------------------------------------------------
+        # 4. aggregate
+        # --------------------------------------------------
+        # (B, K, D)
+        out = torch.einsum("bkl,bld->bkd", attn, V_item)
+
+        # --------------------------------------------------
+        # 5. final user condition embedding
+        # --------------------------------------------------
+        # simplest & stable
+        user_cond = out.mean(dim=1)  # (B, D)
+
+        return user_cond    
 
 def q_x_fn(model, x_0, t, device):  # forward
     # eq(4)
@@ -198,8 +273,10 @@ def q_x_fn(model, x_0, t, device):  # forward
 
 
 def diffusion_loss_fn_parallel(
-    model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_emb, y_input, device, is_task, q_embs1=None, q_embs2=None, style_src=None, uid=None, iid=None
+    model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_emb, y_input, device, is_task, q_embs1=None, q_embs2=None, style_src=None, uid=None, iid=None,
+    iid_input=None, src_item_m=None, src_item_g=None
 ):
+      # DIM(reconstruction) loss
 
     num_steps = model.num_steps
     mask_rate = model.mask_rate
@@ -266,7 +343,17 @@ def diffusion_loss_fn_parallel(
     item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
     item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
 
-    tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+    if model.parallel["set_aggr"] in ["item_cls"]:
+        tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+    if model.parallel["set_aggr"] == "item_cls1":
+        item_z = model.item_Z_tgt[iid_input].squeeze(1)
+        item_z = model.ln_z(item_z)
+        tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok, item_z], dim=1)
+    elif model.parallel["set_aggr"] == "item_cls2":
+        item_z = model.item_Z_tgt[iid_input].squeeze(1)
+        item_z = model.ln_z(item_z)
+        tokens = torch.stack([final_output_m, final_output_g, style_tok_u, item_style_tok, item_z], dim=1)
+        
     out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
     final_output = out[:, 0, :]  # (B, D)
 
@@ -275,76 +362,11 @@ def diffusion_loss_fn_parallel(
     y_pred = y_pred + mu_t
 
     # MSE
+    align_loss = F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g)
     task_loss = (y_pred - y_input.squeeze().float()).square().mean()
-
-    return diff_loss +  F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
-
-
-
-    # elif is_task:  # task loss ALM 수행
-
-    #     ### [TRAIN-ALM] 1. noised x_0 설정에 따라 denoising
-    #     if model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
-    #         final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0)
-    #         final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1)
-    #     elif model.parallel["set_init"] == 1:  # 각각 MF, Aggr
-    #         # ! 각각 MF, Aggr인 파트만 수정
-    #         final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, q_embs1, iid_emb, device, diff_id=0)
-    #         final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb2, q_embs2, iid_emb, device, diff_id=1)
-
-    #     ### [TRAIN-ALM] 2. Diff1, Diff2 결과 aggregation
-    #     if model.parallel["set_aggr"] == "attn":
-    #         # ! 어텐션으로 최종 임베딩 종합
-    #         final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1))
-
-    #     elif model.parallel["set_aggr"] == "item_attn":
-    #         # 아이템을 쿼리로 사용
-    #         final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1), query=torch.cat([iid_emb, iid_emb], dim=1))
-
-    #     elif model.parallel["set_aggr"] == "item_cls":
-    #         iid_emb = model.ln_iid(iid_emb)
-    #         final_output_m = model.ln_m(model.linear_m(final_output_m))
-    #         final_output_g = model.ln_g(model.linear_g(final_output_g))
-
-    #         uid = uid.long()  # (B,)
-
-    #         style_src = style_src.to(final_output_m.device)
-    #         style_u = style_src[uid]  # (B, F)
-    #         style_tok = model.style_encoder(style_u)  # (B, D)
-    #         style_tok = model.style_ln(style_tok)  # (B, D)
-    #         style_tok_u = model.style_scale * style_tok  # (B, D)
-
-    #         style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
-    #         style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
-    #         item_style_tok = model.item_style_encoder(style_i)  # (B, D)
-    #         item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
-    #         item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
-
-    #         tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
-    #         out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
-    #         final_output = out[:, 0, :]  # (B, D)
-
-    #     y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
-    #     mu_t = model.tgt_global_bias
-    #     y_pred = y_pred + mu_t
-
-    #     # MSE
-    #     task_loss = (y_pred - y_input.squeeze().float()).square().mean()
-
-    #     # RMSE
-    #     # task_loss =   (y_pred - y_input.squeeze().float()).square().sum().sqrt() / y_pred.shape[0]
-
-    #     if model.parallel["set_loss"] == 0:
-    #         # ! mf 임베딩과 유사해지도록 통일
-    #         # return F.smooth_l1_loss(x_0_m, final_output) + model.task_lambda * task_loss
-    #         return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
-    #     elif model.parallel["set_loss"] == 1:
-    #         return F.mse_loss(x_0_g, final_output) + model.task_lambda * task_loss
-    #     elif model.parallel["set_loss"] == 2:
-    #         return F.mse_loss((x_0_m + x_0_g) / 2, final_output) + model.task_lambda * task_loss
-    #     elif model.parallel["set_loss"] == 3:
-    #         return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss  # ALM 로스 + task loss
-
+    
+    return diff_loss + model.task_lambda * task_loss
+    return diff_loss + align_loss + model.task_lambda * task_loss
 
 def _get_ddpm_sampler(model, device):
     """

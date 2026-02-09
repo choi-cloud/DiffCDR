@@ -87,97 +87,20 @@ class MFBasedModel(torch.nn.Module):
         self.user_embedding = uidEmbedding(uid_all, emb_dim)
         self.item_embedding = iidEmbedding(iid_all, emb_dim)
         self.num_embeddings = uid_all
+        self.num_embeddings_i = iid_all
 
         self.meta_net = MetaNet(emb_dim, meta_dim_0)
         self.mapping = torch.nn.Linear(emb_dim, emb_dim, False)
-
-        # ! mf 소스 임베딩과 aggr 소스 임베딩 각각을 양자화하기 위한 모듈
-        # self.rq_mf = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
-        # self.rq_aggr = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
-
-        # self.user_proto_cache = None  # 🔥 추가
-
-        # self.proto_to_cond = torch.nn.Linear(emb_dim, emb_dim, bias=False)
-
-        # self.alpha_top = nn.Parameter(torch.zeros(emb_dim))
-        # self.alpha_bot = nn.Parameter(torch.zeros(emb_dim))
-
-        # self.item_cond = False
-
-    @torch.no_grad()
-    def build_user_prototype_cache(
-        self,
-        device,
-        top_p=0.01,  # 상위 p%
-        bottom_p=0.005,  # 하위 p%
-        user_batch=256,
-    ):
-        """
-        Memory-safe prototype cache builder
-        """
-        uid_emb_all = self.src_model.uid_embedding.weight.detach().to(device)
-        iid_emb = self.src_model.iid_embedding.weight.detach().to(device)
-
-        num_users = uid_emb_all.size(0)
-        num_items = iid_emb.size(0)
-        d = uid_emb_all.size(1)
-
-        # percentage → k (NO clamp)
-        topk = int(num_items * top_p)
-        bottomk = int(num_items * bottom_p)
-
-        # prototype cache
-        top_proto = torch.zeros((num_users, d), device=device)
-        bot_proto = torch.zeros((num_users, d), device=device)
-
-        for start in range(0, num_users, user_batch):
-            end = min(start + user_batch, num_users)
-
-            u_emb = uid_emb_all[start:end]  # [B, d]
-
-            # score matrix for this batch only
-            scores = torch.matmul(u_emb, iid_emb.t())  # [B, I]
-
-            # ---------- TOP PROTOTYPE ----------
-            if topk > 0:
-                top_idx = torch.topk(scores, k=topk, dim=1).indices  # [B, topk]
-                top_proto[start:end] = iid_emb[top_idx].mean(dim=1)
-            else:
-                # clean skip
-                top_proto[start:end] = torch.zeros_like(u_emb)
-
-            # ---------- BOTTOM PROTOTYPE (REPULSION) ----------
-            if bottomk > 0:
-                bot_idx = torch.topk(scores, k=bottomk, dim=1, largest=False).indices  # [B, bottomk]
-
-                bottom_mean = iid_emb[bot_idx].mean(dim=1)  # [B, d]
-                # bot_proto[start:end] = F.normalize(
-                #     u_emb - bottom_mean, dim=1
-                # )
-                bot_proto[start:end] = iid_emb[bot_idx].mean(dim=1)
-            else:
-                # clean skip
-                bot_proto[start:end] = torch.zeros_like(u_emb)
-
-            # very important to free memory
-            del scores
-
-            if start % (user_batch * 20) == 0:
-                torch.cuda.empty_cache()
-
-        # store cache
-        self.user_proto_cache = {"top": top_proto.detach(), "bottom": bot_proto.detach()}
-
-    @torch.no_grad()
-    def get_top_bottom_item_prototypes(self, uid):
-        top = self.user_proto_cache["top"][uid]
-        bottom = self.user_proto_cache["bottom"][uid]
-        return top, bottom
 
     def encode_all_users(self, device='cuda'):
         all_uid = torch.arange(self.num_embeddings, device=device)
         user_feat = self.user_embedding(all_uid)   # ⭐ forward 통과
         return user_feat   
+    
+    def encode_all_item(self, device='cuda'):
+        all_iid = torch.arange(self.num_embeddings_i, device=device)
+        item_feat = self.item_embedding(all_iid.unsqueeze(1))   # ⭐ forward 통과
+        return item_feat
 
     def compute_user_graph_embeddings(self, is_train=False, device='cuda'):
         if is_train: 
@@ -222,14 +145,23 @@ class MFBasedModel(torch.nn.Module):
     
     def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False, item_cond=False, style_src=None):
         if stage == "train_src":
-            emb = self.src_model.forward(x)
-            x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
-            return x
+            # emb = self.src_model.forward(x)
+            # x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
+            # return x
+            user_emb = self.user_embedding(x[:, 0])
+            item_emb = self.item_embedding(x[:, 1])
+            x = torch.sum(user_emb * item_emb, dim=1)
+            return x 
+
 
         elif stage in ["train_tgt", "test_tgt"]:
-            emb = self.tgt_model.forward(x)
-            x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
-            return x
+            # emb = self.tgt_model.forward(x)
+            # x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
+            # return x
+            user_emb = self.user_embedding(x[:, 0])
+            item_emb = self.item_embedding(x[:, 1])
+            x = torch.sum(user_emb * item_emb, dim=1)
+            return x 
 
         elif stage in ["train_aug", "test_aug"]:
             emb = self.aug_model.forward(x)
@@ -322,9 +254,6 @@ class MFBasedModel(torch.nn.Module):
         elif stage == "train_diff_parallel":  # DiffParallel - train
 
             tgt_uid, iid_input, y_input = x
-            
-            # tgt_emb1 = self.user_embdding(tgt_uid.unsqueeze(1)).squeeze()  # MF
-            # tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)  # Aggr
 
             # Diff1: MF 유저 임베딩, Diff2: Aggr 유저 임베딩
             # src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
@@ -334,11 +263,43 @@ class MFBasedModel(torch.nn.Module):
             cond_emb1 = uid_emb1
             cond_emb2 = uid_emb2
 
+            if item_cond==True:
+                # attention 
+                pos_items = diff_model.user_src_items_pad[tgt_uid]     # (B, L)
+                pos_mask  = diff_model.user_src_items_mask[tgt_uid]    # (B, L)
+
+                # emb1 = diff_model.ln_m(uid_emb1)
+                # emb2 = diff_model.ln_g(uid_emb2)
+
+                # iid_emb1 = self.encode_all_item()[tgt_uid]  
+                # print(iid_emb1.shape, uid_emb1.shape, emb1.shape)
+                # user_z_src_mf = diff_model.pool_user_z_attention_batch(pos_items, pos_mask, emb1, is_mf=True)
+                # user_z_src_aggr = diff_model.pool_user_z_attention_batch(pos_items, pos_mask, emb2, is_mf=False)
+
+                # cond_emb1 = user_z_src_mf
+                # cond_emb2 = user_z_src_aggr
+                # potential_items = diff_model.potential_items_pad[tgt_uid]
+                # potential_mask  = diff_model.potential_items_mask[tgt_uid]
+
+                user_z_src1 = diff_model.pool_user_z_attention_batch(
+                    pos_items=pos_items,
+                    pos_mask=pos_mask,
+                )
+
+                # user_z_src2 = diff_model.pool_user_z_attention_batch(
+                #     pos_items=potential_items,
+                #     pos_mask=potential_mask,
+                # )
+                user_z_src2 = user_z_src1
+
+                cond_emb1 = user_z_src1
+                cond_emb2 = user_z_src2
+                         
             iid_emb = self.item_embedding(iid_input.unsqueeze(1)).squeeze()
 
             # ! mf 임베딩과 aggr 임베딩 양자화
-            quantized, all_level_vectors1, rq_loss1 = diff_model.rq_mf(cond_emb1)
-            quantized, all_level_vectors2, rq_loss2 = diff_model.rq_aggr(cond_emb2)
+            quantized1, all_level_vectors1, rq_loss1 = diff_model.rq_mf(cond_emb1)
+            quantized2, all_level_vectors2, rq_loss2 = diff_model.rq_aggr(cond_emb2)
 
             # is_task=False: 노이즈 예측 , is_task=True: ALS + task 로스
             loss = Diff.diffusion_loss_fn_parallel(
@@ -358,6 +319,9 @@ class MFBasedModel(torch.nn.Module):
                 style_src=style_src,
                 uid=tgt_uid,
                 iid=iid_input,
+                iid_input = iid_input,
+                src_item_m=cond_emb1,
+                src_item_g=cond_emb2,
             )
 
             total_loss = loss + diff_model.rqvae["alpha_rq"] * (rq_loss1 + rq_loss2)
@@ -374,6 +338,38 @@ class MFBasedModel(torch.nn.Module):
             cond_emb2 = uid_emb2
 
             iid_emb = self.item_embedding(iid_input.unsqueeze(1)).squeeze()
+
+            if item_cond==True:
+                # attention 
+                pos_items = diff_model.user_src_items_pad[tgt_uid]     # (B, L)
+                pos_mask  = diff_model.user_src_items_mask[tgt_uid]    # (B, L)
+
+                # emb1 = diff_model.ln_m(uid_emb1)
+                # emb2 = diff_model.ln_g(uid_emb2)
+
+                # # iid_emb = self.encode_all_item()[tgt_uid]  
+
+                # user_z_src_mf = diff_model.pool_user_z_attention_batch(pos_items, pos_mask, emb1, is_mf=True)
+                # user_z_src_aggr = diff_model.pool_user_z_attention_batch(pos_items, pos_mask, emb2, is_mf=False)
+
+                # cond_emb1 = user_z_src_mf
+                # cond_emb2 = user_z_src_aggr
+                # potential_items = diff_model.potential_items_pad[tgt_uid]
+                # potential_mask  = diff_model.potential_items_mask[tgt_uid]
+
+                user_z_src1 = diff_model.pool_user_z_attention_batch(
+                    pos_items=pos_items,
+                    pos_mask=pos_mask,
+                )
+
+                # user_z_src2 = diff_model.pool_user_z_attention_batch(
+                #     pos_items=potential_items,
+                #     pos_mask=potential_mask,
+                # )
+                user_z_src2 = user_z_src1
+
+                cond_emb1 = user_z_src1
+                cond_emb2 = user_z_src2
 
             # ! mf 임베딩과 aggr 임베딩 양자화
             quantized, all_level_vectors1, _ = diff_model.rq_mf(cond_emb1)  # [L, B, D]
@@ -404,27 +400,22 @@ class MFBasedModel(torch.nn.Module):
             item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
             item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
 
-            tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+            if diff_model.parallel["set_aggr"] in ["item_cls"]:
+                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+            elif diff_model.parallel["set_aggr"] == "item_cls1": 
+                item_z = diff_model.item_Z_tgt[iid_input]   
+                item_z = diff_model.ln_z(item_z.squeeze(1))
+                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok, item_z], dim=1)
+            elif diff_model.parallel["set_aggr"] == "item_cls2": 
+                item_z = diff_model.item_Z_tgt[iid_input]   
+                item_z = diff_model.ln_z(item_z.squeeze(1))
+                tokens = torch.stack([final_output_m, final_output_g, style_tok_u, item_style_tok, item_z], dim=1)
+            
             out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))
             final_output = out[:, 0, :]
-
+            
             y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
             mu_t = diff_model.tgt_global_bias
             y_pred = y_pred + mu_t
 
             return y_pred
-
-    def _fetch_vbge_user_embedding(self, diff_model, tgt_uid, use_target=False):
-
-        attr = "smooth_user_emb_tgt" if use_target else "smooth_user_emb_src"
-        vbge_cache = getattr(diff_model, attr, None)
-        if vbge_cache is None:
-            return None
-        indices = tgt_uid.long()
-        return vbge_cache[indices]
-
-    def _fetch_vbge_item_embedding(self, diff_model, tgt_iid):
-        if not hasattr(diff_model, "smooth_item_emb"):
-            return None
-        indices = tgt_iid.long()
-        return diff_model.smooth_item_emb[indices].squeeze()

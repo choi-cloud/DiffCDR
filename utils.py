@@ -114,3 +114,25 @@ class SimilarityProjector(nn.Module):
         sim = F.cosine_similarity(iid_emb, trans_emb_m, dim=1, eps=1e-8).unsqueeze(1)
         # (B, 10)
         return self.proj(sim)
+
+class ItemZAttentionPooling(nn.Module):
+    def __init__(self, z_dim, q_dim, out_dim):
+        super().__init__()
+        self.q = nn.Linear(q_dim, out_dim, bias=False)
+        self.k = nn.Linear(z_dim, out_dim, bias=False)
+        self.v = nn.Linear(z_dim, out_dim, bias=False)
+        self.scale = out_dim ** -0.5
+
+    def forward(self, user_q, item_z):
+        """
+        user_q: (D,)
+        item_z: (N, Dz)
+        """
+        Q = self.q(user_q)        # (D)
+        K = self.k(item_z)        # (N, D)
+        V = self.v(item_z)        # (N, D)
+
+        score = (K @ Q) * self.scale   # (N,)
+        w = torch.softmax(score, dim=0)
+
+        return (V * w.unsqueeze(1)).sum(dim=0)  # (D,)

@@ -101,6 +101,8 @@ class Run:
             "alpha_rq": config["alpha_rq"],
         }
         self.w = config["w"]
+        
+        self.num_anchors = config["num_anchors"]
 
         self.device = "cuda" if config["use_cuda"] else "cpu"
 
@@ -553,9 +555,10 @@ class Run:
         uv_adj = graph_data["uv_adj"].to(self.device)
         vu_adj = graph_data["vu_adj"].to(self.device)
         if use_target:
-            user_feat = base_model.tgt_model.uid_embedding.weight.detach().to(self.device)
+            # user_feat = base_model.tgt_model.uid_embedding.weight.detach().to(self.device)
+            user_feat = base_model.src_uid_embedding.detach().to(self.device)
         else:
-            user_feat = base_model.src_model.uid_embedding.weight.detach().to(self.device)
+            user_feat = base_model.tgt_uid_embedding.detach().to(self.device)
         with torch.no_grad():
             # 1-hop: items aggregate from users
             item_msg = torch.sparse.mm(vu_adj, user_feat)  # [num_items, d]
@@ -584,36 +587,154 @@ class Run:
 
         return user_emb, None
 
-    def compute_item_aggregation_popularity(self, base_model, graph_data, src_item_num):
-        uv_adj = graph_data["uv_adj"].to(self.device)  # [num_users, num_items]
+    @torch.no_grad()
+    def build_user_item_sequences(self, graph_data, num_users, max_len=20, pad_item_id=0,):
+        """
+        graph_data["uv_adj"]: [num_users, num_items] sparse
+        """
+        uv_adj = graph_data["uv_adj"].coalesce().to("cpu")
 
-        # MF item embedding
-        src_item_feat = base_model.src_model.iid_embedding.weight.detach().to(self.device)[:src_item_num]  # [num_items, emb_dim]
-        tgt_item_feat = base_model.tgt_model.iid_embedding.weight.detach().to(self.device)[src_item_num:]  # [num_items, emb_dim]
-        item_feat = torch.cat([src_item_feat, tgt_item_feat], dim=0)  # [num_items, emb_dim]
+        # 1) user → item list
+        user_items = [[] for _ in range(num_users)]
+        row, col = uv_adj.indices()
 
-        # item popularity
-        conf_weight = self.item_popularity.to(self.device).unsqueeze(1)  # [num_items, 1]
-        int_weight = torch.ones_like(conf_weight) - conf_weight
+        for u, i in zip(row.tolist(), col.tolist()):
+            user_items[u].append(i) # user가 interaction한 아이템들 
 
-        with torch.no_grad():
-            # popularity-weighted item embedding
-            item_feat_conf = item_feat * conf_weight  # [num_items, d]
-            item_feat_int = item_feat * int_weight  # [num_items, d]
+        # 2) padding
+        user_items_pad = torch.full( # 최대 20개까지 기록, 20개 안되면 0으로 패딩 
+            (num_users, max_len),
+            fill_value=pad_item_id,
+            dtype=torch.long,
+        )
+        user_items_mask = torch.zeros( # padding된 아이템들 표시
+            (num_users, max_len),
+            dtype=torch.bool,
+        )
 
-            # 1-hop aggregation: user <- items
-            user_agg_conf = torch.sparse.mm(uv_adj, item_feat_conf)  # [num_users, d]
-            user_agg_int = torch.sparse.mm(uv_adj, item_feat_int)  # [num_users, d]
+        for u, items in enumerate(user_items):
+            if len(items) == 0:
+                continue
 
-            # normalization term: sum of item popularities per user
-            pop_sum_conf = torch.sparse.mm(uv_adj, conf_weight).clamp(min=1e-8)  # [num_users, 1] # 이웃 item들의 pop sum으로 정규화
-            pop_sum_int = torch.sparse.mm(uv_adj, int_weight).clamp(min=1e-8)  # [num_users, 1] # 이웃 item들의 pop sum으로 정규화
+            # 최근 max_len개만 사용 (or random / popularity 기준으로 바꿔도 됨)
+            items = items[-max_len:]
+            L = len(items)
 
-            user_emb_conf = user_agg_conf / pop_sum_conf
-            user_emb_int = user_agg_int / pop_sum_int
+            user_items_pad[u, :L] = torch.tensor(items, dtype=torch.long)
+            user_items_mask[u, :L] = True
 
-        return user_emb_conf, user_emb_int
+        return (
+            user_items_pad.to(self.device), # interactio items 
+            user_items_mask.to(self.device), # padding 여부
+        )
 
+    @torch.no_grad()
+    def build_user_potential_item_sequences(
+        self,
+        model, 
+        graph_data,
+        max_len=20,
+        topk_2hop_users=50,
+        pad_item_id=0,
+        device='cuda',
+        save_path=""
+    ):
+        """
+        graph_data["uv_adj"]: [num_users, num_items] sparse
+        graph_data["vu_adj"]: [num_items, num_users] sparse
+        """
+
+        uv_adj = graph_data["uv_adj"].coalesce().to(device)  # [U, I]
+        num_users, num_items = uv_adj.size()
+
+        # MF user embedding
+        user_emb = model.encode_all_users(device=device)
+        user_emb = torch.nn.functional.normalize(user_emb, dim=1)
+
+        # lookup tables (CPU is OK)
+        row_u, col_i = uv_adj.indices()
+        user_items = [[] for _ in range(num_users)]
+        item_users = [[] for _ in range(num_items)]
+
+        for u, i in zip(row_u.tolist(), col_i.tolist()):
+            user_items[u].append(i)
+            item_users[i].append(u)
+
+        # output
+        user_items_pad = torch.full(
+            (num_users, max_len),
+            pad_item_id,
+            dtype=torch.long,
+            device=device,
+        )
+        user_items_mask = torch.zeros(
+            (num_users, max_len),
+            dtype=torch.bool,
+            device=device,
+        )
+
+        # -------------------------------
+        # main loop (user-wise only)
+        # -------------------------------
+        for u in range(num_users):
+            items_u = user_items[u]
+            if not items_u:
+                continue
+
+            # 1) collect 2-hop users
+            two_hop_users = set()
+            for i in items_u:
+                for v in item_users[i]:
+                    if v != u:
+                        two_hop_users.add(v)
+
+            if not two_hop_users:
+                continue
+
+            two_hop_users = torch.tensor(list(two_hop_users), device=device)
+
+            # 2) MF similarity top-k
+            sim = torch.matmul(user_emb[u], user_emb[two_hop_users].T)
+            k = min(topk_2hop_users, sim.numel())
+            topk_idx = torch.topk(sim, k=k, largest=False).indices
+            sim_users = two_hop_users[topk_idx]
+
+            # 3) 3-hop item degree (within sim_users)
+            item_degree = {}
+            for v in sim_users.tolist():
+                for i in user_items[v]:
+                    if i in items_u:
+                        continue
+                    item_degree[i] = item_degree.get(i, 0) + 1
+
+            if not item_degree:
+                continue
+
+            # 4) rank + pad
+            ranked_items = sorted(
+                item_degree.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )[:max_len]
+
+            L = len(ranked_items)
+            user_items_pad[u, :L] = torch.tensor(
+                [i for i, _ in ranked_items],
+                device=device
+            )
+            user_items_mask[u, :L] = True
+
+        torch.save(
+            {
+                "pad": user_items_pad.cpu(),
+                "mask": user_items_mask.cpu(),
+            },
+            save_path
+        )
+                
+        return user_items_pad, user_items_mask
+    
+    
     def get_model(self):
         if self.base_model == "MF":
             model = MFBasedModel(self.uid_all, self.iid_all, self.emb_dim, self.meta_dim)
@@ -622,8 +743,10 @@ class Run:
         return model.cuda() if self.use_cuda else model
 
     def get_optimizer(self, model, diff_model=None, ss_model=None, la_model=None):
-        optimizer_src = torch.optim.Adam(params=model.src_model.parameters(), lr=self.lr, weight_decay=self.wd)
-        optimizer_tgt = torch.optim.Adam(params=model.tgt_model.parameters(), lr=self.lr, weight_decay=self.wd)
+        # optimizer_src = torch.optim.Adam(params=model.src_model.parameters(), lr=self.lr, weight_decay=self.wd)
+        # optimizer_tgt = torch.optim.Adam(params=model.tgt_model.parameters(), lr=self.lr, weight_decay=self.wd)
+        optimizer_src = torch.optim.Adam(params=list(model.user_embedding.parameters())+list(model.item_embedding.parameters()), lr=self.lr, weight_decay=self.wd)
+        optimizer_tgt = torch.optim.Adam(params=list(model.user_embedding.parameters())+list(model.item_embedding.parameters()), lr=self.lr, weight_decay=self.wd)
         optimizer_meta = torch.optim.Adam(params=model.meta_net.parameters(), lr=self.lr, weight_decay=self.wd)
         optimizer_aug = torch.optim.Adam(params=model.aug_model.parameters(), lr=self.lr, weight_decay=self.wd)
 
@@ -971,27 +1094,37 @@ class Run:
             self.update_results(mae, rmse, "diff")
             write(f"DIFF LOSS {loss.item()}, TASK LOSS {task_loss.item()}, MAE: {mae} RMSE: {rmse}")
 
-    def Diff_Parallel(self, model, diff_model, data_diff, data_test, optimizer, graph_train, graph_test, style_src, style_tgt_item):
+    def Diff_Parallel(self, model, diff_model, data_diff, data_test, optimizer, graph_train, graph_test, style_src, style_tgt_item, Z_src, Z_tgt):
         write("=========Diff_Parallel========")
 
         diff_model.style_tgt_item = style_tgt_item
 
-        
         src_graph = graph_train.get("src")
         tgt_graph = graph_train.get("tgt")
         shared_graph = graph_train.get("shared")
-        # smooth_user_emb_src, _ = self.compute_user_graph_embeddings(model, diff_model, src_graph, use_target=False)
-        # smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model, diff_model, tgt_graph, use_target=True)
-        # diff_model.smooth_user_emb_src = smooth_user_emb_src
-        # diff_model.smooth_user_emb_tgt = smooth_user_emb_tgt
         model.graph_shared_train = graph_train.get("shared")
         model.graph_shared_test = graph_test.get("shared")
         model.graph_src = src_graph
-        #         graph_data = {
-        #     "train": {"src": graph_src_train, "tgt": graph_tgt_train, "shared": graph_shared_train},
-        #     "test": {"src": graph_src_test, "tgt": graph_tgt_test, "shared": graph_shared_test},
-        # }
 
+        diff_model.item_Z_src = Z_src.to(self.device)
+        diff_model.item_Z_tgt = Z_tgt.to(self.device)
+        diff_model.user_src_items_pad, diff_model.user_src_items_mask = self.build_user_item_sequences(graph_data=src_graph, num_users=self.uid_all,)
+        diff_model.user_tgt_items_pad, diff_model.user_tgt_items_mask = self.build_user_item_sequences(graph_data=tgt_graph, num_users=self.uid_all,)
+        
+        # path = "ready/_" + str(int(self.ratio[0] * 10)) + "_" + str(int(self.ratio[1] * 10)) + "/tgt_" + self.tgt + "_src_" + self.src
+        # if os.path.exists(path):
+        #     cache = torch.load(path, map_location="cpu")
+        #     diff_model.potential_items_pad = cache["pad"].to(self.device)
+        #     diff_model.potential_items_mask = cache["mask"].to(self.device)
+        #     print("[Cache hit] Loaded potential items")
+        # else:
+        #     diff_model.potential_items_pad, diff_model.potential_items_mask = self.build_user_potential_item_sequences(model, 
+        #                                                                                                             graph_data=shared_graph,
+        #                                                                                                             max_len=20,
+        #                                                                                                             topk_2hop_users=50,
+        #                                                                                                             pad_item_id=0,
+        #                                                                                                             device='cuda',
+        #                                                                                                             save_path=path)
         for i in range(self.epoch):
             loss, task_loss = self.train(
                 data_diff,
@@ -1047,7 +1180,7 @@ class Run:
         if self.device == "cuda":
             # model.load_state_dict(torch.load(path))
             state = torch.load(path, map_location=self.device)
-            model.load_state_dict(state, strict=False)
+            model.load_state_dict(state, strict=True)
         else:
             model.load_state_dict(torch.load(path, map_location="cpu"))
 
@@ -1083,6 +1216,7 @@ class Run:
                 parallel=self.parallel_setting,
                 rqvae=self.rqvae_setting,
                 w=self.w,
+                num_anchors=self.num_anchors
             )
             diff_model = diff_model.cuda() if self.use_cuda else diff_model
 
@@ -1122,10 +1256,6 @@ class Run:
                 cache_path=cache_path
             )
 
-        # print("\n소스 유저 percentile-style 추출\n")
-        # style_src, info_u = build_src_user_percentile_style_from_loader(
-        #     data_src=data_src, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, alpha=0.1, device="cpu"
-        # )
 
         print(f"\n타겟 도메인 내 아이템의 레이팅 스타일 정보 추출\n")
         cache_path = f"{self.stylecache_root}_tgt_item.pt"
@@ -1139,10 +1269,15 @@ class Run:
                 cache_path=cache_path
             )
 
-        # print("\n타겟 아이템 percentile-style 추출\n")
-        # style_tgt_item, info_i = build_tgt_item_percentile_style_from_loader(
-        #     data_tgt=data_tgt, num_items_total=self.iid_all, rating_min=1.0, rating_max=5.0, alpha=0.1, device="cpu"  # 전역 아이템 개수
-        # )
+        z_cache_path = f"{self.stylecache_root}_item_z_{self.emb_dim}dim.pt"
+        if os.path.exists(z_cache_path):
+            ckpt = torch.load(z_cache_path, map_location="cpu", weights_only=True)
+            Z_src = ckpt["Z_src"]
+            Z_tgt = ckpt["Z_tgt"]
+        else: 
+            Z_src, Z_tgt = build_cross_domain_z_from_data(
+                data_src, data_tgt, self.iid_all, z_dim=self.emb_dim, device="cpu",
+                cache_path=z_cache_path)
 
         criterion = torch.nn.MSELoss()
 
@@ -1224,10 +1359,10 @@ class Run:
         elif exp_part == "diff_parallel":
             self.model_load(model, path=save_path)
             # model.build_user_prototype_cache(self.device, 0.5, 0.5, user_batch=1024)
-            print("None_CDR model loaded")
+            print(f"None_CDR model loaded from {save_path}")
             # optimizer_diff: DiffParallel 의 파라미터만 포함, model에 있는 user/item embedding update X
             self.Diff_Parallel(
-                model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"], style_src, style_tgt_item
+                model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"], style_src, style_tgt_item, Z_src, Z_tgt
             )
             self.result_print(["diff_parallel"])
 
@@ -1661,3 +1796,172 @@ def build_tgt_item_percentile_style_from_loader(
         "note": "percentile is computed within each item's rating distribution (mid-rank).",
     }
     return style_item, info
+
+
+from collections import defaultdict
+@torch.no_grad()
+def build_src_tgt_cooccurrence_sparse(
+    data_src,
+    data_tgt,
+    num_items,
+    device="cpu",
+):
+    src_by_user = {}
+    tgt_by_user = {}
+
+    # src domain
+    for X, _ in data_src:
+        uid = X[:, 0].cpu().tolist()
+        iid = X[:, 1].cpu().tolist()
+        for u, i in zip(uid, iid):
+            src_by_user.setdefault(u, []).append(i)
+
+    # tgt domain
+    for X, _ in data_tgt:
+        uid = X[:, 0].cpu().tolist()
+        iid = X[:, 1].cpu().tolist()
+        for u, i in zip(uid, iid):
+            tgt_by_user.setdefault(u, []).append(i)
+
+    rows, cols, vals = [], [], []
+
+    # 공통 user만 사용
+    for u in set(src_by_user) & set(tgt_by_user):
+        for i in src_by_user[u]:
+            for j in tgt_by_user[u]:
+                rows.append(i)
+                cols.append(j)
+                vals.append(1.0)
+
+    indices = torch.tensor([rows, cols], dtype=torch.long)
+    values = torch.tensor(vals, dtype=torch.float32)
+
+    A_sparse = torch.sparse_coo_tensor(
+        indices,
+        values,
+        size=(num_items, num_items),
+        device=device,
+    ).coalesce() # 같은 (i, j) 여러번 등장 -> 모두 카운팅 
+
+    return A_sparse # src i, tgt j 가 같이 구매된 횟수 
+
+def normalize_bipartite_sparse(
+    A_sparse,
+    eps=1e-8,
+):
+    # degree
+    d1 = torch.sparse.sum(A_sparse, dim=1).to_dense() # src i 들의 디그리 
+    d2 = torch.sparse.sum(A_sparse, dim=0).to_dense() # tgt j 들의 디그리 
+
+    mask_src = d1 > 0 # 디그리 0 인 아이템 제거 
+    mask_tgt = d2 > 0
+
+    src_idx = mask_src.nonzero(as_tuple=True)[0]
+    tgt_idx = mask_tgt.nonzero(as_tuple=True)[0]
+
+    # submatrix 추출 - 디그리 0인 행/열 제거 
+    A_sub = A_sparse.index_select(0, src_idx)
+    A_sub = A_sub.index_select(1, tgt_idx)
+    A_sub = A_sub.coalesce()
+
+    d1_sub = d1[src_idx]
+    d2_sub = d2[tgt_idx]
+
+    D1_inv_sqrt = torch.pow(d1_sub + eps, -0.5) # 정규화 계수 (D^{-1/2})
+    D2_inv_sqrt = torch.pow(d2_sub + eps, -0.5)
+
+    # index-wise scaling
+    row, col = A_sub.indices()
+    val = A_sub.values()
+
+    val = D1_inv_sqrt[row] * val * D2_inv_sqrt[col]
+
+    A_norm = torch.sparse_coo_tensor(
+        A_sub.indices(),
+        val,
+        size=A_sub.size(),
+        device=A_sparse.device,
+    ).coalesce() # 정규화된 sparse 행렬 
+
+    return A_norm, D1_inv_sqrt, D2_inv_sqrt, mask_src, mask_tgt
+
+def compute_cross_domain_item_z_lowrank(
+    A_norm,
+    D1_inv_sqrt,
+    D2_inv_sqrt,
+    z_dim,
+    oversample=5,
+):
+    q = min(z_dim + 1 + oversample, min(A_norm.shape) - 1) # singular space를 근사 
+
+    # randomized low-rank SVD (상위 q 차원만)
+    U, S, V = torch.svd_lowrank(A_norm, q=q, niter=2)
+
+    # 첫 singular vector 제거
+    U_z = U[:, 1:z_dim+1]
+    V_z = V[:, 1:z_dim+1]
+
+    Z_src = D1_inv_sqrt[:, None] * U_z
+    Z_tgt = D2_inv_sqrt[:, None] * V_z
+
+    return Z_src, Z_tgt
+
+def restore_full_z(
+    Z_src_sub,
+    Z_tgt_sub,
+    mask_src,
+    mask_tgt,
+    num_items,
+    z_dim,
+    device="cpu",
+):
+    Z_src = torch.zeros((num_items, z_dim), device=device)
+    Z_tgt = torch.zeros((num_items, z_dim), device=device)
+
+    Z_src[mask_src] = Z_src_sub
+    Z_tgt[mask_tgt] = Z_tgt_sub
+
+    return Z_src, Z_tgt
+
+@torch.no_grad()
+def build_cross_domain_z_from_data(
+    data_src,
+    data_tgt,
+    num_items,
+    z_dim=6,
+    device="cpu",
+    cache_path=None,
+):
+    # 1. sparse co-occurrence
+    A_sparse = build_src_tgt_cooccurrence_sparse(
+        data_src, data_tgt, num_items, device=device
+    )
+
+    # 2. normalize + mask
+    A_norm, D1_inv_sqrt, D2_inv_sqrt, mask_src, mask_tgt = \
+        normalize_bipartite_sparse(A_sparse)
+
+    # 3. low-rank SVD
+    Z_src_sub, Z_tgt_sub = compute_cross_domain_item_z_lowrank(
+        A_norm, D1_inv_sqrt, D2_inv_sqrt, z_dim=z_dim
+    )
+
+    # 4. restore
+    Z_src, Z_tgt = restore_full_z(
+        Z_src_sub, Z_tgt_sub,
+        mask_src, mask_tgt,
+        num_items, z_dim,
+        device=device,
+    )
+
+    if cache_path is not None:
+        torch.save(
+            {
+                "Z_src": Z_src.cpu(),
+                "Z_tgt": Z_tgt.cpu(),
+            },
+            cache_path,
+        )
+
+
+    return Z_src, Z_tgt
