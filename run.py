@@ -102,6 +102,8 @@ class Run:
         }
         self.w = config["w"]
 
+        self.item_mode = config["item_mode"]
+
         self.device = "cuda" if config["use_cuda"] else "cpu"
 
         self.diff_lr = config["diff_lr"]
@@ -228,8 +230,8 @@ class Run:
         vu_adj = torch.sparse_coo_tensor(vu_indices, edge_values, size=(self.iid_all + 1, self.uid_all)).coalesce()
 
         return {
-            "uv_adj": uv_adj,
-            "vu_adj": vu_adj,
+            "uv_adj": uv_adj.to(self.device),
+            "vu_adj": vu_adj.to(self.device),
             "user_ids": torch.unique(user_ids),
             "item_ids": torch.unique(item_ids),
             "num_edges": user_ids.shape[0],
@@ -509,7 +511,7 @@ class Run:
         test_users = test_users_df[0].tolist()
 
         # item popularity on train src+tgt (normalized)
-        self.item_popularity = self.compute_item_popularity([self.src_path, self.tgt_path]).cuda()
+        # self.item_popularity = self.compute_item_popularity([self.src_path, self.tgt_path]).cuda()
 
         graph_src_train = self.build_graph_inputs(self.src_path)  # 전체 그래프 생성
         graph_tgt_train = self.build_graph_inputs(self.tgt_path, exclude_users=test_users)
@@ -574,6 +576,153 @@ class Run:
 
         return user_emb_conf, user_emb_int
 
+    @torch.no_grad()
+    def build_user_item_sequences(self, graph_data, num_users, max_len=20, pad_item_id=0,):
+        """
+        graph_data["uv_adj"]: [num_users, num_items] sparse
+        """
+        uv_adj = graph_data["uv_adj"].coalesce().to("cpu")
+        
+        # 1) user → item list
+        user_items = [[] for _ in range(num_users)]
+        row, col = uv_adj.indices()
+
+        for u, i in zip(row.tolist(), col.tolist()):
+            user_items[u].append(i) # user가 interaction한 아이템들 
+        
+        # 2) padding
+        user_items_pad = torch.full( # 최대 20개까지 기록, 20개 안되면 0으로 패딩 
+            (num_users, max_len),
+            fill_value=pad_item_id,
+            dtype=torch.long,
+        )
+        user_items_mask = torch.zeros( # padding된 아이템들 표시
+            (num_users, max_len),
+            dtype=torch.bool,
+        )
+
+        for u, items in enumerate(user_items):
+            if len(items) == 0:
+                continue
+
+            # 최근 max_len개만 사용 (or random / popularity 기준으로 바꿔도 됨)
+            items = items[-max_len:]
+            L = len(items)
+
+            user_items_pad[u, :L] = torch.tensor(items, dtype=torch.long)
+            user_items_mask[u, :L] = True
+
+        return (
+            user_items_pad.to(self.device), # interactio items 
+            user_items_mask.to(self.device), # padding 여부
+        )
+    
+    @torch.no_grad()
+    def build_user_potential_item_sequences(
+        self,
+        model, 
+        graph_data,
+        max_len=20,
+        topk_2hop_users=50,
+        pad_item_id=0,
+        device='cuda',
+        save_path=""
+    ):
+        """
+        graph_data["uv_adj"]: [num_users, num_items] sparse
+        graph_data["vu_adj"]: [num_items, num_users] sparse
+        """
+
+        uv_adj = graph_data["uv_adj"].coalesce().to(device)  # [U, I]
+        num_users, num_items = uv_adj.size()
+
+        # MF user embedding
+        user_emb = model.encode_all_users(device=device)
+        user_emb = torch.nn.functional.normalize(user_emb, dim=1)
+
+        # lookup tables (CPU is OK)
+        row_u, col_i = uv_adj.indices()
+        user_items = [[] for _ in range(num_users)]
+        item_users = [[] for _ in range(num_items)]
+
+        for u, i in zip(row_u.tolist(), col_i.tolist()):
+            user_items[u].append(i)
+            item_users[i].append(u)
+
+        # output
+        user_items_pad = torch.full(
+            (num_users, max_len),
+            pad_item_id,
+            dtype=torch.long,
+            device=device,
+        )
+        user_items_mask = torch.zeros(
+            (num_users, max_len),
+            dtype=torch.bool,
+            device=device,
+        )
+
+        # -------------------------------
+        # main loop (user-wise only)
+        # -------------------------------
+        for u in range(num_users):
+            items_u = user_items[u]
+            if not items_u:
+                continue
+
+            # 1) collect 2-hop users
+            two_hop_users = set()
+            for i in items_u:
+                for v in item_users[i]:
+                    if v != u:
+                        two_hop_users.add(v)
+
+            if not two_hop_users:
+                continue
+
+            two_hop_users = torch.tensor(list(two_hop_users), device=device)
+
+            # 2) MF similarity top-k
+            sim = torch.matmul(user_emb[u], user_emb[two_hop_users].T)
+            k = min(topk_2hop_users, sim.numel())
+            topk_idx = torch.topk(sim, k=k, largest=False).indices
+            sim_users = two_hop_users[topk_idx]
+
+            # 3) 3-hop item degree (within sim_users)
+            item_degree = {}
+            for v in sim_users.tolist():
+                for i in user_items[v]:
+                    if i in items_u:
+                        continue
+                    item_degree[i] = item_degree.get(i, 0) + 1
+
+            if not item_degree:
+                continue
+
+            # 4) rank + pad
+            ranked_items = sorted(
+                item_degree.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )[:max_len]
+
+            L = len(ranked_items)
+            user_items_pad[u, :L] = torch.tensor(
+                [i for i, _ in ranked_items],
+                device=device
+            )
+            user_items_mask[u, :L] = True
+
+        torch.save(
+            {
+                "pad": user_items_pad.cpu(),
+                "mask": user_items_mask.cpu(),
+            },
+            save_path
+        )
+                
+        return user_items_pad, user_items_mask
+    
     def get_model(self):
         if self.base_model == "MF":
             model = MFBasedModel(self.uid_all, self.iid_all, self.emb_dim, self.meta_dim)
@@ -956,6 +1105,19 @@ class Run:
         model.graph_tgt = graph_train.get("tgt")
         model.shared_graph = graph_train.get("shared")
 
+        diff_model.user_src_items_pad, diff_model.user_src_items_mask = self.build_user_item_sequences(graph_data=src_graph, num_users=self.uid_all,)
+        diff_model.user_tgt_items_pad, diff_model.user_tgt_items_mask = self.build_user_item_sequences(graph_data=tgt_graph, num_users=self.uid_all,)
+        
+        # path = "ready/_" + str(int(self.ratio[0] * 10)) + "_" + str(int(self.ratio[1] * 10)) + "/tgt_" + self.tgt + "_src_" + self.src
+        # if os.path.exists(path):
+        #     cache = torch.load(path, map_location="cpu")
+        #     diff_model.potential_items_pad = cache["pad"].to(self.device)
+        #     diff_model.potential_items_mask = cache["mask"].to(self.device)
+        #     print("[Cache hit] Loaded potential items")
+        # else:
+            # diff_model.potential_items_pad, diff_model.potential_items_mask \
+                # = self.build_user_potential_item_sequences(model, graph_data=shared_graph, max_len=20, topk_2hop_users=50, pad_item_id=0, device='cuda', save_path=path)
+
         for i in range(self.epoch):
 
             # diff_model.smooth_user_emb_src = smooth_user_emb_src
@@ -1084,6 +1246,7 @@ class Run:
                 parallel=self.parallel_setting,
                 rqvae=self.rqvae_setting,
                 w=self.w,
+                item_mode=self.item_mode,
             )
             diff_model = diff_model.cuda() if self.use_cuda else diff_model
 

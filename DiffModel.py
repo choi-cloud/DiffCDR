@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import math
 
 from dpm_solver_pytorch import model_wrapper, model_wrapper_hierarchical_cond, NoiseScheduleVP, DPM_Solver
-from utils import AttentionLayer, SimilarityProjector
+from utils import AttentionLayer, SimilarityProjector, ItemZAttentionPooling
 
 from rqvae import ResidualQuantizer
 
@@ -64,6 +64,7 @@ class DiffParallel(nn.Module):
         parallel=None,
         rqvae=None,
         w=0.0,
+        item_mode="cross"
     ):
         super(DiffParallel, self).__init__()
 
@@ -144,9 +145,15 @@ class DiffParallel(nn.Module):
         self.linear_m = nn.Linear(input_dim, input_dim, False)
         self.linear_g = nn.Linear(input_dim, input_dim, False)
 
+        self.linear_cond_m = nn.Linear(input_dim, input_dim, False)
+        self.linear_cond_g = nn.Linear(input_dim, input_dim, False)
+
         self.ln_iid = nn.LayerNorm(input_dim)
         self.ln_m = nn.LayerNorm(input_dim)
         self.ln_g = nn.LayerNorm(input_dim)
+
+        self.ln_cond_m = nn.LayerNorm(input_dim)
+        self.ln_cond_g = nn.LayerNorm(input_dim)
 
         if self.parallel["set_aggr"] in ["attn", "item_attn"]:
             self.attn_layer = AttentionLayer(in_dim=input_dim * 2, out_dim=input_dim)
@@ -165,6 +172,9 @@ class DiffParallel(nn.Module):
         self.item_style_scale = nn.Parameter(torch.tensor(0.1))
 
         self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
+
+        self.item_attn = ItemZAttentionPooling(in_dim=input_dim, out_dim=input_dim)
+        self.mode = item_mode
 
     def forward(self, x, t, cond_emb, cond_mask, diff_id):
 
@@ -185,6 +195,32 @@ class DiffParallel(nn.Module):
 
     def get_al_emb(self, emb):
         return self.al_linear(emb)
+
+
+    def pool_user_z_attention_batch(
+        self,
+        pos_items,        # (B, L)
+        pos_mask,         # (B, L)
+        user_query_emb,   # (B, D)
+        item_emb_all, 
+    ):
+
+        # 1. gather item embeddings
+        item_z = item_emb_all[pos_items]   # (B, L, D)
+        item_z = self.ln_iid(item_z)
+
+        # 2. prepare query
+        user_q = user_query_emb.unsqueeze(1)  # (B, 1, D)
+
+        # 3. batch cross-attention
+        user_cond = self.item_attn(
+            x=item_z,
+            query=user_q,
+            mask=pos_mask,
+            mode=self.mode
+        )  # (B, D)
+
+        return user_cond
 
 
 def q_x_fn(model, x_0, t, device):  # forward
@@ -240,6 +276,7 @@ def diffusion_loss_fn_parallel(
         output2 = model(x_g, t.squeeze(-1), cond_emb2, cond_mask2, diff_id=1)  # x_t, c2 -> noise
 
         return F.mse_loss(x_0_m, output1) + F.mse_loss(x_0_g, output2)  # 예측 노이즈와 실제 노이즈 비교 L1 loss
+        # return F.smooth_l1_loss(x_0_m, output1) + F.smooth_l1_loss(x_0_g, output2)
 
     elif is_task:  # task loss ALM 수행
 
@@ -297,6 +334,7 @@ def diffusion_loss_fn_parallel(
         if model.parallel["set_loss"] == 0:
             # ! mf 임베딩과 유사해지도록 통일
             # return F.smooth_l1_loss(x_0_m, final_output) + model.task_lambda * task_loss
+            # return F.smooth_l1_loss(x_0_m, final_output_m) + F.smooth_l1_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
             return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
         elif model.parallel["set_loss"] == 1:
             return F.mse_loss(x_0_g, final_output) + model.task_lambda * task_loss

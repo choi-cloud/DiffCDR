@@ -123,6 +123,9 @@ class MFBasedModel(torch.nn.Module):
         self.src_model = GetEmbedding(uid_all, iid_all, emb_dim)
         self.tgt_model = GetEmbedding(uid_all, iid_all, emb_dim)
 
+        self.num_embeddings = uid_all
+        self.num_embeddings_i = iid_all
+
         self.meta_net = MetaNet(emb_dim, meta_dim_0)
         self.mapping = torch.nn.Linear(emb_dim, emb_dim, False)
 
@@ -131,9 +134,11 @@ class MFBasedModel(torch.nn.Module):
         self.rq_aggr = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
 
         self.graph_emb_cache = {} # 🔥 Cache for graph embeddings
+        self.graph_emb_cache_item = {}
 
     def clear_graph_cache(self):
         self.graph_emb_cache = {}
+        self.graph_emb_cache_item = {}
 
     @torch.no_grad()
     def build_user_prototype_cache(
@@ -205,6 +210,27 @@ class MFBasedModel(torch.nn.Module):
         bottom = self.user_proto_cache["bottom"][uid]
         return top, bottom
 
+    def encode_all_users(self, use_target=False, device='cuda'):
+        all_uid = torch.arange(self.num_embeddings, device=device)
+        if use_target: # tgt
+            user_feat = self.tgt_model.uid_embedding(all_uid.unsqueeze(1))       # (U, 1, D)
+            user_feat = user_feat.squeeze(1)   
+        else: 
+            user_feat = self.src_model.uid_embedding(all_uid.unsqueeze(1))       # (U, 1, D)
+            user_feat = user_feat.squeeze(1)   
+        return user_feat   
+    
+    def encode_all_item(self, use_target=False, device='cuda'):
+        all_iid = torch.arange(self.num_embeddings_i + 1, device=device)
+        if use_target: # tgt
+            user_feat = self.tgt_model.iid_embedding(all_iid.unsqueeze(1))       # (U, 1, D)
+            user_feat = user_feat.squeeze(1)   
+        else: 
+            user_feat = self.src_model.iid_embedding(all_iid.unsqueeze(1))       # (U, 1, D)
+            user_feat = user_feat.squeeze(1)   
+        return user_feat   
+    
+    # @torch.no_grad()
     def compute_user_graph_embeddings(self, graph_data, use_target=False, device='cuda'):
         if graph_data is None:
             return None, None
@@ -216,12 +242,11 @@ class MFBasedModel(torch.nn.Module):
 
         # 단순 2홉 aggr
         # simple 2-hop aggregation (user -> items -> users) excluding 1-hop self contribution
-        uv_adj = graph_data["uv_adj"].to(device)
-        vu_adj = graph_data["vu_adj"].to(device)
-        if use_target:
-            user_feat = self.tgt_model.uid_embedding.weight#.detach().to(self.device)
-        else:
-            user_feat = self.src_model.uid_embedding.weight#.detach().to(self.device)
+        uv_adj = graph_data["uv_adj"]#.to(device)
+        vu_adj = graph_data["vu_adj"]#.to(device)
+
+        user_feat = self.encode_all_users(use_target=use_target, device=device)
+   
         # with torch.no_grad():
         # 1-hop: items aggregate from users
         item_msg = torch.sparse.mm(vu_adj, user_feat)  # [num_items, d]
@@ -252,8 +277,75 @@ class MFBasedModel(torch.nn.Module):
         self.graph_emb_cache[cache_key] = user_emb.detach()
 
         return user_emb
+    
+    # @torch.no_grad()
+    def compute_item_graph_embeddings(self, graph_data, use_target=False, device='cuda'):
+        if graph_data is None:
+            return None
 
-    def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False, item_cond=False, style_src=None):
+        # # Check cache first
+        cache_key = "item_tgt" if use_target else "item_src"
+        if cache_key in self.graph_emb_cache:
+            return self.graph_emb_cache[cache_key]
+
+        uv_adj = graph_data["uv_adj"]#.to(device)  # (U, I)
+        vu_adj = graph_data["vu_adj"]#.to(device)  # (I, U)
+
+        # --------------------------------------------------
+        # base item embedding (forward 통과)
+        # --------------------------------------------------
+        item_feat = self.encode_all_item(use_target=use_target, device=device)  # (I, D)
+
+        # --------------------------------------------------
+        # 1-hop: users aggregate from items
+        # item -> user
+        # --------------------------------------------------
+        user_msg = torch.sparse.mm(uv_adj, item_feat)  # (U, D)
+
+        # --------------------------------------------------
+        # 2-hop: items aggregate from users
+        # user -> item
+        # --------------------------------------------------
+        item_2hop = torch.sparse.mm(vu_adj, user_msg)  # (I, D)
+
+        # --------------------------------------------------
+        # remove self contribution (item -> user -> item)
+        # --------------------------------------------------
+        item_deg = torch.sparse.sum(vu_adj, dim=1).to_dense().unsqueeze(1)  # (I, 1)
+        item_2hop = item_2hop - item_deg * item_feat
+
+        # --------------------------------------------------
+        # count real 2-hop neighbors
+        # item -> user -> other_items
+        # --------------------------------------------------
+        user_deg = torch.sparse.sum(uv_adj, dim=1).to_dense()          # (U,)
+        user_other = torch.relu(user_deg - 1)                          # (U,)
+        two_hop_counts = torch.sparse.mm(vu_adj, user_other[:, None])  # (I, 1)
+
+        # --------------------------------------------------
+        # normalization
+        # --------------------------------------------------
+        norm = torch.where(
+            two_hop_counts == 0,
+            torch.ones_like(two_hop_counts),
+            two_hop_counts
+        )
+
+        item_emb = item_2hop / norm
+
+        # --------------------------------------------------
+        # fallback: no 2-hop neighbors
+        # --------------------------------------------------
+        zero_mask = two_hop_counts.squeeze(1) == 0
+        item_emb[zero_mask] = item_feat[zero_mask]
+
+        # cache (detach to avoid graph explosion)
+        self.graph_emb_cache_item[cache_key] = item_emb.detach()
+
+        return item_emb
+
+
+    def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False, item_cond=0, style_src=None):
         if stage == "train_src":
             emb = self.src_model.forward(x)
             x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
@@ -365,10 +457,36 @@ class MFBasedModel(torch.nn.Module):
             # src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
             src_uid_emb2 = self.compute_user_graph_embeddings(self.graph_src, use_target=False, device=device)[tgt_uid]
             
-            if item_cond == True:
-                top_proto, bottom_proto = self.get_top_bottom_item_prototypes(tgt_uid)
-                cond_emb1 = top_proto
-                cond_emb2 = bottom_proto
+            if item_cond > 0:
+                pos_items = diff_model.user_src_items_pad[tgt_uid]     # (B, L)
+                pos_mask  = diff_model.user_src_items_mask[tgt_uid]    # (B, L)
+
+                item_emb_all1 = self.encode_all_item(use_target=False)
+                # item_emb_all2 = self.compute_item_graph_embeddings(self.graph_src, use_target=False, device=device)
+                
+                if item_cond == 1: 
+                    src_uid_emb1 = diff_model.ln_cond_m(src_uid_emb1)
+                    src_uid_emb2 = diff_model.ln_cond_g(src_uid_emb2)
+                elif item_cond == 2:
+                    src_uid_emb1 = diff_model.ln_cond_m(diff_model.linear_cond_m(src_uid_emb1))
+                    src_uid_emb2 = diff_model.ln_cond_g(diff_model.linear_cond_g(src_uid_emb2))
+
+                user_z_src1 = diff_model.pool_user_z_attention_batch(
+                    pos_items=pos_items,
+                    pos_mask=pos_mask,
+                    user_query_emb = src_uid_emb1,
+                    item_emb_all=item_emb_all1
+                )
+
+                user_z_src2 = diff_model.pool_user_z_attention_batch(
+                    pos_items=pos_items,
+                    pos_mask=pos_mask,
+                    user_query_emb = src_uid_emb2,
+                    item_emb_all=item_emb_all1
+                )
+
+                cond_emb1 = user_z_src1
+                cond_emb2 = user_z_src2
 
             else:
                 cond_emb1 = src_uid_emb1
@@ -386,8 +504,8 @@ class MFBasedModel(torch.nn.Module):
                 tgt_emb1,
                 tgt_emb2,
                 # ! diff_loss 계산 시에는 양자화하지 않은 기존 소스 임베딩을 컨디션으로 이용
-                src_uid_emb1,
-                src_uid_emb2,
+                cond_emb1,
+                cond_emb2,
                 iid_emb,
                 y_input,
                 device,
@@ -411,10 +529,37 @@ class MFBasedModel(torch.nn.Module):
             # src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
             src_uid_emb2 = self.compute_user_graph_embeddings(self.graph_src, use_target=False)[tgt_uid]
 
-            if item_cond == True:
-                top_proto, bottom_proto = self.get_top_bottom_item_prototypes(tgt_uid)
-                cond_emb1 = top_proto
-                cond_emb2 = bottom_proto
+            if item_cond > 0:
+                pos_items = diff_model.user_src_items_pad[tgt_uid]     # (B, L)
+                pos_mask  = diff_model.user_src_items_mask[tgt_uid]    # (B, L)
+
+                item_emb_all1 = self.encode_all_item(use_target=False)
+                # item_emb_all2 = self.compute_item_graph_embeddings(self.graph_src, use_target=False, device=device)
+                
+                if item_cond == 1: 
+                    src_uid_emb1 = diff_model.ln_cond_m(src_uid_emb1)
+                    src_uid_emb2 = diff_model.ln_cond_g(src_uid_emb2)
+                elif item_cond == 2:
+                    src_uid_emb1 = diff_model.ln_cond_m(diff_model.linear_cond_m(src_uid_emb1))
+                    src_uid_emb2 = diff_model.ln_cond_g(diff_model.linear_cond_g(src_uid_emb2))
+
+                user_z_src1 = diff_model.pool_user_z_attention_batch(
+                    pos_items=pos_items,
+                    pos_mask=pos_mask,
+                    user_query_emb = src_uid_emb1,
+                    item_emb_all=item_emb_all1
+                )
+
+                user_z_src2 = diff_model.pool_user_z_attention_batch(
+                    pos_items=pos_items,
+                    pos_mask=pos_mask,
+                    user_query_emb = src_uid_emb2,
+                    item_emb_all=item_emb_all1
+                )
+
+
+                cond_emb1 = user_z_src1
+                cond_emb2 = user_z_src2
             else:
                 cond_emb1 = src_uid_emb1
                 cond_emb2 = src_uid_emb2

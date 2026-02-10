@@ -114,3 +114,75 @@ class SimilarityProjector(nn.Module):
         sim = F.cosine_similarity(iid_emb, trans_emb_m, dim=1, eps=1e-8).unsqueeze(1)
         # (B, 10)
         return self.proj(sim)
+
+class ItemZAttentionPooling(nn.Module):
+    def __init__(self, in_dim, out_dim):
+        super().__init__()
+        self.q = nn.Linear(in_dim, in_dim, bias=False)
+        self.k = nn.Linear(in_dim, in_dim, bias=False)
+        self.v = nn.Linear(in_dim, out_dim, bias=False)
+        self.scale = in_dim ** -0.5
+
+    def forward(self, x, query=None, mask=None, mode="cross"):
+        """
+        x     : (B, L, D)   item embeddings
+        query : (B, 1, D)   user embedding (cross)
+        mask  : (B, L) bool
+        mode  : ["cross", "self"]
+        """
+
+        # --------------------------------------------------
+        # self-attention (items -> items), user는 [CLS] 처럼 
+        # --------------------------------------------------
+        if mode == "self": 
+            # 1) concat [USER | ITEMS]
+            tokens = torch.cat([query, x], dim=1)      # (B, 1+L, D)
+
+            # 2) build mask: user token is always valid
+            if mask is not None:
+                user_mask = torch.ones(
+                    mask.size(0), 1,
+                    device=mask.device,
+                    dtype=mask.dtype
+                )
+                attn_mask = torch.cat([user_mask, mask], dim=1)  # (B, 1+L)
+            else:
+                attn_mask = None
+
+            Q = self.q(tokens)
+            K = self.k(tokens)
+            V = self.v(tokens)
+
+            score = torch.matmul(Q, K.transpose(-2, -1)) * self.scale  # (B, T, T)
+
+            if attn_mask is not None:
+                score = score.masked_fill(
+                    ~attn_mask[:, None, :],
+                    -1e9
+                )
+
+            attn = F.softmax(score, dim=-1)
+            out = torch.matmul(attn, V)  # (B, 1+L, D)
+
+            # 3) return USER token only
+            return out[:, 0]             # (B, D)
+
+        # --------------------------------------------------
+        # cross-attention (user -> items) (item 끼리는 안 봄)
+        # --------------------------------------------------
+        elif mode == "cross":
+            assert query is not None, "query required for cross-attention"
+
+            Q = self.q(query)                # (B, 1, D)
+            K = self.k(x)                    # (B, L, D)
+            V = self.v(x)                    # (B, L, D)
+
+            score = torch.matmul(Q, K.transpose(-2, -1)) * self.scale  # (B, 1, L)
+
+            if mask is not None:
+                score = score.masked_fill(~mask.unsqueeze(1), -1e9)
+
+            attn = F.softmax(score, dim=-1)
+            out = torch.matmul(attn, V)      # (B, 1, D)
+
+            return out.squeeze(1)            # (B, D)

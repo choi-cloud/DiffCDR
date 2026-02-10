@@ -43,9 +43,10 @@ def prepare_1():
     parser.add_argument("--alpha_rq", type=float, default=1e-2, help="RQVAE loss 가중치")
 
     # item cond
-    parser.add_argument("--item_cond", type=bool, default=False, help="아이템 조건 사용 여부")
+    parser.add_argument("--item_cond", type=int, default=0, help="아이템 조건 사용 여부")
     parser.add_argument("--w", type=float, default=0.0, help="Diffusion inference - uncond 가중치 w")
     parser.add_argument("--emb_dim", type=int, default=10, help="MF emb dim")
+    parser.add_argument("--item_mode", type=str, default="cross", help="item attention mode")
 
     args = parser.parse_args()
 
@@ -76,6 +77,7 @@ def prepare_2(args, config_path):
         config["alpha_rq"] = args.alpha_rq
         config["w"] = args.w
         config["emb_dim"] = args.emb_dim
+        config["item_mode"] = args.item_mode
 
     return config
 
@@ -129,6 +131,7 @@ if __name__ == "__main__":
     write(f"✅ Ratio {args.ratio}")
     write(f"✅ Model {args.exp_part}")
     write(f"✅ Item  {args.item_cond}")
+    write(f"item_mode:{args.item_mode}")
 
     if args.exp_part == "diff_parallel":
         set_init = ["MF로 초기화", "Aggr로 초기화"]
