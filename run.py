@@ -600,8 +600,11 @@ class Run:
             optimizer_la = torch.optim.Adam(params=la_model.parameters(), lr=self.la_lr, weight_decay=self.wd)
             return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_la, optimizer_map
 
-        elif diff_model is not None:
-            # optimizer_diff = torch.optim.Adam(params=diff_model.parameters(), lr=self.diff_lr)
+        elif diff_model is not None and isinstance(diff_model, Diff.DiffCDR):
+            optimizer_diff = torch.optim.Adam(params=diff_model.parameters(), lr=self.diff_lr)
+            return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_diff, optimizer_map
+
+        elif diff_model is not None and isinstance(diff_model, Diff.DiffParallel):
             optimizer_diff = torch.optim.Adam(
                 params = list(model.parameters()) + list(diff_model.parameters()),
                 lr = self.diff_lr
