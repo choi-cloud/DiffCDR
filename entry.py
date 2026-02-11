@@ -35,7 +35,13 @@ def prepare_1():
     parser.add_argument("--set_loss", type=int, default=0, help="loss 계산, 0: MF, 1: aggr, 2: avg, 3: 따로따로")
     parser.add_argument("--set_init", type=int, default=1, help="디퓨전2의 초기 x_T 설정, 0: MF, 1: aggr")
     parser.add_argument("--set_proj", type=int, default=1, help="diff 결과 proj 위치 - 0: 따로, 1: aggr 이후 같이")
-    parser.add_argument("--set_aggr", type=str, default="item_cls", help="두 디퓨전 모델 아웃풋 aggregation 방법, [attn, item_attn, item_cls]")
+    parser.add_argument("--set_aggr", type=str, default="none", help="두 디퓨전 모델 아웃풋 aggregation 방법, [attn, item_attn, item_cls]")
+
+    # CDR setting 
+    parser.add_argument("--set_diff", type=str, default="noise", help="diffusion model의 prediction 대상 [noise, user_emb]")
+    parser.add_argument("--set_time", type=str, default="origin", help="diffusion model의 time encoding 방법 [origin, sin]")
+    parser.add_argument("--set_layer", type=str, default="origin", help="diffusion model layer 구조 [origin, one]")
+    parser.add_argument("--set_train", type=str, default="frozen", help="pretrain MF emb 계속 학습 여부 [frozen, train]")
 
     # RQVAE(code_dim=input_dim, num_levels=4, codebook_size=256)
     parser.add_argument("--codebook_num", type=int, default=4, help="RQVAE 코드북 개수(level)")
@@ -47,6 +53,7 @@ def prepare_1():
     parser.add_argument("--w", type=float, default=0.0, help="Diffusion inference - uncond 가중치 w")
     parser.add_argument("--emb_dim", type=int, default=10, help="MF emb dim")
 
+    parser.add_argument("--diff_task_lambda", type=float, default=0.1, help="task loss 가중치")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -76,6 +83,11 @@ def prepare_2(args, config_path):
         config["alpha_rq"] = args.alpha_rq
         config["w"] = args.w
         config["emb_dim"] = args.emb_dim
+        config["set_diff"] = args.set_diff
+        config["set_time"] = args.set_time
+        config["set_layer"] = args.set_layer
+        config["set_train"] = args.set_train
+        config["diff_task_lambda"] = args.diff_task_lambda
 
     return config
 
@@ -143,6 +155,11 @@ if __name__ == "__main__":
 
     write(f"emb dim: {args.emb_dim}")
     write(f"w = {args.w}")
+
+    write(f"🍎 Aggrgation   : {args.set_aggr}")
+    write(f"🍎 Diffusion    : {args.set_diff} 예측")
+    write(f"🍎 Time encoding: {args.set_time}")
+    write(f"🍎 Layer        : {args.set_layer}")
 
     if not args.process_data_mid and not args.process_data_ready:
         Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth")

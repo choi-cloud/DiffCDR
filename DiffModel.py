@@ -37,7 +37,7 @@ def get_timestep_embedding(timesteps, embedding_dim: int):
 
 
 class DiffCDR(nn.Module):
-    def __init__(self,num_steps=200, diff_dim=32,input_dim =32,c_scale=0.1,diff_sample_steps=30,diff_task_lambda=0.1,diff_mask_rate=0.1 ):
+    def __init__(self,num_steps=200, diff_dim=32,input_dim =32,c_scale=0.1,diff_sample_steps=30,diff_task_lambda=0.1,diff_mask_rate=0.1, parallel=None, w=0):
         super(DiffCDR,self).__init__()
 
         #-------------------------------------------
@@ -64,20 +64,6 @@ class DiffCDR(nn.Module):
         self.c_scale = c_scale
         self.mask_rate = diff_mask_rate
         #-----------------------------------------------
-        
-        self.linears = nn.ModuleList(
-            [
-                nn.Linear(input_dim,diff_dim),    
-                nn.Linear(diff_dim,diff_dim) ,     
-                nn.Linear(diff_dim,input_dim),  
-            ]
-        )
-        
-        self.step_emb_linear = nn.ModuleList(
-            [   
-                nn.Linear(diff_dim,input_dim),
-            ]
-        )
 
         self.cond_emb_linear = nn.ModuleList(
             [   
@@ -87,41 +73,143 @@ class DiffCDR(nn.Module):
 
         self.num_layers = 1
 
-        self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
-
-        self.linear_m = nn.Linear(input_dim, input_dim, False)
-        self.ln_iid = nn.LayerNorm(input_dim)
-        self.ln_m   = nn.LayerNorm(input_dim)
-
-        self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
-        self.style_ln = nn.LayerNorm(input_dim)
-        self.style_scale = nn.Parameter(torch.tensor(0.1))
-
-        self.item_style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
-        self.item_style_ln = nn.LayerNorm(input_dim)
-        self.item_style_scale = nn.Parameter(torch.tensor(0.1))
-        
-        self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
-
         #linear for alm 
         self.al_linear = nn.Linear(input_dim,input_dim,False)
+        
+        # TEST 
+        # Parallel setting
+        self.parallel = parallel
+        
+        if self.parallel["set_diff"] == "user_emb": 
+            self.w = w
+
+        if self.parallel["set_layer"] == "origin": 
+            self.linears = nn.ModuleList(
+                [
+                    nn.Linear(input_dim,diff_dim),    
+                    nn.Linear(diff_dim,diff_dim) ,     
+                    nn.Linear(diff_dim,input_dim),  
+                ]
+            )
+
+        elif self.parallel["set_layer"] == "one":
+            self.linears = nn.ModuleList(
+                [
+                    nn.Linear(input_dim * 3, input_dim), 
+                ]
+            )
+
+        if self.parallel["set_time"] == "origin": 
+            self.step_emb_linear = nn.ModuleList(
+                [   
+                    nn.Linear(diff_dim,input_dim),
+                ]
+            )
+            
+        elif self.parallel["set_time"] == "sin": 
+            self.step_mlp = nn.Sequential(
+                SinusoidalPositionEmbeddings(self.input_dim),
+                nn.Linear(self.input_dim, self.input_dim * 2),
+                nn.GELU(),
+                nn.Linear(self.input_dim * 2, self.input_dim),
+            )
+
+        if self.parallel["set_aggr"] == 'item_q': 
+            self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
+
+            self.linear_m = nn.Linear(input_dim, input_dim, False)
+            self.ln_iid = nn.LayerNorm(input_dim)
+            self.ln_m   = nn.LayerNorm(input_dim)
+
+        elif self.parallel["set_aggr"] == "domain_attn": 
+            self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
+
+            self.linear_m = nn.Linear(input_dim, input_dim, False)
+            self.ln_iid = nn.LayerNorm(input_dim)
+            self.ln_m   = nn.LayerNorm(input_dim)
+
+            self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
+
+        elif self.parallel["set_aggr"] == "domain_bias": 
+            self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
+        
+        elif self.parallel["set_aggr"] == "user_bias":  
+            self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
+
+            self.linear_m = nn.Linear(input_dim, input_dim, False)
+            self.ln_iid = nn.LayerNorm(input_dim)
+            self.ln_m   = nn.LayerNorm(input_dim)
+
+            self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.style_ln = nn.LayerNorm(input_dim)
+            self.style_scale = nn.Parameter(torch.tensor(0.1))
+
+        elif self.parallel["set_aggr"] == "item_bias":  
+            self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
+
+            self.linear_m = nn.Linear(input_dim, input_dim, False)
+            self.ln_iid = nn.LayerNorm(input_dim)
+            self.ln_m   = nn.LayerNorm(input_dim)
+
+            self.item_style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.item_style_ln = nn.LayerNorm(input_dim)
+            self.item_style_scale = nn.Parameter(torch.tensor(0.1))
+
+        elif self.parallel["set_aggr"] == "ui_bias":  
+            self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
+
+            self.linear_m = nn.Linear(input_dim, input_dim, False)
+            self.ln_iid = nn.LayerNorm(input_dim)
+            self.ln_m   = nn.LayerNorm(input_dim)
+
+            self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.style_ln = nn.LayerNorm(input_dim)
+            self.style_scale = nn.Parameter(torch.tensor(0.1))
+
+            self.item_style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.item_style_ln = nn.LayerNorm(input_dim)
+            self.item_style_scale = nn.Parameter(torch.tensor(0.1))
+
+        elif self.parallel["set_aggr"] == "all": 
+            self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
+
+            self.linear_m = nn.Linear(input_dim, input_dim, False)
+            self.ln_iid = nn.LayerNorm(input_dim)
+            self.ln_m   = nn.LayerNorm(input_dim)
+
+            self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.style_ln = nn.LayerNorm(input_dim)
+            self.style_scale = nn.Parameter(torch.tensor(0.1))
+
+            self.item_style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.item_style_ln = nn.LayerNorm(input_dim)
+            self.item_style_scale = nn.Parameter(torch.tensor(0.1))
+            
+            self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
+
 
     def forward(self, x,t, cond_emb,cond_mask ):
-
+        
         for idx in range( self.num_layers ):
-        
-            t_embedding = get_timestep_embedding( t , self.diff_dim)
-            t_embedding = self.step_emb_linear[idx](t_embedding)
-        
-            cond_embedding = self.cond_emb_linear[idx](cond_emb)
-        
-            t_c_emb = t_embedding + cond_embedding * cond_mask.unsqueeze(-1)
-            x = x + t_c_emb
-            #x= torch.cat([t_embedding,cond_embedding * cond_mask.unsqueeze(-1),x],axis=1)
+            if self.parallel["set_time"] == "origin":
+                t_embedding = get_timestep_embedding( t , self.diff_dim)
+                t_embedding = self.step_emb_linear[idx](t_embedding)
+            elif self.parallel["set_time"] == "sin": 
+                t_embedding = self.step_mlp(t)
 
-            x = self.linears[0](x) 
-            x = self.linears[1](x) 
-            x = self.linears[2](x) 
+            cond_embedding = self.cond_emb_linear[idx](cond_emb)
+
+            if self.parallel["set_layer"] == "origin": 
+                t_c_emb = t_embedding + cond_embedding * cond_mask.unsqueeze(-1)
+                x = x + t_c_emb
+
+                x = self.linears[0](x) 
+                x = self.linears[1](x) 
+                x = self.linears[2](x) 
+
+            elif self.parallel["set_layer"] == "one": 
+                x = torch.cat([t_embedding, cond_embedding * cond_mask.unsqueeze(-1), x], axis=1)  # * cond_mask.unsqueeze(-1)
+                x = self.linears[0](x) 
 
         return x
         
@@ -318,37 +406,133 @@ def diffusion_loss_fn(model,x_0,cond_emb, iid_emb,y_input,
         #pred noise
         output = model(x, t.squeeze(-1),cond_emb,cond_mask )
 
-        return F.smooth_l1_loss(e, output)
-
+        if model.parallel["set_diff"] == 'noise': 
+            return F.smooth_l1_loss(e, output)
+        elif model.parallel["set_diff"] == "user_emb":
+            return F.smooth_l1_loss(x_0, output)
+    
     elif is_task:
         final_output, iid_emb=p_sample_loop(model,cond_emb,iid_emb,device)
+        
+        if model.parallel["set_aggr"] == "item_q": 
+            iid_emb = model.ln_iid(iid_emb)
+            final_output_m = model.ln_m(model.linear_m(final_output))
 
-        iid_emb = model.ln_iid(iid_emb)
-        final_output_m = model.ln_m(model.linear_m(final_output))
+            tokens = torch.stack([iid_emb, final_output_m], dim=1)
+            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            final_output = out[:, 0, :]  # (B, D)
 
-        uid = uid.long()  # (B,)
+            y_pred = torch.sum(final_output * iid_emb, dim=1) 
+        
+        elif model.parallel["set_aggr"] == "domain_attn": 
+            iid_emb = model.ln_iid(iid_emb)
+            final_output_m = model.ln_m(model.linear_m(final_output))
 
-        style_src = style_src.to(final_output_m.device)
-        style_u = style_src[uid]  # (B, F)
-        style_tok = model.style_encoder(style_u)  # (B, D)
-        style_tok = model.style_ln(style_tok)  # (B, D)
-        style_tok_u = model.style_scale * style_tok  # (B, D)
+            tokens = torch.stack([iid_emb, final_output_m], dim=1)
+            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            final_output = out[:, 0, :]  # (B, D)
 
-        style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
-        style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
-        item_style_tok = model.item_style_encoder(style_i)  # (B, D)
-        item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
-        item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
+            y_pred = torch.sum(final_output * iid_emb, dim=1) 
 
-        tokens = torch.stack([iid_emb, final_output_m,  style_tok_u, item_style_tok], dim=1)
-        out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
-        final_output = out[:, 0, :]  # (B, D)
+            # domain bias 
+            mu_t = model.tgt_global_bias
+            y_pred = y_pred + mu_t
 
-        y_pred = torch.sum(final_output * iid_emb, dim=1) 
+        elif model.parallel["set_aggr"] == "domain_bias": 
+            y_pred = torch.sum(final_output * iid_emb, dim=1) 
 
-        # domain bias 
-        mu_t = model.tgt_global_bias
-        y_pred = y_pred + mu_t
+            # domain bias 
+            mu_t = model.tgt_global_bias
+            y_pred = y_pred + mu_t
+
+        elif model.parallel["set_aggr"] == "user_bias": 
+            iid_emb = model.ln_iid(iid_emb)
+            final_output_m = model.ln_m(model.linear_m(final_output))
+
+            uid = uid.long()  # (B,)
+
+            style_src = style_src.to(final_output_m.device)
+            style_u = style_src[uid]  # (B, F)
+            style_tok = model.style_encoder(style_u)  # (B, D)
+            style_tok = model.style_ln(style_tok)  # (B, D)
+            style_tok_u = model.style_scale * style_tok  # (B, D)
+
+            tokens = torch.stack([iid_emb, final_output_m,  style_tok_u], dim=1)
+            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            final_output = out[:, 0, :]  # (B, D)
+
+            y_pred = torch.sum(final_output * iid_emb, dim=1) 
+
+        elif model.parallel["set_aggr"] == "item_bias": 
+            iid_emb = model.ln_iid(iid_emb)
+            final_output_m = model.ln_m(model.linear_m(final_output))
+
+            style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+            style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
+            item_style_tok = model.item_style_encoder(style_i)  # (B, D)
+            item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
+            item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
+
+            tokens = torch.stack([iid_emb, final_output_m,  item_style_tok], dim=1)
+            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            final_output = out[:, 0, :]  # (B, D)
+
+            y_pred = torch.sum(final_output * iid_emb, dim=1) 
+
+        elif model.parallel["set_aggr"] == "ui_bias": 
+            iid_emb = model.ln_iid(iid_emb)
+            final_output_m = model.ln_m(model.linear_m(final_output))
+
+            uid = uid.long()  # (B,)
+
+            style_src = style_src.to(final_output_m.device)
+            style_u = style_src[uid]  # (B, F)
+            style_tok = model.style_encoder(style_u)  # (B, D)
+            style_tok = model.style_ln(style_tok)  # (B, D)
+            style_tok_u = model.style_scale * style_tok  # (B, D)
+
+            style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+            style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
+            item_style_tok = model.item_style_encoder(style_i)  # (B, D)
+            item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
+            item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
+
+            tokens = torch.stack([iid_emb, final_output_m,  style_tok_u, item_style_tok], dim=1)
+            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            final_output = out[:, 0, :]  # (B, D)
+
+            y_pred = torch.sum(final_output * iid_emb, dim=1) 
+
+        elif model.parallel["set_aggr"] == "all": 
+            iid_emb = model.ln_iid(iid_emb)
+            final_output_m = model.ln_m(model.linear_m(final_output))
+
+            uid = uid.long()  # (B,)
+
+            style_src = style_src.to(final_output_m.device)
+            style_u = style_src[uid]  # (B, F)
+            style_tok = model.style_encoder(style_u)  # (B, D)
+            style_tok = model.style_ln(style_tok)  # (B, D)
+            style_tok_u = model.style_scale * style_tok  # (B, D)
+
+            style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+            style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
+            item_style_tok = model.item_style_encoder(style_i)  # (B, D)
+            item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
+            item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
+
+            tokens = torch.stack([iid_emb, final_output_m,  style_tok_u, item_style_tok], dim=1)
+            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            final_output = out[:, 0, :]  # (B, D)
+
+            y_pred = torch.sum(final_output * iid_emb, dim=1) 
+
+            # domain bias 
+            mu_t = model.tgt_global_bias
+            y_pred = y_pred + mu_t
+
+        elif model.parallel["set_aggr"] == "none":
+            y_pred = torch.sum( final_output * iid_emb , dim=1)
         
         #MSE
         task_loss =   (y_pred - y_input.squeeze().float()).square().mean()
@@ -508,11 +692,9 @@ def _get_ddpm_sampler(model, device):
             return model_mean + torch.sqrt(var) * noise
 
         @torch.no_grad()
-        def sample(self, model_forward, model_forward_uncon, h, x_t):
+        def sample(self, model_forward, model_forward_uncon, h, x_t, step_indices):
             x = x_t
             T = self.betas.shape[0]
-
-            step_indices = torch.linspace(T - 1, 0, h.shape[0], device=self.device).long()
 
             for i, n in enumerate(step_indices):
                 t = torch.full((x.shape[0],), n, device=self.device, dtype=torch.long)
@@ -609,6 +791,30 @@ def p_sample(model,cond_emb,x,iid_emb,device):
     return model.get_al_emb(sample).to(device),iid_emb
 
 
+def p_sample_user_emb(model, cond_emb, x, iid_emb, device):
+    B = x.shape[0]
+    
+    
+    cond_mask = torch.ones(B, device=device)
+    uncond_mask = torch.zeros(B, device=device)
+    uncond = torch.zeros_like(cond_emb)
+
+    sampler = _get_ddpm_sampler(model, device)
+    total_T = model.num_steps
+    sample_steps = model.sample_steps  # = 30
+    
+    step_indices = torch.linspace(total_T - 1, 0, sample_steps, device=device).long()  # (S,)
+
+    x0 = sampler.sample(
+        model_forward=lambda x_, h_, t_: model.forward(x_, t_, h_, cond_mask), 
+        model_forward_uncon=lambda x_, t_: model.forward(x_, t_, uncond, uncond_mask),
+        h=cond_emb,  # (S,B,D) or (B,D)
+        x_t=x,
+        step_indices=step_indices
+    )
+
+    return model.get_al_emb(x0).to(device), iid_emb
+
 def p_sample_loop(model,cond_emb,iid_input,device): 
     #source emb input 
     cur_x = cond_emb
@@ -616,6 +822,10 @@ def p_sample_loop(model,cond_emb,iid_input,device):
     #cur_x = torch.normal(0,1,size = cond_emb.size() ,device=device)
 
     #reversing
-    cur_x,iid_emb_out = p_sample(model,cond_emb,cur_x,iid_input,device)
+    if model.parallel["set_diff"] == "noise": 
+        cur_x,iid_emb_out = p_sample(model,cond_emb,cur_x,iid_input,device)
+    elif model.parallel["set_diff"] == "user_emb": 
+        cur_x,iid_emb_out = p_sample(model,cond_emb,cur_x,iid_input,device)
+        # cur_x,iid_emb_out = p_sample_user_emb(model=model, cond_emb=cond_emb, x=cur_x, iid_emb=iid_input, device=device)
 
     return cur_x ,iid_emb_out

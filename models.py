@@ -27,26 +27,10 @@ class uidEmbedding(torch.nn.Module):
     def __init__(self, uid_all, emb_dim):
         super().__init__()
         self.uid_embedding = torch.nn.Embedding(uid_all, emb_dim)
-        self.linear_1 = torch.nn.Linear(emb_dim, emb_dim)
-        self.linear_2 = torch.nn.Linear(emb_dim, emb_dim)
-        self.linear_3 = torch.nn.Linear(emb_dim, emb_dim)
-        
-        # ! Identity Init 처음에 MF 임베딩을 사용하기 위함.
-        torch.nn.init.eye_(self.linear_1.weight)
-        torch.nn.init.zeros_(self.linear_1.bias)
-        torch.nn.init.eye_(self.linear_2.weight)
-        torch.nn.init.zeros_(self.linear_2.bias)
-        torch.nn.init.eye_(self.linear_3.weight)
-        torch.nn.init.zeros_(self.linear_3.bias)
 
     def forward(self, x):
         uid_emb = self.uid_embedding(x)
-        uid_emb = self.linear_1(uid_emb)
-        uid_emb = F.relu(uid_emb)
-        uid_emb = self.linear_2(uid_emb)
-        uid_emb = F.relu(uid_emb)
-        uid_emb = self.linear_3(uid_emb)
-        return F.relu(uid_emb)
+        return uid_emb
 
     @property
     def weight(self):
@@ -57,26 +41,10 @@ class iidEmbedding(torch.nn.Module):
     def __init__(self, iid_all, emb_dim):
         super().__init__() 
         self.iid_embedding = torch.nn.Embedding(iid_all + 1, emb_dim)  
-        self.linear_1 = torch.nn.Linear(emb_dim, emb_dim)
-        self.linear_2 = torch.nn.Linear(emb_dim, emb_dim)
-        self.linear_3 = torch.nn.Linear(emb_dim, emb_dim)
-        
-        # ! Identity Init 처음에 MF 임베딩을 사용하기 위함.
-        torch.nn.init.eye_(self.linear_1.weight)
-        torch.nn.init.zeros_(self.linear_1.bias)
-        torch.nn.init.eye_(self.linear_2.weight)
-        torch.nn.init.zeros_(self.linear_2.bias)
-        torch.nn.init.eye_(self.linear_3.weight)
-        torch.nn.init.zeros_(self.linear_3.bias)
 
     def forward(self, x):
         iid_emb = self.iid_embedding(x)
-        iid_emb = self.linear_1(iid_emb)
-        iid_emb = F.relu(iid_emb)
-        iid_emb = self.linear_2(iid_emb)
-        iid_emb = F.relu(iid_emb)
-        iid_emb = self.linear_3(iid_emb)
-        return F.relu(iid_emb)
+        return iid_emb
         
     @property
     def weight(self):
@@ -126,9 +94,9 @@ class MFBasedModel(torch.nn.Module):
         self.meta_net = MetaNet(emb_dim, meta_dim_0)
         self.mapping = torch.nn.Linear(emb_dim, emb_dim, False)
 
-        # ! mf 소스 임베딩과 aggr 소스 임베딩 각각을 양자화하기 위한 모듈
-        self.rq_mf = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
-        self.rq_aggr = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
+        # # ! mf 소스 임베딩과 aggr 소스 임베딩 각각을 양자화하기 위한 모듈
+        # self.rq_mf = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
+        # self.rq_aggr = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
 
         self.graph_emb_cache = {} # 🔥 Cache for graph embeddings
 
@@ -334,10 +302,12 @@ class MFBasedModel(torch.nn.Module):
 
             tgt_emb = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
             cond_emb = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
+            # cond_emb = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
 
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
 
-            loss = Diff.diffusion_loss_fn(diff_model, tgt_emb, cond_emb, iid_emb, y_input, device, is_task)
+            loss = Diff.diffusion_loss_fn(diff_model, tgt_emb, cond_emb, iid_emb, y_input, device, is_task,
+                                                          style_src=style_src,uid=tgt_uid, iid=iid_input,)
             return loss  # is_task=False: 노이즈 예측 , is_task=True: ALS, pred 로스
 
         elif stage == "test_diff":  # DiffCDR - test
@@ -345,12 +315,136 @@ class MFBasedModel(torch.nn.Module):
             tgt_uid, iid_input, _ = x
 
             cond_emb = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
+            # cond_emb = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
 
-            trans_emb, iid_emb_out = Diff.p_sample_loop(diff_model, cond_emb, iid_emb, device)
+            final_output, iid_emb = Diff.p_sample_loop(diff_model, cond_emb, iid_emb, device)
 
-            x = torch.sum(trans_emb * iid_emb_out, dim=1)
-            return x
+            if diff_model.parallel["set_aggr"] == "item_q": 
+                iid_emb = diff_model.ln_iid(iid_emb)
+                final_output_m = diff_model.ln_m(diff_model.linear_m(final_output))
+
+                tokens = torch.stack([iid_emb, final_output_m], dim=1)
+                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+                final_output = out[:, 0, :]  # (B, D)
+
+                y_pred = torch.sum(final_output * iid_emb, dim=1) 
+
+            elif diff_model.parallel["set_aggr"] == "domain_attn": 
+                iid_emb = diff_model.ln_iid(iid_emb)
+                final_output_m = diff_model.ln_m(diff_model.linear_m(final_output))
+
+                tokens = torch.stack([iid_emb, final_output_m], dim=1)
+                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+                final_output = out[:, 0, :]  # (B, D)
+
+                y_pred = torch.sum(final_output * iid_emb, dim=1) 
+
+                # domain bias 
+                mu_t = diff_model.tgt_global_bias
+                y_pred = y_pred + mu_t
+
+            elif diff_model.parallel["set_aggr"] == "domain_bias": 
+                y_pred = torch.sum(final_output * iid_emb, dim=1) 
+
+                # domain bias 
+                mu_t = diff_model.tgt_global_bias
+                y_pred = y_pred + mu_t
+
+            elif diff_model.parallel["set_aggr"] == "user_bias": 
+                iid_emb = diff_model.ln_iid(iid_emb)
+                final_output_m = diff_model.ln_m(diff_model.linear_m(final_output))
+
+                uid = tgt_uid.long()  # (B,)
+
+                style_src = style_src.to(final_output_m.device)
+                style_u = style_src[uid]  # (B, F)
+                style_tok = diff_model.style_encoder(style_u)  # (B, D)
+                style_tok = diff_model.style_ln(style_tok)  # (B, D)
+                style_tok_u = diff_model.style_scale * style_tok  # (B, D)
+
+                tokens = torch.stack([iid_emb, final_output_m,  style_tok_u], dim=1)
+                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+                final_output = out[:, 0, :]  # (B, D)
+
+                y_pred = torch.sum(final_output * iid_emb, dim=1) 
+
+            elif diff_model.parallel["set_aggr"] == "item_bias": 
+                iid_emb = diff_model.ln_iid(iid_emb)
+                final_output_m = diff_model.ln_m(diff_model.linear_m(final_output))
+
+                style_tgt_item = diff_model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+                style_i = style_tgt_item[iid_input.squeeze(1)]  # (B, F_item)
+                item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
+                item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
+                item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
+
+                tokens = torch.stack([iid_emb, final_output_m,  item_style_tok], dim=1)
+                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+                final_output = out[:, 0, :]  # (B, D)
+
+                y_pred = torch.sum(final_output * iid_emb, dim=1) 
+
+            elif diff_model.parallel["set_aggr"] == "ui_bias": 
+                iid_emb = diff_model.ln_iid(iid_emb)
+                final_output_m = diff_model.ln_m(diff_model.linear_m(final_output))
+
+                uid = tgt_uid.long()  # (B,)
+
+                style_src = style_src.to(final_output_m.device)
+                style_u = style_src[uid]  # (B, F)
+                style_tok = diff_model.style_encoder(style_u)  # (B, D)
+                style_tok = diff_model.style_ln(style_tok)  # (B, D)
+                style_tok_u = diff_model.style_scale * style_tok  # (B, D)
+
+                style_tgt_item = diff_model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+                style_i = style_tgt_item[iid_input.squeeze(1)]  # (B, F_item)
+                item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
+                item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
+                item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
+
+                tokens = torch.stack([iid_emb, final_output_m,  style_tok_u, item_style_tok], dim=1)
+                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+                final_output = out[:, 0, :]  # (B, D)
+
+                y_pred = torch.sum(final_output * iid_emb, dim=1) 
+
+            elif diff_model.parallel["set_aggr"] == "all": 
+                iid_emb = diff_model.ln_iid(iid_emb)
+                final_output_m = diff_model.ln_m(diff_model.linear_m(final_output))
+
+                uid = tgt_uid.long()  # (B,)
+
+                style_src = style_src.to(final_output_m.device)
+                style_u = style_src[uid]  # (B, F)
+                style_tok = diff_model.style_encoder(style_u)  # (B, D)
+                style_tok = diff_model.style_ln(style_tok)  # (B, D)
+                style_tok_u = diff_model.style_scale * style_tok  # (B, D)
+
+                style_tgt_item = diff_model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+                style_i = style_tgt_item[iid_input.squeeze(1)]  # (B, F_item)
+                item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
+                item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
+                item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
+
+                tokens = torch.stack([iid_emb, final_output_m,  style_tok_u, item_style_tok], dim=1)
+                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+                final_output = out[:, 0, :]  # (B, D)
+
+                y_pred = torch.sum(final_output * iid_emb, dim=1) 
+
+                # domain bias 
+                mu_t = diff_model.tgt_global_bias
+                y_pred = y_pred + mu_t
+
+            elif diff_model.parallel["set_aggr"] == "none":
+                y_pred = torch.sum( final_output * iid_emb , dim=1)
+            
+            #MSE
+            # task_loss =   (y_pred - y_input.squeeze().float()).square().mean()
+            
+            # x = torch.sum(trans_emb * iid_emb_out, dim=1)
+            return y_pred
 
         elif stage == "train_diff_parallel":  # DiffParallel - train
 

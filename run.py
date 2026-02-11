@@ -95,6 +95,15 @@ class Run:
             "set_proj": config["set_proj"],
             "set_aggr": config["set_aggr"],
         }
+
+        self.diffCDR_setting = { # DiffCDR ablatiion 용 
+            "set_aggr": config["set_aggr"],
+            "set_diff": config["set_diff"],
+            "set_time": config["set_time"],
+            "set_layer": config["set_layer"],
+            "set_train": config["set_train"],
+        }
+
         self.rqvae_setting = {
             "codebook_num": config["codebook_num"],
             "codebook_size": config["codebook_size"],
@@ -574,6 +583,47 @@ class Run:
 
         return user_emb_conf, user_emb_int
 
+    def compute_user_graph_embeddings(self, base_model, diff_model, graph_data, use_target=False):
+        if graph_data is None:
+            return None, None
+
+        # 단순 2홉 aggr
+        # simple 2-hop aggregation (user -> items -> users) excluding 1-hop self contribution
+        uv_adj = graph_data["uv_adj"].to(self.device)
+        vu_adj = graph_data["vu_adj"].to(self.device)
+        if use_target:
+            user_feat = base_model.tgt_model.uid_embedding.weight.detach().to(self.device)
+        else:
+            user_feat = base_model.src_model.uid_embedding.weight.detach().to(self.device)
+        with torch.no_grad():
+            # 1-hop: items aggregate from users
+            item_msg = torch.sparse.mm(vu_adj, user_feat)  # [num_items, d]
+
+            # 2-hop: users aggregate from items
+            user_2hop = torch.sparse.mm(uv_adj, item_msg)  # [num_users, d]
+
+            # remove self 1-hop contribution (user -> item -> user)
+            user_deg = torch.sparse.sum(uv_adj, dim=1).to_dense().unsqueeze(1)
+            user_2hop = user_2hop - user_deg * user_feat  # self-removal
+
+            # count real 2-hop neighbors: user -> item -> other_users
+            item_deg = torch.sparse.sum(vu_adj, dim=1).to_dense()
+            item_other = torch.relu(item_deg - 1)  # max(deg-1, 0)
+            two_hop_counts = torch.sparse.mm(uv_adj, item_other[:, None]).to_dense()
+
+            # normalization (avoid division by zero)
+            norm = torch.where(two_hop_counts == 0, torch.ones_like(two_hop_counts), two_hop_counts)
+
+            # final 2-hop embedding
+            user_emb = user_2hop / norm
+
+            # fallback: if no 2-hop neighbors, keep original embedding
+            zero_mask = two_hop_counts.squeeze(1) == 0
+            user_emb[zero_mask] = user_feat[zero_mask]
+
+        return user_emb, None
+
+
     def get_model(self):
         if self.base_model == "MF":
             model = MFBasedModel(self.uid_all, self.iid_all, self.emb_dim, self.meta_dim)
@@ -601,7 +651,13 @@ class Run:
             return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_la, optimizer_map
 
         elif diff_model is not None and isinstance(diff_model, Diff.DiffCDR):
-            optimizer_diff = torch.optim.Adam(params=diff_model.parameters(), lr=self.diff_lr)
+            if self.diffCDR_setting["set_train"] =='train':
+                optimizer_diff = torch.optim.Adam(
+                    params = list(model.parameters()) + list(diff_model.parameters()),
+                    lr = self.diff_lr
+                )
+            else: 
+                optimizer_diff = torch.optim.Adam(params=diff_model.parameters(), lr=self.diff_lr)
             return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_diff, optimizer_map
 
         elif diff_model is not None and isinstance(diff_model, Diff.DiffParallel):
@@ -1087,7 +1143,8 @@ class Run:
         # exp_part 에 따라 모델, 옵티마이져 초기화하고 학습.
         if exp_part == "diff_CDR":
             diff_model = Diff.DiffCDR(
-                self.diff_steps, self.diff_dim, self.emb_dim, self.diff_scale, self.diff_sample_steps, self.diff_task_lambda, self.diff_mask_rate
+                self.diff_steps, self.diff_dim, self.emb_dim, self.diff_scale, self.diff_sample_steps, self.diff_task_lambda, self.diff_mask_rate, \
+                    parallel=self.diffCDR_setting, w=self.w
             )
             diff_model = diff_model.cuda() if self.use_cuda else diff_model
 
@@ -1231,6 +1288,7 @@ class Run:
             self.result_print(["lacdr"])
 
         elif exp_part == "diff_CDR":
+            self.graph_train = graph_data["train"]
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
             self.Diff_CDR(model, diff_model, data_diff, data_diff_test, optimizer_diff, style_src, style_tgt_item)
