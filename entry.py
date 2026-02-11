@@ -129,7 +129,6 @@ if __name__ == "__main__":
     write(f"✅ Task  {args.task}")
     write(f"✅ Ratio {args.ratio}")
     write(f"✅ Model {args.exp_part}")
-    write(f"✅ Item  {args.item_cond}")
 
     if args.exp_part == "diff_parallel":
         set_init = ["MF로 초기화", "Aggr로 초기화"]
@@ -141,9 +140,8 @@ if __name__ == "__main__":
         write(f"⭐ Project 위치  : ({args.set_proj}) {set_proj[args.set_proj]}")
         write(f"⭐ Aggrgation   : {args.set_aggr}")
 
-    write(f"emb dim: {args.emb_dim}")
-    write(f"w = {args.w}")
-
+    write(f"🍎 emb dim      : {args.emb_dim}")
+    
     if not args.process_data_mid and not args.process_data_ready:
         Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth")
         write(f"{'':=^{30}}")
