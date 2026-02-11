@@ -65,6 +65,19 @@ class DiffCDR(nn.Module):
         self.mask_rate = diff_mask_rate
         #-----------------------------------------------
         
+        self.linears = nn.ModuleList(
+            [
+                nn.Linear(input_dim,diff_dim),    
+                nn.Linear(diff_dim,diff_dim) ,     
+                nn.Linear(diff_dim,input_dim),  
+            ]
+        )
+        
+        self.step_emb_linear = nn.ModuleList(
+            [   
+                nn.Linear(diff_dim,input_dim),
+            ]
+        )
 
         self.cond_emb_linear = nn.ModuleList(
             [   
