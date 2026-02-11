@@ -27,7 +27,7 @@ def prepare_1():
 
     parser.add_argument("--root", default="./")
     parser.add_argument("--exp_part", default="None_CDR")
-    parser.add_argument("--save_path", default="/home/shared/cjp/model_save_default_6/model")
+    parser.add_argument("--save_path", default="/home/shared/cjp/model_save_default_8/model")
     parser.add_argument("--use_cuda", default=1)
     parser.add_argument("--experiment", default="DiffCDR")
 
@@ -116,7 +116,8 @@ if __name__ == "__main__":
 
     logfile = utils.make_dir(f"{args.experiment}")
     logging.basicConfig(
-        format="%(asctime)s - %(filename)s[line:%(lineno)d] - %(levelname)s: %(message)s",
+        # format="%(asctime)s : %(message)s",
+        format="%(message)s",
         level=logging.INFO,
         filename=logfile,
         filemode="a",
@@ -124,7 +125,7 @@ if __name__ == "__main__":
     )
 
     utils.log_args_table(args, max_per_line=5, col_width=30)
-    write(f"======= {args.experiment} ======")
+    write(f"{' '+args.experiment+' ':=^{30}}")
     write(f"✅ Task  {args.task}")
     write(f"✅ Ratio {args.ratio}")
     write(f"✅ Model {args.exp_part}")
@@ -145,4 +146,4 @@ if __name__ == "__main__":
 
     if not args.process_data_mid and not args.process_data_ready:
         Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth")
-        write(f"==============================")
+        write(f"{'':=^{30}}")

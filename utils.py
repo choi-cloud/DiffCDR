@@ -6,7 +6,8 @@ import csv
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 def get_parent_curr_dir():
     current_file_path = os.path.abspath(__file__)
@@ -60,12 +61,25 @@ def log_args_table(args, max_per_line: int = 5, col_width: int = 30):
     col_width: 각 열의 고정 폭
     """
     args_dict = vars(args)
-    arg_items = [f"{k} = {v}" for k, v in sorted(args_dict.items())]
+
+    save_path_item = None
+    items = []
+    for k, v in args_dict.items(): # save_path 분리
+        if k == "save_path":
+            save_path_item = f"{k} = {v}"
+        else:
+            items.append(f"{k} = {v}")
+
+    items = sorted(items) # 나머지는 정렬
+    if save_path_item is not None: # save_path는 맨 마지막
+        items.append(save_path_item)
 
     # 패딩을 넣어 고정 길이 문자열로 변환
-    padded_items = [item.ljust(col_width) for item in arg_items]
+    padded_items = [item.ljust(col_width) for item in items]
 
     logging.info("=" * (col_width * max_per_line + (max_per_line - 1)))
+    now_kst = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d %H:%M:%S KST")# 현재 한국 시각
+    logging.info(f"Run Time (KST): {now_kst}")
     logging.info("Arguments:")
 
     for i in range(0, len(padded_items), max_per_line):

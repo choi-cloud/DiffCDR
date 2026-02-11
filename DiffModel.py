@@ -65,19 +65,6 @@ class DiffCDR(nn.Module):
         self.mask_rate = diff_mask_rate
         #-----------------------------------------------
         
-        self.linears = nn.ModuleList(
-            [
-                nn.Linear(input_dim,diff_dim),    
-                nn.Linear(diff_dim,diff_dim) ,     
-                nn.Linear(diff_dim,input_dim),  
-            ]
-        )
-        
-        self.step_emb_linear = nn.ModuleList(
-            [   
-                nn.Linear(diff_dim,input_dim),
-            ]
-        )
 
         self.cond_emb_linear = nn.ModuleList(
             [   
@@ -86,6 +73,22 @@ class DiffCDR(nn.Module):
         ) 
 
         self.num_layers = 1
+
+        self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
+
+        self.linear_m = nn.Linear(input_dim, input_dim, False)
+        self.ln_iid = nn.LayerNorm(input_dim)
+        self.ln_m   = nn.LayerNorm(input_dim)
+
+        self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+        self.style_ln = nn.LayerNorm(input_dim)
+        self.style_scale = nn.Parameter(torch.tensor(0.1))
+
+        self.item_style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+        self.item_style_ln = nn.LayerNorm(input_dim)
+        self.item_style_scale = nn.Parameter(torch.tensor(0.1))
+        
+        self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
 
         #linear for alm 
         self.al_linear = nn.Linear(input_dim,input_dim,False)
@@ -273,7 +276,7 @@ def q_x_fn(model, x_0, t, device):  # forward
     return (alphas_t * x_0 + alphas_1_m_t * noise), noise  # x0에 노이즈를 더함.
 
 def diffusion_loss_fn(model,x_0,cond_emb, iid_emb,y_input,
-                        device,is_task):
+                        device,is_task,style_src=None, uid=None, iid=None):
 
     num_steps = model.num_steps
     mask_rate = model.mask_rate
@@ -305,8 +308,34 @@ def diffusion_loss_fn(model,x_0,cond_emb, iid_emb,y_input,
         return F.smooth_l1_loss(e, output)
 
     elif is_task:
-        final_output,iid_emb=p_sample_loop(model,cond_emb,iid_emb,device)
-        y_pred = torch.sum( final_output * iid_emb , dim=1)
+        final_output, iid_emb=p_sample_loop(model,cond_emb,iid_emb,device)
+
+        iid_emb = model.ln_iid(iid_emb)
+        final_output_m = model.ln_m(model.linear_m(final_output))
+
+        uid = uid.long()  # (B,)
+
+        style_src = style_src.to(final_output_m.device)
+        style_u = style_src[uid]  # (B, F)
+        style_tok = model.style_encoder(style_u)  # (B, D)
+        style_tok = model.style_ln(style_tok)  # (B, D)
+        style_tok_u = model.style_scale * style_tok  # (B, D)
+
+        style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+        style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
+        item_style_tok = model.item_style_encoder(style_i)  # (B, D)
+        item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
+        item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
+
+        tokens = torch.stack([iid_emb, final_output_m,  style_tok_u, item_style_tok], dim=1)
+        out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+        final_output = out[:, 0, :]  # (B, D)
+
+        y_pred = torch.sum(final_output * iid_emb, dim=1) 
+
+        # domain bias 
+        mu_t = model.tgt_global_bias
+        y_pred = y_pred + mu_t
         
         #MSE
         task_loss =   (y_pred - y_input.squeeze().float()).square().mean()

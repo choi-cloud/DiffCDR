@@ -623,7 +623,7 @@ class Run:
                 for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                     model[0].eval()
                     model[1].eval()
-                    pred = model[0](X, stage, self.device, diff_model=model[1])
+                    pred = model[0](X, stage, self.device, diff_model=model[1], style_src=style_src)
 
                     y_input = X[-1]
                     targets.extend(y_input.squeeze(1).tolist())
@@ -668,16 +668,29 @@ class Run:
                     predicts.extend(pred.tolist())
 
             else:
+                y_all = []
+                mae_all = []
+
                 for X, y in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                     model.eval()
                     pred = model(X, stage, self.device)
                     targets.extend(y.squeeze(1).tolist())
                     predicts.extend(pred.tolist())
 
+                    mae = (pred.view(-1) - y.squeeze(1)).abs()
+                    y_all.append(y.squeeze(1).cpu())
+                    mae_all.append(mae.cpu())
+
+                y_all = torch.cat(y_all).numpy()
+                mae_all = torch.cat(mae_all).numpy()
+
+                df_score_summary = mae_summary_by_score(y_all, mae_all)
+                print(df_score_summary)
+
         targets = torch.tensor(targets).float()
         predicts = torch.tensor(predicts)
-        print(f"Target mean: {targets.mean().item()} +- {targets.std().item()}")
-        print(f"Predic mean: {predicts.mean().item()} +- {predicts.std().item()}")
+        print(f"Target mean: {targets.mean().item():>10.6f} ± {targets.std().item():<10.6f}")
+        print(f"Predic mean: {predicts.mean().item():>10.6f} ± {predicts.std().item():<10.6f}")
 
         return loss(targets, predicts).item(), torch.sqrt(mse_loss(targets, predicts)).item()
 
@@ -737,14 +750,15 @@ class Run:
             return torch.tensor(loss_ls).mean()
 
         elif diff == True:
+            diff_loss = []
             task_loss_ls = []
 
             # Clear cache at start of epoch (Lazy Update)
-            model[0].clear_graph_cache()
+            # model[0].clear_graph_cache()
 
             for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                 # 1️⃣ train mode
-                model[0].train()   # MF + user_embedding + item_embedding
+                # model[0].train()  # MF + user_embedding + item_embedding
                 model[1].train()   # diff_model
                 # 2️⃣ optimizer 기준으로 grad 초기화
 
@@ -759,8 +773,9 @@ class Run:
                     style_src=style_src,
                 )
                 optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(list(model[0].parameters()) + list(model[1].parameters()), 1.0)
+                loss.backward() 
+                # torch.nn.utils.clip_grad_norm_(list(model[0].parameters()) + list(model[1].parameters()), 1.0)
+                torch.nn.utils.clip_grad_norm_(list(model[1].parameters()), 1.0)
                 optimizer.step()
 
                 task_loss = model[0](
@@ -774,14 +789,15 @@ class Run:
                 )
                 optimizer.zero_grad(set_to_none=True)
                 task_loss.backward()
-                torch.nn.utils.clip_grad_norm_(list(model[0].parameters()) + list(model[1].parameters()), 1.0)
+                # torch.nn.utils.clip_grad_norm_(list(model[0].parameters()) + list(model[1].parameters()), 1.0)
+                torch.nn.utils.clip_grad_norm_(list(model[1].parameters()), 1.0)
                 optimizer.step()
 
-
+                diff_loss.append(loss.item())
                 task_loss_ls.append(task_loss.item())
 
-            dummy_loss = torch.zeros(1, device=self.device)
-            return dummy_loss.mean(), torch.tensor(task_loss_ls).mean()
+            # dummy_loss = torch.zeros(1, device=self.device)
+            return torch.tensor(diff_loss).mean(), torch.tensor(task_loss_ls).mean()
 
     def update_results(self, mae, rmse, phase):
 
@@ -932,18 +948,20 @@ class Run:
             self.update_results(mae, rmse, "aug")
             write("MAE: {} RMSE: {} ".format(mae, rmse))
 
-    def Diff_CDR(self, model, diff_model, data_diff, data_test, optimizer):
-        write("=========Diff_CDR========")
+    def Diff_CDR(self, model, diff_model, data_diff, data_test, optimizer, style_src, style_tgt_item):
+        write(f"{' Diff_CDR ':=^{30}}")
+
+        diff_model.style_tgt_item = style_tgt_item
+
         for i in range(self.epoch):
-            loss, task_loss = self.train(data_diff, [model, diff_model], None, optimizer, i, stage="train_diff", mapping=False, diff=True)
+            loss, task_loss = self.train(data_diff, [model, diff_model], None, optimizer, i, stage="train_diff", mapping=False, diff=True,style_src=style_src)
 
-            mae, rmse = self.eval_mae([model, diff_model], data_test, stage="test_diff")
+            mae, rmse = self.eval_mae([model, diff_model], data_test, stage="test_diff",style_src=style_src)
             self.update_results(mae, rmse, "diff")
-            write(f"DIFF LOSS {loss.item()}, TASK LOSS {task_loss.item()}, MAE: {mae} RMSE: {rmse}")
-
+            write(f"DIFF LOSS {loss.item():>10.6f} |  TASK LOSS {task_loss.item():>10.6f} | MAE: {mae:>10.6f} | RMSE: {rmse:>10.6f}")
+            
     def Diff_Parallel(self, model, diff_model, data_diff, data_test, optimizer, graph_train, graph_test, style_src, style_tgt_item):
-        write("=========Diff_Parallel========")
-
+        write(f"{' Diff_Parallel ':=^{30}}")
         diff_model.style_tgt_item = style_tgt_item
 
         
@@ -978,7 +996,7 @@ class Run:
 
             mae, rmse = self.eval_mae([model, diff_model], data_test, stage="test_diff_parallel", style_src=style_src)
             self.update_results(mae, rmse, "diff_parallel")
-            write(f"DIFF LOSS {loss.item()}, TASK LOSS {task_loss.item()}, MAE: {mae} RMSE: {rmse}")
+            write(f"Epoch {i:<2} :: DIFF LOSS {loss.item():>10.6f} |  TASK LOSS {task_loss.item():>10.6f} | MAE: {mae:>10.6f} | RMSE: {rmse:>10.6f}")
 
     def SS_CDR(self, model, ss_model, data_ss, data_test, optimizer_ss):
         write("==========SS_CDR==========")
@@ -1058,10 +1076,12 @@ class Run:
     def result_print(self, phase):
         print_str = ""
         for p in phase:
+            write(f'⬇️ Eval {p}: MAE & RMSE ')
             for m in ["_mae", "_rmse"]:
                 metric_name = p + m
                 print_str += metric_name + ": {:.6f} ".format(self.results[metric_name])
-        write(print_str)
+                write(f"{self.results[metric_name]:.6f}")
+        # write(print_str)
 
     def main(self, exp_part="None_CDR", save_path=None):
         # exp_part 에 따라 모델, 옵티마이져 초기화하고 학습.
@@ -1213,7 +1233,7 @@ class Run:
         elif exp_part == "diff_CDR":
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
-            self.Diff_CDR(model, diff_model, data_diff, data_diff_test, optimizer_diff)
+            self.Diff_CDR(model, diff_model, data_diff, data_diff_test, optimizer_diff, style_src, style_tgt_item)
             self.result_print(["diff"])
 
         elif exp_part == "diff_parallel":
