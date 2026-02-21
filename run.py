@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 import tqdm
 from tensorflow import keras
-from models import MFBasedModel, GMFBasedModel, DNNBasedModel
+from models import MFBasedModel, GMFBasedModel, DNNBasedModel, DiffBaseModel
 
 
 class Run:
@@ -36,6 +36,9 @@ class Run:
         self.input_root = (
             self.root + "ready/_" + str(int(self.ratio[0] * 10)) + "_" + str(int(self.ratio[1] * 10)) + "/tgt_" + self.tgt + "_src_" + self.src
         )
+
+        print(f"root: {self.input_root}")
+
         self.src_path = self.input_root + "/train_src.csv"
         self.tgt_path = self.input_root + "/train_tgt.csv"
         self.meta_path = self.input_root + "/train_meta.csv"
@@ -51,6 +54,8 @@ class Run:
             "ptupcdr_mae": 10,
             "ptupcdr_rmse": 10,
         }
+
+        self.device = "cuda"
 
     def seq_extractor(self, x):
         x = x.rstrip("]").lstrip("[").split(", ")
@@ -159,17 +164,22 @@ class Run:
             model = DNNBasedModel(self.uid_all, self.iid_all, self.num_fields, self.emb_dim, self.meta_dim)
         elif self.base_model == "GMF":
             model = GMFBasedModel(self.uid_all, self.iid_all, self.num_fields, self.emb_dim, self.meta_dim)
+        elif self.base_model == "DMCDR":
+            model = DiffBaseModel(self.uid_all, self.iid_all)
         else:
             raise ValueError("Unknown base model: " + self.base_model)
         return model.cuda() if self.use_cuda else model
 
     def get_optimizer(self, model):
-        optimizer_src = torch.optim.Adam(params=model.src_model.parameters(), lr=self.lr, weight_decay=self.wd)
-        optimizer_tgt = torch.optim.Adam(params=model.tgt_model.parameters(), lr=self.lr, weight_decay=self.wd)
-        optimizer_meta = torch.optim.Adam(params=model.meta_net.parameters(), lr=self.lr, weight_decay=self.wd)
-        optimizer_aug = torch.optim.Adam(params=model.aug_model.parameters(), lr=self.lr, weight_decay=self.wd)
-        optimizer_map = torch.optim.Adam(params=model.mapping.parameters(), lr=self.lr, weight_decay=self.wd)
-        return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_map
+        # optimizer_src = torch.optim.Adam(params=model.src_model.parameters(), lr=self.lr, weight_decay=self.wd)
+        # optimizer_tgt = torch.optim.Adam(params=model.tgt_model.parameters(), lr=self.lr, weight_decay=self.wd)
+        # optimizer_meta = torch.optim.Adam(params=model.meta_net.parameters(), lr=self.lr, weight_decay=self.wd)
+        # optimizer_aug = torch.optim.Adam(params=model.aug_model.parameters(), lr=self.lr, weight_decay=self.wd)
+        # optimizer_map = torch.optim.Adam(params=model.mapping.parameters(), lr=self.lr, weight_decay=self.wd)
+        optimizer_dmcdr = torch.optim.Adam(params=model.parameters(), lr=self.lr, weight_decay=self.wd)
+
+        # return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_map, optimizer_dmcdr
+        return optimizer_dmcdr
 
     def eval_mae(self, model, data_loader, stage):
         print("Evaluating MAE:")
@@ -179,26 +189,60 @@ class Run:
         mse_loss = torch.nn.MSELoss()
         with torch.no_grad():
             for X, y in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
+                X = X.to(self.device)
+                y = y.to(self.device)
+
                 pred = model(X, stage)
                 targets.extend(y.squeeze(1).tolist())
-                predicts.extend(pred.tolist())
+                predicts.extend(pred.squeeze(1).tolist())
+
         targets = torch.tensor(targets).float()
         predicts = torch.tensor(predicts)
         return loss(targets, predicts).item(), torch.sqrt(mse_loss(targets, predicts)).item()
 
     def train(self, data_loader, model, criterion, optimizer, epoch, stage, mapping=False):
         print("Training Epoch {}:".format(epoch + 1))
+
+        total_loss = 0.0
+        total_diff_loss = 0.0
+        total_abs_error = 0.0
+        total_sq_error = 0.0
+        total_count = 0
+
         model.train()
         for X, y in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
+            X = X.to(self.device)
+            y = y.to(self.device)
+
             if mapping:
                 src_emb, tgt_emb = model(X, stage)
                 loss = criterion(src_emb, tgt_emb)
             else:
-                pred = model(X, stage)
-                loss = criterion(pred, y.squeeze().float())
+                pred, diff_loss = model(X, stage)
+                task_loss = criterion(pred.squeeze(), y.squeeze().float())
+                loss = task_loss + 10 * diff_loss
+
+                # ---- 누적 ----
+                total_loss += task_loss.item()
+                total_diff_loss += diff_loss.item()
+
+                # ---- MAE / RMSE 계산용 누적 ----
+                abs_error = torch.abs(pred - y).sum()
+                sq_error = torch.pow(pred - y, 2).sum()
+
+                total_abs_error += abs_error.item()
+                total_sq_error += sq_error.item()
+                total_count += y.numel()
+
             model.zero_grad()
             loss.backward()
             optimizer.step()
+
+        mae = total_abs_error / total_count
+        rmse = (total_sq_error / total_count) ** 0.5
+        print(f"Train Task Loss: {total_loss / len(data_loader):.6f}")
+        print(f"Train Diff Loss: {total_diff_loss / len(data_loader):.6f}")
+        print(f"Train MAE: {mae:.6f} | RMSE: {rmse:.6f}\n")
 
     def update_results(self, mae, rmse, phase):
         if mae < self.results[phase + "_mae"]:
@@ -222,29 +266,40 @@ class Run:
             self.update_results(mae, rmse, "aug")
             print("MAE: {} RMSE: {}".format(mae, rmse))
 
-    def CDR(self, model, data_src, data_map, data_meta, data_test, criterion, optimizer_src, optimizer_map, optimizer_meta):
-        print("=====CDR Pretraining=====")
+    def CDR(self, model, data_src, data_map, data_meta, data_test, criterion, optimizer_dmcdr):
+        # print("=====CDR Pretraining=====")
+        # for i in range(self.epoch):
+        #     self.train(data_src, model, criterion, optimizer_src, i, stage="train_src")
+
+        # print("==========EMCDR==========")
+        # for i in range(self.epoch):
+        #     self.train(data_map, model, criterion, optimizer_map, i, stage="train_map", mapping=True)
+        #     mae, rmse = self.eval_mae(model, data_test, stage="test_map")
+        #     self.update_results(mae, rmse, "emcdr")
+        #     print("MAE: {} RMSE: {}".format(mae, rmse))
+
+        # print("==========PTUPCDR==========")
+        # for i in range(self.epoch):
+        #     self.train(data_meta, model, criterion, optimizer_meta, i, stage="train_meta")
+        #     mae, rmse = self.eval_mae(model, data_test, stage="test_meta")
+        #     self.update_results(mae, rmse, "ptupcdr")
+        #     print("MAE: {} RMSE: {}".format(mae, rmse))
+
+        print("==========DMCDR==========")
         for i in range(self.epoch):
-            self.train(data_src, model, criterion, optimizer_src, i, stage="train_src")
-        print("==========EMCDR==========")
-        for i in range(self.epoch):
-            self.train(data_map, model, criterion, optimizer_map, i, stage="train_map", mapping=True)
-            mae, rmse = self.eval_mae(model, data_test, stage="test_map")
-            self.update_results(mae, rmse, "emcdr")
-            print("MAE: {} RMSE: {}".format(mae, rmse))
-        print("==========PTUPCDR==========")
-        for i in range(self.epoch):
-            self.train(data_meta, model, criterion, optimizer_meta, i, stage="train_meta")
-            mae, rmse = self.eval_mae(model, data_test, stage="test_meta")
+            self.train(data_meta, model, criterion, optimizer_dmcdr, i, stage="train_dmcdr")
+            mae, rmse = self.eval_mae(model, data_test, stage="test_dmcdr")
             self.update_results(mae, rmse, "ptupcdr")
             print("MAE: {} RMSE: {}".format(mae, rmse))
 
     def main(self):
         model = self.get_model()
+        model = model.to(self.device)
         data_src, data_tgt, data_meta, data_map, data_aug, data_test = self.get_data()
-        optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_map = self.get_optimizer(model)
+        # optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_map, optimizer_dmcdr = self.get_optimizer(model)
+        optimizer_dmcdr = self.get_optimizer(model)
         criterion = torch.nn.MSELoss()
-        self.TgtOnly(model, data_tgt, data_test, criterion, optimizer_tgt)
+        # self.TgtOnly(model, data_tgt, data_test, criterion, optimizer_tgt)
         # self.DataAug(model, data_aug, data_test, criterion, optimizer_aug)
-        self.CDR(model, data_src, data_map, data_meta, data_test, criterion, optimizer_src, optimizer_map, optimizer_meta)
+        self.CDR(model, data_src, data_map, data_meta, data_test, criterion, optimizer_dmcdr)
         print(self.results)
