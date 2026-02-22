@@ -53,6 +53,8 @@ class Run:
             "emcdr_rmse": 10,
             "ptupcdr_mae": 10,
             "ptupcdr_rmse": 10,
+            "dmcdr_mae": 10,
+            "dmcdr_rmse": 10,
         }
 
         self.device = "cuda"
@@ -220,7 +222,7 @@ class Run:
             else:
                 pred, diff_loss = model(X, stage)
                 task_loss = criterion(pred.squeeze(), y.squeeze().float())
-                loss = task_loss + 10 * diff_loss
+                loss = task_loss + diff_loss
 
                 # ---- 누적 ----
                 total_loss += task_loss.item()
@@ -289,7 +291,7 @@ class Run:
         for i in range(self.epoch):
             self.train(data_meta, model, criterion, optimizer_dmcdr, i, stage="train_dmcdr")
             mae, rmse = self.eval_mae(model, data_test, stage="test_dmcdr")
-            self.update_results(mae, rmse, "ptupcdr")
+            self.update_results(mae, rmse, "dmcdr")
             print("MAE: {} RMSE: {}".format(mae, rmse))
 
     def main(self):
