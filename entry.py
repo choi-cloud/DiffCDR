@@ -38,10 +38,12 @@ def prepare_1():
     parser.add_argument("--set_aggr", type=str, default="none", help="두 디퓨전 모델 아웃풋 aggregation 방법, [attn, item_attn, item_cls]")
 
     # CDR setting 
-    parser.add_argument("--set_diff", type=str, default="noise", help="diffusion model의 prediction 대상 [noise, user_emb]")
+    parser.add_argument("--set_diff", type=str, default="noise", help="diffusion model의 prediction 대상 [noise, user_emb, bias_noise, gauss_noise]")
     parser.add_argument("--set_time", type=str, default="origin", help="diffusion model의 time encoding 방법 [origin, sin]")
     parser.add_argument("--set_layer", type=str, default="origin", help="diffusion model layer 구조 [origin, one]")
     parser.add_argument("--set_train", type=str, default="frozen", help="pretrain MF emb 계속 학습 여부 [frozen, train]")
+    parser.add_argument("--set_cond", type=str, default="origin", help="condition linear 사용 여부 [origin, none]")
+    parser.add_argument("--set_cond2", type=str, default="none", help="aggregation condtion [none, sample_aggr]")
 
     # RQVAE(code_dim=input_dim, num_levels=4, codebook_size=256)
     parser.add_argument("--codebook_num", type=int, default=4, help="RQVAE 코드북 개수(level)")
@@ -87,6 +89,8 @@ def prepare_2(args, config_path):
         config["set_time"] = args.set_time
         config["set_layer"] = args.set_layer
         config["set_train"] = args.set_train
+        config["set_cond"] = args.set_cond
+        config["set_cond2"] = args.set_cond2
         config["diff_task_lambda"] = args.diff_task_lambda
 
     return config
@@ -160,6 +164,8 @@ if __name__ == "__main__":
     write(f"🍎 Diffusion    : {args.set_diff} 예측")
     write(f"🍎 Time encoding: {args.set_time}")
     write(f"🍎 Layer        : {args.set_layer}")
+    write(f"🍎 Cond lin     : {args.set_cond}")
+    write(f"🍎 Aggr Cond    : {args.set_cond2}")
 
     if not args.process_data_mid and not args.process_data_ready:
         Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth")

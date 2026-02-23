@@ -65,12 +65,6 @@ class DiffCDR(nn.Module):
         self.mask_rate = diff_mask_rate
         #-----------------------------------------------
 
-        self.cond_emb_linear = nn.ModuleList(
-            [   
-                nn.Linear(input_dim,input_dim),
-            ]
-        ) 
-
         self.num_layers = 1
 
         #linear for alm 
@@ -82,6 +76,17 @@ class DiffCDR(nn.Module):
         
         if self.parallel["set_diff"] == "user_emb": 
             self.w = w
+        elif self.parallel["set_diff"] == "bias_noise":
+            self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.style_ln = nn.LayerNorm(input_dim)
+            self.style_scale = nn.Parameter(torch.tensor(0.1))
+            
+        if self.parallel["set_cond"] == "origin": 
+            self.cond_emb_linear = nn.ModuleList(
+                [   
+                    nn.Linear(input_dim,input_dim),
+                ]
+            ) 
 
         if self.parallel["set_layer"] == "origin": 
             self.linears = nn.ModuleList(
@@ -197,7 +202,10 @@ class DiffCDR(nn.Module):
             elif self.parallel["set_time"] == "sin": 
                 t_embedding = self.step_mlp(t)
 
-            cond_embedding = self.cond_emb_linear[idx](cond_emb)
+            if self.parallel["set_cond"] == "origin": 
+                cond_embedding = self.cond_emb_linear[idx](cond_emb)
+            else: 
+                cond_embedding = cond_emb 
 
             if self.parallel["set_layer"] == "origin": 
                 t_c_emb = t_embedding + cond_embedding * cond_mask.unsqueeze(-1)
@@ -398,7 +406,12 @@ def diffusion_loss_fn(model,x_0,cond_emb, iid_emb,y_input,
         t = t.unsqueeze(-1)
 
         x,e = q_x_fn(model,x_0,t,device)
-        
+        if model.parallel["set_diff"] == "bias_noise": 
+            gamma = 0.1
+            style_src = style_src.to(cond_emb.device)
+            style_tok = model.style_encoder(style_src[uid.long()]) 
+            x = x + gamma * style_tok
+
         #random mask
         cond_mask = 1 * (torch.rand(cond_emb.shape[0],device=device) <= mask_rate  )
         cond_mask = 1 - cond_mask.int()
@@ -406,14 +419,23 @@ def diffusion_loss_fn(model,x_0,cond_emb, iid_emb,y_input,
         #pred noise
         output = model(x, t.squeeze(-1),cond_emb,cond_mask )
 
-        if model.parallel["set_diff"] == 'noise': 
-            return F.smooth_l1_loss(e, output)
-        elif model.parallel["set_diff"] == "user_emb":
+        if model.parallel["set_diff"] == "user_emb":
             return F.smooth_l1_loss(x_0, output)
-    
+        else: 
+            return F.smooth_l1_loss(e, output)
+
     elif is_task:
-        final_output, iid_emb=p_sample_loop(model,cond_emb,iid_emb,device)
+        if model.parallel["set_diff"] == 'bias_noise': 
+            gamma = 0.1 
+            uid = uid.long()  # (B,)
+            style_src = style_src.to(cond_emb.device)
+            style_u = style_src[uid]  # (B, F)
+            style_tok = model.style_encoder(style_u) 
+            final_output, iid_emb=p_sample_loop(model,cond_emb,iid_emb,device, bias=style_tok)
         
+        else: 
+            final_output, iid_emb=p_sample_loop(model,cond_emb,iid_emb,device)
+            
         if model.parallel["set_aggr"] == "item_q": 
             iid_emb = model.ln_iid(iid_emb)
             final_output_m = model.ln_m(model.linear_m(final_output))
@@ -815,7 +837,7 @@ def p_sample_user_emb(model, cond_emb, x, iid_emb, device):
 
     return model.get_al_emb(x0).to(device), iid_emb
 
-def p_sample_loop(model,cond_emb,iid_input,device): 
+def p_sample_loop(model,cond_emb,iid_input,device, bias=None, noise=None): 
     #source emb input 
     cur_x = cond_emb
     #noise input 
@@ -827,5 +849,12 @@ def p_sample_loop(model,cond_emb,iid_input,device):
     elif model.parallel["set_diff"] == "user_emb": 
         cur_x,iid_emb_out = p_sample(model,cond_emb,cur_x,iid_input,device)
         # cur_x,iid_emb_out = p_sample_user_emb(model=model, cond_emb=cond_emb, x=cur_x, iid_emb=iid_input, device=device)
-
-    return cur_x ,iid_emb_out
+    elif model.parallel["set_diff"] == "gauss_noise": 
+        # X_T = Us가 아닌 gaussian noise 
+        noise = torch.normal(0, 1, size=cond_emb.size(), device=device)
+        cur_x = noise  
+        cur_x,iid_emb_out = p_sample(model,cond_emb,cur_x,iid_input,device)
+    else: 
+        cur_x = cur_x + bias
+        cur_x,iid_emb_out = p_sample(model,cond_emb,cur_x,iid_input,device)
+    return cur_x ,iid_emb_out 

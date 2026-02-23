@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader, TensorDataset
 import pandas as pd
 import numpy as np
 import tqdm
+import random 
 from tensorflow import keras
 from models import MFBasedModel
 import DiffModel as Diff
@@ -102,6 +103,8 @@ class Run:
             "set_time": config["set_time"],
             "set_layer": config["set_layer"],
             "set_train": config["set_train"],
+            "set_cond": config["set_cond"],
+            "set_cond2": config["set_cond2"]
         }
 
         self.rqvae_setting = {
@@ -623,6 +626,84 @@ class Run:
 
         return user_emb, None
 
+    
+    def compute_user_graph_embeddings_sampled(
+        self,
+        base_model,
+        graph_data,
+        K1=10,   # items per user
+        K2=20,   # users per item
+        use_target=False,
+    ):
+        if graph_data is None:
+            return None, None
+
+        device = self.device
+
+        uv_adj = graph_data["uv_adj"].coalesce().to(device)
+        vu_adj = graph_data["vu_adj"].coalesce().to(device)
+
+        if use_target:
+            user_feat = base_model.tgt_model.uid_embedding.weight.detach().to(device)
+        else:
+            user_feat = base_model.src_model.uid_embedding.weight.detach().to(device)
+
+        num_users = user_feat.size(0)
+
+        # COO indices
+        uv_indices = uv_adj.indices()  # [2, E]
+        vu_indices = vu_adj.indices()
+
+        # build adjacency lists (CPU for faster indexing)
+        uv_dict = [[] for _ in range(num_users)]
+        for u, i in zip(uv_indices[0].tolist(), uv_indices[1].tolist()):
+            uv_dict[u].append(i)
+
+        num_items = vu_adj.size(0)
+        vu_dict = [[] for _ in range(num_items)]
+        for i, u in zip(vu_indices[0].tolist(), vu_indices[1].tolist()):
+            vu_dict[i].append(u)
+
+        user_emb = torch.zeros_like(user_feat)
+
+        for u in range(num_users):
+
+            items = uv_dict[u]
+            if len(items) == 0:
+                user_emb[u] = user_feat[u]
+                continue
+
+            # --- 1. sample K1 items ---
+            if len(items) > K1:
+                sampled_items = random.sample(items, K1)
+            else:
+                sampled_items = items
+
+            collected_users = []
+
+            # --- 2. for each item sample K2 users ---
+            for i in sampled_items:
+                users_i = vu_dict[i]
+
+                # remove self
+                users_i = [x for x in users_i if x != u]
+                if len(users_i) == 0:
+                    continue
+
+                if len(users_i) > K2:
+                    sampled_users = random.sample(users_i, K2)
+                else:
+                    sampled_users = users_i
+
+                collected_users.extend(sampled_users)
+
+            if len(collected_users) == 0:
+                user_emb[u] = user_feat[u]
+            else:
+                neigh_feat = user_feat[collected_users]
+                user_emb[u] = neigh_feat.mean(dim=0)
+
+        return user_emb, None
 
     def get_model(self):
         if self.base_model == "MF":
@@ -1004,10 +1085,26 @@ class Run:
             self.update_results(mae, rmse, "aug")
             write("MAE: {} RMSE: {} ".format(mae, rmse))
 
-    def Diff_CDR(self, model, diff_model, data_diff, data_test, optimizer, style_src, style_tgt_item):
+    def Diff_CDR(self, model, diff_model, data_diff, data_test, optimizer, graph_train, style_src, style_tgt_item):
         write(f"{' Diff_CDR ':=^{30}}")
 
         diff_model.style_tgt_item = style_tgt_item
+
+        src_graph = graph_train.get("src")
+        tgt_graph = graph_train.get("tgt")
+        shared_graph = graph_train.get("shared")
+        
+        #### GraphSAGE
+        if diff_model.parallel["set_cond2"] == "sample_aggr":
+            # sample_user_emb_src, _ = self.compute_user_graph_embeddings_sampled(model, src_graph, K1=10, K2=20, use_target=False)
+            # sample_user_emb_tgt, _ = self.compute_user_graph_embeddings_sampled(model, tgt_graph, K1=10, K2=20, use_target=True)
+            # diff_model.sample_user_emb_src = sample_user_emb_src
+            # diff_model.sample_user_emb_tgt = sample_user_emb_tgt
+
+            smooth_user_emb_src, _ = self.compute_user_graph_embeddings(model, diff_model, src_graph, use_target=False)
+            smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model, diff_model, tgt_graph, use_target=True)    
+            diff_model.sample_user_emb_src = smooth_user_emb_src
+            diff_model.sample_user_emb_tgt = smooth_user_emb_tgt
 
         for i in range(self.epoch):
             loss, task_loss = self.train(data_diff, [model, diff_model], None, optimizer, i, stage="train_diff", mapping=False, diff=True,style_src=style_src)
@@ -1291,7 +1388,7 @@ class Run:
             self.graph_train = graph_data["train"]
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
-            self.Diff_CDR(model, diff_model, data_diff, data_diff_test, optimizer_diff, style_src, style_tgt_item)
+            self.Diff_CDR(model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], style_src, style_tgt_item)
             self.result_print(["diff"])
 
         elif exp_part == "diff_parallel":

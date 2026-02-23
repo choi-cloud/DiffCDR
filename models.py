@@ -301,8 +301,13 @@ class MFBasedModel(torch.nn.Module):
             tgt_uid, iid_input, y_input = x
 
             tgt_emb = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
-            cond_emb = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
-            # cond_emb = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
+
+            if diff_model.parallel["set_cond2"] == "sample_aggr": 
+                indices = tgt_uid.long()
+                cond_emb = diff_model.sample_user_emb_src[indices]
+            else:
+                cond_emb = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
+                # cond_emb = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
 
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
 
@@ -314,11 +319,25 @@ class MFBasedModel(torch.nn.Module):
 
             tgt_uid, iid_input, _ = x
 
-            cond_emb = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
-            # cond_emb = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
+            if diff_model.parallel["set_cond2"] == "sample_aggr": 
+                indices = tgt_uid.long()
+                cond_emb = diff_model.sample_user_emb_src[indices]
+            else:
+                cond_emb = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
+                # cond_emb = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
 
-            final_output, iid_emb = Diff.p_sample_loop(diff_model, cond_emb, iid_emb, device)
+            if diff_model.parallel["set_diff"] == 'bias_noise': 
+                gamma = 0.1 
+                uid = tgt_uid.long()  # (B,)
+                style_src = style_src.to(cond_emb.device)
+                style_u = style_src[uid]  # (B, F)
+                style_tok = diff_model.style_encoder(style_u) 
+                style_tok *= gamma
+                final_output, iid_emb = Diff.p_sample_loop(diff_model, cond_emb, iid_emb, device, bias=style_tok)
+
+            else: 
+                final_output, iid_emb = Diff.p_sample_loop(diff_model, cond_emb, iid_emb, device)
 
             if diff_model.parallel["set_aggr"] == "item_q": 
                 iid_emb = diff_model.ln_iid(iid_emb)
