@@ -374,6 +374,10 @@ class Run:
         print("Training Epoch {}:".format(epoch + 1))
 
         loss_ls = []
+        # MAE / RMSE 계산용 변수
+        sum_abs_err = 0.0
+        sum_sq_err = 0.0
+        total_count = 0
         if diff == False and ss == False and la == False:
             for X, y in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                 if mapping:
@@ -397,6 +401,23 @@ class Run:
                     optimizer.step()
 
                 loss_ls.append(loss.item())
+
+                # ====== MAE / RMSE 계산 ======
+                with torch.no_grad():
+                    y_true = y.squeeze()
+                    abs_err = torch.abs(pred - y_true)
+                    sq_err = (pred - y_true) ** 2
+
+                    sum_abs_err += abs_err.sum().item()
+                    sum_sq_err += sq_err.sum().item()
+                    total_count += y_true.numel()
+
+            # ====== epoch metric 계산 ======
+            mae = sum_abs_err / total_count
+            rmse = (sum_sq_err / total_count) ** 0.5
+
+            print(f"Epoch {epoch+1} | MAE: {mae:.6f} | RMSE: {rmse:.6f}")
+
             return torch.tensor(loss_ls).mean()
 
         elif diff == False and ss == True and la == False:
