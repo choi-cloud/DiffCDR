@@ -87,6 +87,22 @@ class DiffCDR(nn.Module):
 
         self.num_layers = 1
 
+        self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
+
+        self.linear_m = nn.Linear(input_dim, input_dim, False)
+        self.ln_iid = nn.LayerNorm(input_dim)
+        self.ln_m   = nn.LayerNorm(input_dim)
+
+        self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+        self.style_ln = nn.LayerNorm(input_dim)
+        self.style_scale = nn.Parameter(torch.tensor(0.1))
+
+        self.item_style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+        self.item_style_ln = nn.LayerNorm(input_dim)
+        self.item_style_scale = nn.Parameter(torch.tensor(0.1))
+        
+        self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
+
         #linear for alm 
         self.al_linear = nn.Linear(input_dim,input_dim,False)
 
@@ -223,24 +239,60 @@ class DiffParallel(nn.Module):
         self.ln_iid = nn.LayerNorm(input_dim)
         self.ln_m = nn.LayerNorm(input_dim)
         self.ln_g = nn.LayerNorm(input_dim)
+        self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
 
-        if self.parallel["set_aggr"] in ["attn", "item_attn"]:
-            self.attn_layer = AttentionLayer(in_dim=input_dim * 2, out_dim=input_dim)
-        elif self.parallel["set_aggr"] == "item_cls":
-            self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
+        if self.parallel["set_aggr"] == "item_diu":
+            self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.style_ln = nn.LayerNorm(input_dim)
+            self.style_scale = nn.Parameter(torch.tensor(0.1))
+
+            self.item_style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.item_style_ln = nn.LayerNorm(input_dim)
+            self.item_style_scale = nn.Parameter(torch.tensor(0.1))
+
+            self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
+
+        elif self.parallel["set_aggr"] == "item_d":
+            self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
+
+        elif self.parallel["set_aggr"] == "item_di":
+            self.item_style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.item_style_ln = nn.LayerNorm(input_dim)
+            self.item_style_scale = nn.Parameter(torch.tensor(0.1))
+
+            self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
+
+        elif self.parallel["set_aggr"] == "item_du":
+            self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.style_ln = nn.LayerNorm(input_dim)
+            self.style_scale = nn.Parameter(torch.tensor(0.1))
+
+            self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
+
+        elif self.parallel["set_aggr"] == "item_i":
+            self.item_style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.item_style_ln = nn.LayerNorm(input_dim)
+            self.item_style_scale = nn.Parameter(torch.tensor(0.1))
+
+        elif self.parallel["set_aggr"] == "item_iu":
+            self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.style_ln = nn.LayerNorm(input_dim)
+            self.style_scale = nn.Parameter(torch.tensor(0.1))
+
+            self.item_style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.item_style_ln = nn.LayerNorm(input_dim)
+            self.item_style_scale = nn.Parameter(torch.tensor(0.1))
+
+        elif self.parallel["set_aggr"] == "item_u":
+            self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.style_ln = nn.LayerNorm(input_dim)
+            self.style_scale = nn.Parameter(torch.tensor(0.1))
+
+
 
         self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
         self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
 
-        self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
-        self.style_ln = nn.LayerNorm(input_dim)
-        self.style_scale = nn.Parameter(torch.tensor(0.1))
-
-        self.item_style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
-        self.item_style_ln = nn.LayerNorm(input_dim)
-        self.item_style_scale = nn.Parameter(torch.tensor(0.1))
-
-        self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
 
     def forward(self, x, t, cond_emb, cond_mask, diff_id):
 
@@ -273,7 +325,7 @@ def q_x_fn(model, x_0, t, device):  # forward
     return (alphas_t * x_0 + alphas_1_m_t * noise), noise  # x0에 노이즈를 더함.
 
 def diffusion_loss_fn(model,x_0,cond_emb, iid_emb,y_input,
-                        device,is_task):
+                        device,is_task,style_src=None, uid=None, iid=None):
 
     num_steps = model.num_steps
     mask_rate = model.mask_rate
@@ -305,8 +357,34 @@ def diffusion_loss_fn(model,x_0,cond_emb, iid_emb,y_input,
         return F.smooth_l1_loss(e, output)
 
     elif is_task:
-        final_output,iid_emb=p_sample_loop(model,cond_emb,iid_emb,device)
-        y_pred = torch.sum( final_output * iid_emb , dim=1)
+        final_output, iid_emb=p_sample_loop(model,cond_emb,iid_emb,device)
+
+        iid_emb = model.ln_iid(iid_emb)
+        final_output_m = model.ln_m(model.linear_m(final_output))
+
+        uid = uid.long()  # (B,)
+
+        style_src = style_src.to(final_output_m.device)
+        style_u = style_src[uid]  # (B, F)
+        style_tok = model.style_encoder(style_u)  # (B, D)
+        style_tok = model.style_ln(style_tok)  # (B, D)
+        style_tok_u = model.style_scale * style_tok  # (B, D)
+
+        style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+        style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
+        item_style_tok = model.item_style_encoder(style_i)  # (B, D)
+        item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
+        item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
+
+        tokens = torch.stack([iid_emb, final_output_m,  style_tok_u, item_style_tok], dim=1)
+        out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+        final_output = out[:, 0, :]  # (B, D)
+
+        y_pred = torch.sum(final_output * iid_emb, dim=1) 
+
+        # domain bias 
+        mu_t = model.tgt_global_bias
+        y_pred = y_pred + mu_t
         
         #MSE
         task_loss =   (y_pred - y_input.squeeze().float()).square().mean()
@@ -379,7 +457,7 @@ def diffusion_loss_fn_parallel(
             # 아이템을 쿼리로 사용
             final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1), query=torch.cat([iid_emb, iid_emb], dim=1))
 
-        elif model.parallel["set_aggr"] == "item_cls":
+        elif model.parallel["set_aggr"] == "item_diu":
             iid_emb = model.ln_iid(iid_emb)
             final_output_m = model.ln_m(model.linear_m(final_output_m))
             final_output_g = model.ln_g(model.linear_g(final_output_g))
@@ -402,9 +480,131 @@ def diffusion_loss_fn_parallel(
             out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
             final_output = out[:, 0, :]  # (B, D)
 
-        y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
-        mu_t = model.tgt_global_bias
-        y_pred = y_pred + mu_t
+            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+            mu_t = model.tgt_global_bias
+            y_pred = y_pred + mu_t
+
+
+        elif model.parallel["set_aggr"] == "item_d":
+            iid_emb = model.ln_iid(iid_emb)
+            final_output_m = model.ln_m(model.linear_m(final_output_m))
+            final_output_g = model.ln_g(model.linear_g(final_output_g))
+
+            tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
+            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            final_output = out[:, 0, :]  # (B, D)
+
+            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+            mu_t = model.tgt_global_bias
+            y_pred = y_pred + mu_t
+
+        elif model.parallel["set_aggr"] == "item_di":
+            iid_emb = model.ln_iid(iid_emb)
+            final_output_m = model.ln_m(model.linear_m(final_output_m))
+            final_output_g = model.ln_g(model.linear_g(final_output_g))
+
+            style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+            style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
+            item_style_tok = model.item_style_encoder(style_i)  # (B, D)
+            item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
+            item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
+
+            tokens = torch.stack([iid_emb, final_output_m, final_output_g, item_style_tok], dim=1)
+            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            final_output = out[:, 0, :]  # (B, D)
+
+            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+            mu_t = model.tgt_global_bias
+            y_pred = y_pred + mu_t
+
+        elif model.parallel["set_aggr"] == "item_du":
+            iid_emb = model.ln_iid(iid_emb)
+            final_output_m = model.ln_m(model.linear_m(final_output_m))
+            final_output_g = model.ln_g(model.linear_g(final_output_g))
+
+            uid = uid.long()  # (B,)
+
+            style_src = style_src.to(final_output_m.device)
+            style_u = style_src[uid]  # (B, F)
+            style_tok = model.style_encoder(style_u)  # (B, D)
+            style_tok = model.style_ln(style_tok)  # (B, D)
+            style_tok_u = model.style_scale * style_tok  # (B, D)
+
+            tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u], dim=1)
+            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            final_output = out[:, 0, :]  # (B, D)
+
+            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+            mu_t = model.tgt_global_bias
+            y_pred = y_pred + mu_t
+
+
+        elif model.parallel["set_aggr"] == "item_i":
+            iid_emb = model.ln_iid(iid_emb)
+            final_output_m = model.ln_m(model.linear_m(final_output_m))
+            final_output_g = model.ln_g(model.linear_g(final_output_g))
+
+            uid = uid.long()  # (B,)
+
+            style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+            style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
+            item_style_tok = model.item_style_encoder(style_i)  # (B, D)
+            item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
+            item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
+
+            tokens = torch.stack([iid_emb, final_output_m, final_output_g, item_style_tok], dim=1)
+            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            final_output = out[:, 0, :]  # (B, D)
+
+            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+
+
+        elif model.parallel["set_aggr"] == "item_iu":
+            iid_emb = model.ln_iid(iid_emb)
+            final_output_m = model.ln_m(model.linear_m(final_output_m))
+            final_output_g = model.ln_g(model.linear_g(final_output_g))
+
+            uid = uid.long()  # (B,)
+
+            style_src = style_src.to(final_output_m.device)
+            style_u = style_src[uid]  # (B, F)
+            style_tok = model.style_encoder(style_u)  # (B, D)
+            style_tok = model.style_ln(style_tok)  # (B, D)
+            style_tok_u = model.style_scale * style_tok  # (B, D)
+
+            style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+            style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
+            item_style_tok = model.item_style_encoder(style_i)  # (B, D)
+            item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
+            item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
+
+            tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            final_output = out[:, 0, :]  # (B, D)
+
+            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+
+
+        elif model.parallel["set_aggr"] == "item_u":
+            iid_emb = model.ln_iid(iid_emb)
+            final_output_m = model.ln_m(model.linear_m(final_output_m))
+            final_output_g = model.ln_g(model.linear_g(final_output_g))
+
+            uid = uid.long()  # (B,)
+
+            style_src = style_src.to(final_output_m.device)
+            style_u = style_src[uid]  # (B, F)
+            style_tok = model.style_encoder(style_u)  # (B, D)
+            style_tok = model.style_ln(style_tok)  # (B, D)
+            style_tok_u = model.style_scale * style_tok  # (B, D)
+
+            tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u], dim=1)
+            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            final_output = out[:, 0, :]  # (B, D)
+
+            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+
+
 
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
@@ -423,157 +623,115 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_loss"] == 3:
             return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss  # ALM 로스 + task loss
 
-
-def _get_ddpm_sampler(model, device):
-    """
-    model.num_steps, model.betas를 그대로 사용해서 diffusion sampler를 구성.
-    w는 0으로 둬서 guidance 끔 (원하면 model.parallel['w'] 같은 걸로 바꿔도 됨)
-    """
-
-    class _Diffusion:
-        def __init__(self, betas, w, device):
-            self.device = device
-            self.w = w
-            self.betas = betas.to(device)
-
-            self.alphas = 1.0 - self.betas
-            self.alphas_cumprod = torch.cumprod(self.alphas, dim=0)
-            self.alphas_cumprod_prev = F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0)
-
-            self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
-            self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - self.alphas_cumprod)
-
-            self.posterior_mean_coef1 = self.betas * torch.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
-            self.posterior_mean_coef2 = (1.0 - self.alphas_cumprod_prev) * torch.sqrt(self.alphas) / (1.0 - self.alphas_cumprod)
-            self.posterior_variance = self.betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
-
-        def _extract(self, a, t, x_shape):
-            # t: (B,) long
-            out = a.gather(0, t)
-            return out.reshape(t.shape[0], *((1,) * (len(x_shape) - 1)))
-
-        @torch.no_grad()
-        def p_sample(self, model_forward, model_forward_uncon, x, h, t, t_index):
-            # x_start = predicted x0
-            x_start = (1 + self.w) * model_forward(x, h, t) - self.w * model_forward_uncon(x, t)
-
-            model_mean = self._extract(self.posterior_mean_coef1, t, x.shape) * x_start + self._extract(self.posterior_mean_coef2, t, x.shape) * x
-
-            if t_index == 0:
-                return model_mean
-            noise = torch.randn_like(x)
-            var = self._extract(self.posterior_variance, t, x.shape)
-            return model_mean + torch.sqrt(var) * noise
-
-        @torch.no_grad()
-        def sample(self, model_forward, model_forward_uncon, h, x_t):
-            x = x_t
-            T = self.betas.shape[0]
-
-            step_indices = torch.linspace(T - 1, 0, h.shape[0], device=self.device).long()
-
-            for i, n in enumerate(step_indices):
-                t = torch.full((x.shape[0],), n, device=self.device, dtype=torch.long)
-                h_i = h[i] if h.dim() == 3 else h
-                x = self.p_sample(model_forward, model_forward_uncon, x, h_i, t, i)
-
-            return x
-
-    if hasattr(model, "_ddpm_sampler") and model._ddpm_sampler is not None:
-        return model._ddpm_sampler
-
-    model._ddpm_sampler = _Diffusion(model.betas, w=model.w, device=device)
-    return model._ddpm_sampler
-
-
-def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):
-    B = x.shape[0]
-    cond_mask = torch.ones(B, device=device)
-
-    sampler = _get_ddpm_sampler(model, device)
-    total_T = model.num_steps
-    sample_steps = model.sample_steps  # = 30
-
-    use_hier = cond_emb.dim() == 3  # (L,B,D)
-
-    # ----------------------------
-    # ✅ hier_conds 미리 계산: (S,B,D)
-    # ----------------------------
-    if use_hier:
-        # cond_emb: (L,B,D)
-        L = cond_emb.shape[0]
-        cond_cumsum = torch.cumsum(cond_emb, dim=0)  # (L,B,D)
-
-        # sampler loop와 동일한 step index 만들기
-        step_indices = torch.linspace(total_T - 1, 0, sample_steps, device=device).long()  # (S,)
-
-        # timestep -> level id 매핑 (coarse->fine)
-        progress = 1.0 - step_indices.float() / (total_T - 1)  # 0->1
-        level_ids = torch.clamp((progress * (L - 1)).long(), 0, L - 1)  # (S,)
-
-        hier_conds = cond_cumsum[level_ids]  # (S,B,D)
-    else:
-        hier_conds = cond_emb  # (B,D)
-
-    # ----------------------------
-    # ✅ sampler에 h로 넣고, model_forward는 h_를 그대로 cond로 사용
-    # ----------------------------
-    x0 = sampler.sample(
-        model_forward=lambda x_, h_, t_: model.forward(x_, t_, h_, cond_mask, diff_id=diff_id),  # step마다 바뀌는 condition
-        model_forward_uncon=lambda x_, t_: model.forward(x_, t_, torch.zeros_like(x_), torch.zeros(B, device=device), diff_id=diff_id),
-        h=hier_conds,  # (S,B,D) or (B,D)
-        x_t=x,
-    )
-
-    return x0.to(device), iid_emb
-
-
-def p_sample_loop_parallel(model, start_emb, cond_emb, iid_input, device, diff_id):
-    cur_x, iid_emb_out = p_sample_parallel(model=model, cond_emb=cond_emb, x=start_emb, iid_emb=iid_input, device=device, diff_id=diff_id)
-    return cur_x, iid_emb_out
-
-#generation fun
-def p_sample(model,cond_emb,x,iid_emb,device):
-    #wrap for dpm_solver
+# generation fun
+def p_sample(model, cond_emb, x, iid_emb, device):  # ALM + task loss
+    # wrap for dpm_solver
     classifier_scale_para = model.c_scale
     dmp_sample_steps = model.sample_steps
     num_steps = model.num_steps
 
-    model_kwargs ={'cond_emb':cond_emb,
-                'cond_mask':torch.zeros( cond_emb.size()[0] ,device=device),
-                }
-
+    model_kwargs = {
+        "cond_emb": cond_emb,
+        "cond_mask": torch.zeros(cond_emb.size()[0], device=device),
+    }
 
     model_fn = model_wrapper(
         model,
         noise_schedule,
         is_cond_classifier=True,
-        classifier_scale = classifier_scale_para, 
+        classifier_scale=classifier_scale_para,
         time_input_type="1",
         total_N=num_steps,
-        model_kwargs=model_kwargs
+        model_kwargs=model_kwargs,
     )
 
-    dpm_solver = DPM_Solver(model_fn, noise_schedule)
+    dpm_solver = DPM_Solver(model_fn, noise_schedule)  # 노이즈, 노이즈 임베딩으로부터 denoised feat 예측 모델. 내부에서 forward 호출
 
-    sample = dpm_solver.sample(
-                    x,
-                    steps=dmp_sample_steps,
-                    eps=1e-4,
-                    adaptive_step_size=False,
-                    fast_version=True,
-                )
-    
-    return model.get_al_emb(sample).to(device),iid_emb
+    sample = dpm_solver.sample(  #  x_t-1 예측
+        x,
+        steps=dmp_sample_steps,
+        eps=1e-4,
+        adaptive_step_size=False,
+        fast_version=True,
+    )
+
+    return model.get_al_emb(sample).to(device), iid_emb  # FC(x_t-1), item emb
 
 
-def p_sample_loop(model,cond_emb,iid_input,device): 
-    #source emb input 
+def p_sample_loop(model, cond_emb, iid_input, device):
+    # source emb input
     cur_x = cond_emb
-    #noise input 
-    #cur_x = torch.normal(0,1,size = cond_emb.size() ,device=device)
+    # noise input
+    # cur_x = torch.normal(0,1,size = cond_emb.size() ,device=device)
 
-    #reversing
-    cur_x,iid_emb_out = p_sample(model,cond_emb,cur_x,iid_input,device)
+    # reversing
+    cur_x, iid_emb_out = p_sample(model, cond_emb, cur_x, iid_input, device)  # denoised embedding, item emb
 
-    return cur_x ,iid_emb_out
+    return cur_x, iid_emb_out
+
+
+def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):  # ALM + task loss
+    """
+    Docstring for p_sample_parallel
+
+    :param model: DiffParallel
+    :param cond_emb: condition
+    :param x: Noised emb(x0) <- start emb
+    :param iid_emb: Description
+    :param device: Description
+    :param diff_id: MF(0), Aggr(1)
+    """
+    # wrap for dpm_solver
+    classifier_scale_para = model.c_scale
+    dmp_sample_steps = model.sample_steps
+    num_steps = model.num_steps
+
+    B = cond_emb.shape[1]
+    cond_mask = torch.zeros(B, device=device).int()  # uncond mask
+
+    model_kwargs = {
+        "cond_emb": cond_emb.to(device),
+        "cond_mask": cond_mask,
+        "diff_id": diff_id,  # DiffParallel.forword 처리 위해 diff id 인자 추가
+    }
+
+    # ! 양자화된 조건 임베딩을 역 디퓨전 과정에서 시간축에 따라 분할해서 사용하기 위한 별도의 model_wrapper 사용
+    model_fn = model_wrapper_hierarchical_cond(
+        model,
+        noise_schedule,
+        is_cond_classifier=True,
+        classifier_scale=classifier_scale_para,
+        time_input_type="1",
+        total_N=num_steps,
+        model_kwargs=model_kwargs,
+    )
+
+    dpm_solver = DPM_Solver(model_fn, noise_schedule)  # 노이즈, 노이즈 임베딩으로부터 denoised feat 예측 모델. 내부에서 forward 호출
+
+    sample = dpm_solver.sample(  #  x_t-1 예측
+        x,
+        steps=dmp_sample_steps,
+        eps=1e-4,
+        adaptive_step_size=False,
+        fast_version=True,
+    )
+
+    if model.parallel["set_proj"] == 0:
+        return model.get_al_emb(sample).to(device), iid_emb  # FC(x_t-1), item emb
+    else:
+        return sample, iid_emb
+
+
+def p_sample_loop_parallel(model, start_emb, cond_emb, iid_input, device, diff_id):
+    """
+    Docstring for p_sample_loop_parallel
+
+    :param model: DiffParallel
+    :param start_emb: 소스 유저 임베딩(MF or Aggr) [B, D]
+    :param cond_emb: L개 코드북 맵핑 결과 [L, B, D]
+    :param iid_input: 타겟 아이템(안쓰임)
+    :param device: device
+    :param diff_id: MF(0), Aggr(1)
+    """
+    cur_x, iid_emb_out = p_sample_parallel(model=model, cond_emb=cond_emb, x=start_emb, iid_emb=iid_input, device=device, diff_id=diff_id)
+    return cur_x, iid_emb_out

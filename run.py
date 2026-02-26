@@ -1018,42 +1018,9 @@ class Run:
         if self.device == "cuda":
             # model.load_state_dict(torch.load(path))
             state = torch.load(path, map_location=self.device)
-
-            new_state = {}
-            for k, v in state.items():
-                new_k = k
-                if "uid_embedding.weight" in k and "uid_embedding.uid_embedding.weight" not in k:
-
-                     if k.endswith("uid_embedding.weight"):
-                         new_k = k.replace("uid_embedding.weight", "uid_embedding.uid_embedding.weight")
-                         new_state[new_k] = v
-                         
-                     if k.endswith("iid_embedding.weight"):
-                         new_k = k.replace("iid_embedding.weight", "iid_embedding.iid_embedding.weight")
-                         new_state[new_k] = v
-                
-                new_state[k] = v
-                if new_k != k:
-                    new_state[new_k] = v
-
-            model.load_state_dict(new_state, strict=False)
+            model.load_state_dict(state, strict=False)
         else:
-            state = torch.load(path, map_location="cpu")
-            new_state = {}
-            for k, v in state.items():
-                new_k = k
-                if k.endswith("uid_embedding.weight"):
-                     new_k = k.replace("uid_embedding.weight", "uid_embedding.uid_embedding.weight")
-                     new_state[new_k] = v
-                if k.endswith("iid_embedding.weight"):
-                     new_k = k.replace("iid_embedding.weight", "iid_embedding.iid_embedding.weight")
-                     new_state[new_k] = v
-                
-                new_state[k] = v
-                if new_k != k:
-                    new_state[new_k] = v
-
-            model.load_state_dict(new_state, strict=False)
+            model.load_state_dict(torch.load(path, map_location="cpu"))
 
     def result_print(self, phase):
         print_str = ""

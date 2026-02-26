@@ -8,7 +8,6 @@ import lacdr_model as LACDR
 from rqvae import ResidualQuantizer
 from utils import AttentionLayer
 
-
 class LookupEmbedding(torch.nn.Module):
 
     def __init__(self, uid_all, iid_all, emb_dim):
@@ -21,79 +20,6 @@ class LookupEmbedding(torch.nn.Module):
         iid_emb = self.iid_embedding(x[:, 1].unsqueeze(1))
         emb = torch.cat([uid_emb, iid_emb], dim=1)
         return emb
-
-class uidEmbedding(torch.nn.Module):
-
-    def __init__(self, uid_all, emb_dim):
-        super().__init__()
-        self.uid_embedding = torch.nn.Embedding(uid_all, emb_dim)
-        self.linear_1 = torch.nn.Linear(emb_dim, emb_dim)
-        self.linear_2 = torch.nn.Linear(emb_dim, emb_dim)
-        self.linear_3 = torch.nn.Linear(emb_dim, emb_dim)
-        
-        # ! Identity Init 처음에 MF 임베딩을 사용하기 위함.
-        torch.nn.init.eye_(self.linear_1.weight)
-        torch.nn.init.zeros_(self.linear_1.bias)
-        torch.nn.init.eye_(self.linear_2.weight)
-        torch.nn.init.zeros_(self.linear_2.bias)
-        torch.nn.init.eye_(self.linear_3.weight)
-        torch.nn.init.zeros_(self.linear_3.bias)
-
-    def forward(self, x):
-        uid_emb = self.uid_embedding(x)
-        uid_emb = self.linear_1(uid_emb)
-        uid_emb = F.relu(uid_emb)
-        uid_emb = self.linear_2(uid_emb)
-        uid_emb = F.relu(uid_emb)
-        uid_emb = self.linear_3(uid_emb)
-        return F.relu(uid_emb)
-
-    @property
-    def weight(self):
-        return self.uid_embedding.weight
-    
-class iidEmbedding(torch.nn.Module):
-
-    def __init__(self, iid_all, emb_dim):
-        super().__init__() 
-        self.iid_embedding = torch.nn.Embedding(iid_all + 1, emb_dim)  
-        self.linear_1 = torch.nn.Linear(emb_dim, emb_dim)
-        self.linear_2 = torch.nn.Linear(emb_dim, emb_dim)
-        self.linear_3 = torch.nn.Linear(emb_dim, emb_dim)
-        
-        # ! Identity Init 처음에 MF 임베딩을 사용하기 위함.
-        torch.nn.init.eye_(self.linear_1.weight)
-        torch.nn.init.zeros_(self.linear_1.bias)
-        torch.nn.init.eye_(self.linear_2.weight)
-        torch.nn.init.zeros_(self.linear_2.bias)
-        torch.nn.init.eye_(self.linear_3.weight)
-        torch.nn.init.zeros_(self.linear_3.bias)
-
-    def forward(self, x):
-        iid_emb = self.iid_embedding(x)
-        iid_emb = self.linear_1(iid_emb)
-        iid_emb = F.relu(iid_emb)
-        iid_emb = self.linear_2(iid_emb)
-        iid_emb = F.relu(iid_emb)
-        iid_emb = self.linear_3(iid_emb)
-        return F.relu(iid_emb)
-        
-    @property
-    def weight(self):
-        return self.iid_embedding.weight
-
-class GetEmbedding(torch.nn.Module):
-    def __init__(self, uid_all, iid_all, emb_dim):
-        super().__init__()
-        self.uid_embedding = uidEmbedding(uid_all, emb_dim)
-        self.iid_embedding = iidEmbedding(iid_all, emb_dim)
-
-    def forward(self, x):
-        uid_emb = self.uid_embedding(x[:, 0].unsqueeze(1))
-        iid_emb = self.iid_embedding(x[:, 1].unsqueeze(1))
-        emb = torch.cat([uid_emb, iid_emb], dim=1)
-        return emb
-
 
 class MetaNet(torch.nn.Module):
     def __init__(self, emb_dim, meta_dim):
@@ -116,19 +42,12 @@ class MFBasedModel(torch.nn.Module):
     def __init__(self, uid_all, iid_all, emb_dim, meta_dim_0):
         super().__init__()
         self.emb_dim = emb_dim
-        # self.src_model = LookupEmbedding(uid_all, iid_all, emb_dim)
-        # self.tgt_model = LookupEmbedding(uid_all, iid_all, emb_dim)
+        self.src_model = LookupEmbedding(uid_all, iid_all, emb_dim)
+        self.tgt_model = LookupEmbedding(uid_all, iid_all, emb_dim)
         self.aug_model = LookupEmbedding(uid_all, iid_all, emb_dim)
-        
-        self.src_model = GetEmbedding(uid_all, iid_all, emb_dim)
-        self.tgt_model = GetEmbedding(uid_all, iid_all, emb_dim)
 
         self.meta_net = MetaNet(emb_dim, meta_dim_0)
         self.mapping = torch.nn.Linear(emb_dim, emb_dim, False)
-
-        # ! mf 소스 임베딩과 aggr 소스 임베딩 각각을 양자화하기 위한 모듈
-        self.rq_mf = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
-        self.rq_aggr = ResidualQuantizer(code_dim=emb_dim, num_levels=4, codebook_size=256)
 
         self.graph_emb_cache = {} # 🔥 Cache for graph embeddings
 
@@ -444,7 +363,7 @@ class MFBasedModel(torch.nn.Module):
                 # 아이템을 쿼리로 사용
                 trans_emb = diff_model.attn_layer(torch.cat([trans_emb_m, trans_emb_g], dim=1), query=torch.cat([iid_emb, iid_emb], dim=1))
 
-            elif diff_model.parallel["set_aggr"] == "item_cls":
+            elif diff_model.parallel["set_aggr"] == "item_diu":
                 # 아이템 포함해서 self attn -> 아이템 출력만 사용
                 iid_emb = diff_model.ln_iid(iid_emb)
                 final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
@@ -469,10 +388,130 @@ class MFBasedModel(torch.nn.Module):
                 out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))
                 final_output = out[:, 0, :]
 
-            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
-            mu_t = diff_model.tgt_global_bias
-            y_pred = y_pred + mu_t
+                y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+                mu_t = diff_model.tgt_global_bias
+                y_pred = y_pred + mu_t
+                    
+            elif diff_model.parallel["set_aggr"] == "item_d":
+                iid_emb = diff_model.ln_iid(iid_emb)
+                final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
+                final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
 
+                tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
+                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+                final_output = out[:, 0, :]  # (B, D)
+
+                y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+                mu_t = diff_model.tgt_global_bias
+                y_pred = y_pred + mu_t
+
+            elif diff_model.parallel["set_aggr"] == "item_di":
+                iid_emb = diff_model.ln_iid(iid_emb)
+                final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
+                final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
+
+                style_tgt_item = diff_model.style_tgt_item.to(trans_emb_m.device)  # [I_total, F_item]
+                style_i = style_tgt_item[iid_input.squeeze(1)]  # (B, F_item)
+                item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
+                item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
+                item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
+
+                tokens = torch.stack([iid_emb, final_output_m, final_output_g, item_style_tok], dim=1)
+                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+                final_output = out[:, 0, :]  # (B, D)
+
+                y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+                mu_t = diff_model.tgt_global_bias
+                y_pred = y_pred + mu_t
+
+            elif diff_model.parallel["set_aggr"] == "item_du":
+                iid_emb = diff_model.ln_iid(iid_emb)
+                final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
+                final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
+
+                uid = tgt_uid.long()  # (B,)
+
+                style_src = style_src.to(trans_emb_m.device)
+                style_u = style_src[uid]  # (B, F)
+                style_tok = diff_model.style_encoder(style_u)  # (B, D)
+                style_tok = diff_model.style_ln(style_tok)  # (B, D)
+                style_tok_u = diff_model.style_scale * style_tok  # (B, D)
+
+                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u], dim=1)
+                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+                final_output = out[:, 0, :]  # (B, D)
+
+                y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+                mu_t = diff_model.tgt_global_bias
+                y_pred = y_pred + mu_t
+
+
+            elif diff_model.parallel["set_aggr"] == "item_i":
+                iid_emb = diff_model.ln_iid(iid_emb)
+                final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
+                final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
+
+                uid = tgt_uid.long()  # (B,)
+
+                style_tgt_item = diff_model.style_tgt_item.to(trans_emb_m.device)  # [I_total, F_item]
+                style_i = style_tgt_item[iid_input.squeeze(1)]  # (B, F_item)
+                item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
+                item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
+                item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
+
+                tokens = torch.stack([iid_emb, final_output_m, final_output_g, item_style_tok], dim=1)
+                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+                final_output = out[:, 0, :]  # (B, D)
+
+                y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+
+
+            elif diff_model.parallel["set_aggr"] == "item_iu":
+                iid_emb = diff_model.ln_iid(iid_emb)
+                final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
+                final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
+
+                uid = tgt_uid.long()  # (B,)
+
+                style_src = style_src.to(trans_emb_m.device)
+                style_u = style_src[uid]  # (B, F)
+                style_tok = diff_model.style_encoder(style_u)  # (B, D)
+                style_tok = diff_model.style_ln(style_tok)  # (B, D)
+                style_tok_u = diff_model.style_scale * style_tok  # (B, D)
+
+                style_tgt_item = diff_model.style_tgt_item.to(trans_emb_m.device)  # [I_total, F_item]
+                style_i = style_tgt_item[iid_input.squeeze(1)]  # (B, F_item)
+                item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
+                item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
+                item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
+
+                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+                final_output = out[:, 0, :]  # (B, D)
+
+                y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+
+
+            elif diff_model.parallel["set_aggr"] == "item_u":
+                iid_emb = diff_model.ln_iid(iid_emb)
+                final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
+                final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
+
+                uid = tgt_uid.long()  # (B,)
+
+                style_src = style_src.to(trans_emb_m.device)
+                style_u = style_src[uid]  # (B, F)
+                style_tok = diff_model.style_encoder(style_u)  # (B, D)
+                style_tok = diff_model.style_ln(style_tok)  # (B, D)
+                style_tok_u = diff_model.style_scale * style_tok  # (B, D)
+
+                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u], dim=1)
+                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+                final_output = out[:, 0, :]  # (B, D)
+
+                y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+
+            
             return y_pred
 
     def _fetch_vbge_user_embedding(self, diff_model, tgt_uid, use_target=False):
