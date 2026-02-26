@@ -289,9 +289,9 @@ class DiffParallel(nn.Module):
             self.style_scale = nn.Parameter(torch.tensor(0.1))
 
 
-
-        self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
-        self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
+        if self.rqvae["RQVAE"]:
+            self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
+            self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
 
 
     def forward(self, x, t, cond_emb, cond_mask, diff_id):
@@ -394,7 +394,7 @@ def diffusion_loss_fn(model,x_0,cond_emb, iid_emb,y_input,
         return F.smooth_l1_loss(x_0, final_output) + model.task_lambda* task_loss
 
 def diffusion_loss_fn_parallel(
-    model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_emb, y_input, device, is_task, q_embs1=None, q_embs2=None, style_src=None, uid=None, iid=None
+    model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_emb, y_input, device, is_task, q_embs1=None, q_embs2=None, style_src=None, uid=None, iid=None, Q_emb1=None, Q_emb2=None
 ):
 
     num_steps = model.num_steps
@@ -439,14 +439,14 @@ def diffusion_loss_fn_parallel(
 
     elif is_task:  # task loss ALM 수행
 
-        ### [TRAIN-ALM] 1. noised x_0 설정에 따라 denoising
-        if model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
-            final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0)
-            final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1)
-        elif model.parallel["set_init"] == 1:  # 각각 MF, Aggr
-            # ! 각각 MF, Aggr인 파트만 수정
-            final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, q_embs1, iid_emb, device, diff_id=0)
-            final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb2, q_embs2, iid_emb, device, diff_id=1)
+        if model.rqvae["RQVAE"]:
+            final_output_m, iid_emb = p_sample_loop_parallel(model, Q_emb1, q_embs1, iid_emb, device, diff_id=0)
+            final_output_g, iid_emb = p_sample_loop_parallel(model, Q_emb2, q_embs2, iid_emb, device, diff_id=1)
+            # final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, q_embs1, iid_emb, device, diff_id=0)
+            # final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb2, q_embs2, iid_emb, device, diff_id=1)
+        else:
+            final_output_m, iid_emb = p_sample_loop(model, cond_emb1, q_embs1, iid_emb, device, diff_id=0)
+            final_output_g, iid_emb = p_sample_loop(model, cond_emb2, q_embs2, iid_emb, device, diff_id=1)
 
         ### [TRAIN-ALM] 2. Diff1, Diff2 결과 aggregation
         if model.parallel["set_aggr"] == "attn":
@@ -624,7 +624,7 @@ def diffusion_loss_fn_parallel(
             return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss  # ALM 로스 + task loss
 
 # generation fun
-def p_sample(model, cond_emb, x, iid_emb, device):  # ALM + task loss
+def p_sample(model, cond_emb, x, iid_emb, device, diff_id):  # ALM + task loss
     # wrap for dpm_solver
     classifier_scale_para = model.c_scale
     dmp_sample_steps = model.sample_steps
@@ -633,6 +633,7 @@ def p_sample(model, cond_emb, x, iid_emb, device):  # ALM + task loss
     model_kwargs = {
         "cond_emb": cond_emb,
         "cond_mask": torch.zeros(cond_emb.size()[0], device=device),
+        "diff_id": diff_id,  # DiffParallel.forword 처리 위해 diff id 인자 추가
     }
 
     model_fn = model_wrapper(
@@ -658,14 +659,14 @@ def p_sample(model, cond_emb, x, iid_emb, device):  # ALM + task loss
     return model.get_al_emb(sample).to(device), iid_emb  # FC(x_t-1), item emb
 
 
-def p_sample_loop(model, cond_emb, iid_input, device):
+def p_sample_loop(model, start_emb, cond_emb, iid_input, device, diff_id):
     # source emb input
-    cur_x = cond_emb
+    # cur_x = cond_emb
     # noise input
     # cur_x = torch.normal(0,1,size = cond_emb.size() ,device=device)
 
     # reversing
-    cur_x, iid_emb_out = p_sample(model, cond_emb, cur_x, iid_input, device)  # denoised embedding, item emb
+    cur_x, iid_emb_out = p_sample(model, cond_emb, start_emb, iid_input, device, diff_id)  # denoised embedding, item emb
 
     return cur_x, iid_emb_out
 

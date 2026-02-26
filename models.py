@@ -296,8 +296,12 @@ class MFBasedModel(torch.nn.Module):
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
 
             # ! mf 임베딩과 aggr 임베딩 양자화
-            quantized, all_level_vectors1, rq_loss1 = diff_model.rq_mf(cond_emb1)
-            quantized, all_level_vectors2, rq_loss2 = diff_model.rq_aggr(cond_emb2)
+            if diff_model.rqvae["RQVAE"] == True:
+                quantized1, all_level_vectors1, rq_loss1 = diff_model.rq_mf(cond_emb1)  # [L, B, D]
+                quantized2, all_level_vectors2, rq_loss2 = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
+            else:
+                all_level_vectors1 = cond_emb1
+                all_level_vectors2 = cond_emb2
 
             # is_task=False: 노이즈 예측 , is_task=True: ALS + task 로스
             loss = Diff.diffusion_loss_fn_parallel(
@@ -305,7 +309,7 @@ class MFBasedModel(torch.nn.Module):
                 tgt_emb1,
                 tgt_emb2,
                 # ! diff_loss 계산 시에는 양자화하지 않은 기존 소스 임베딩을 컨디션으로 이용
-                src_uid_emb1,
+                src_uid_emb1,   # 시작점
                 src_uid_emb2,
                 iid_emb,
                 y_input,
@@ -317,9 +321,15 @@ class MFBasedModel(torch.nn.Module):
                 style_src=style_src,
                 uid=tgt_uid,
                 iid=iid_input,
+                Q_emb1=quantized1,
+                Q_emb2=quantized2,                
             )
 
-            total_loss = loss + diff_model.rqvae["alpha_rq"] * (rq_loss1 + rq_loss2)
+            if diff_model.rqvae["RQVAE"] == True:
+                total_loss = loss + diff_model.rqvae["alpha_rq"] * (rq_loss1 + rq_loss2)
+            else:
+                total_loss = loss
+
             return total_loss
 
         elif stage == "test_diff_parallel":  # DiffParallel - test
@@ -330,29 +340,26 @@ class MFBasedModel(torch.nn.Module):
             # src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
             src_uid_emb2 = self.compute_user_graph_embeddings(self.graph_src, use_target=False)[tgt_uid]
 
-            if item_cond == True:
-                top_proto, bottom_proto = self.get_top_bottom_item_prototypes(tgt_uid)
-                cond_emb1 = top_proto
-                cond_emb2 = bottom_proto
-            else:
-                cond_emb1 = src_uid_emb1
-                cond_emb2 = src_uid_emb2
-
-            # ! mf 임베딩과 aggr 임베딩 양자화
-            quantized, all_level_vectors1, _ = diff_model.rq_mf(cond_emb1)  # [L, B, D]
-            quantized, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
-
+            cond_emb1 = src_uid_emb1
+            cond_emb2 = src_uid_emb2
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
 
-            ### [TEST] 1️. Diff1, Diff2 noised x_0 설정에 따라 denoising
-            if diff_model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
-                trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0)
-                trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, cond_emb1, cond_emb2, iid_emb, device, diff_id=1)
+            # ! mf 임베딩과 aggr 임베딩 양자화
+            if diff_model.rqvae["RQVAE"] == True:
+                quantized, all_level_vectors1, _ = diff_model.rq_mf(cond_emb1)  # [L, B, D]
+                quantized, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
+                # trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0)
+                # trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1)
+                trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, quantized, all_level_vectors1, iid_emb, device, diff_id=0)
+                trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, quantized, all_level_vectors2, iid_emb, device, diff_id=1)
 
-            elif diff_model.parallel["set_init"] == 1:  # 각각 MF, Aggr
-                # ! 각각 MF, Aggr인 파트만 수정
-                trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0)
-                trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1)
+            else:
+                all_level_vectors1 = cond_emb1
+                all_level_vectors2 = cond_emb2
+                trans_emb_m, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0)
+                trans_emb_g, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1)
+
+
 
             ### [TEST] 2. Diff1, Diff2 결과 aggregation
             if diff_model.parallel["set_aggr"] == "attn":

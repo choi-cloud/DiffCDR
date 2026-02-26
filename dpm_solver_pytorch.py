@@ -230,12 +230,13 @@ def model_wrapper(
 
             cond_emb = model_kwargs.get("cond_emb", None)
             cond_mask = model_kwargs.get("cond_mask", None)
+            diff_id = model_kwargs.get("diff_id", None)
 
             t_discrete = get_model_input_time(t_continuous)
-            noise_uncond = model(x, t_discrete, cond_emb, cond_mask)
+            noise_uncond = model(x, t_discrete, cond_emb, cond_mask, diff_id)
 
             cond_mask_c = torch.ones_like(cond_mask, device=cond_mask.device)
-            cond_grad = model(x, t_discrete, cond_emb, cond_mask_c)
+            cond_grad = model(x, t_discrete, cond_emb, cond_mask_c, diff_id)
 
             # sigma_t = noise_schedule.marginal_std(t_continuous)
             # dims = len(cond_grad.shape) - 1

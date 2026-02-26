@@ -10,6 +10,15 @@ from run import Run
 import utils
 from utils import write
 
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('true', '1', 'yes'):
+        return True
+    elif v.lower() in ('false', '0', 'no'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
 
 def prepare_1():
     parser = argparse.ArgumentParser()
@@ -41,6 +50,7 @@ def prepare_1():
     parser.add_argument("--codebook_num", type=int, default=4, help="RQVAE 코드북 개수(level)")
     parser.add_argument("--codebook_size", type=int, default=256, help="RQVAE 코드북 크기")
     parser.add_argument("--alpha_rq", type=float, default=1e-2, help="RQVAE loss 가중치")
+    parser.add_argument("--RQVAE", type=str2bool, default=True, help="rq 사용 여부")
 
     # item cond
     parser.add_argument("--item_cond", type=bool, default=False, help="아이템 조건 사용 여부")
@@ -76,6 +86,7 @@ def prepare_2(args, config_path):
         config["alpha_rq"] = args.alpha_rq
         config["w"] = args.w
         config["emb_dim"] = args.emb_dim
+        config["RQVAE"] = args.RQVAE
 
     return config
 
@@ -142,6 +153,7 @@ if __name__ == "__main__":
 
     write(f"emb dim: {args.emb_dim}")
     write(f"w = {args.w}")
+    write(f"RQVAE = {args.RQVAE}")
 
     if not args.process_data_mid and not args.process_data_ready:
         Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth")

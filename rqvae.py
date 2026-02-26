@@ -56,7 +56,7 @@ class ResidualQuantizer(nn.Module):
             
             # Commitment loss: 입력 임베딩(residual)을 선택된 코드북 벡터 근처로 끌어당겨
             # 양자화 공간에 안정적으로 정착시키기 위한 loss
-            rq_loss = rq_loss + 0.25*F.mse_loss(residual, chosen.detach())
+            # rq_loss = rq_loss + 0.25*F.mse_loss(residual, chosen.detach())
 
             # STE (Straight-Through Estimator): forward에서는 양자화된 벡터를 사용하되,
             # backward에서는 gradient가 residual(z)로 그대로 흐르도록 만드는 장치

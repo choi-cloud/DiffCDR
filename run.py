@@ -99,6 +99,7 @@ class Run:
             "codebook_num": config["codebook_num"],
             "codebook_size": config["codebook_size"],
             "alpha_rq": config["alpha_rq"],
+            "RQVAE": config["RQVAE"]
         }
         self.w = config["w"]
 
@@ -606,7 +607,7 @@ class Run:
 
         elif diff_model is not None and isinstance(diff_model, Diff.DiffParallel):
             optimizer_diff = torch.optim.Adam(
-                params = list(model.parameters()) + list(diff_model.parameters()),
+                list(diff_model.parameters()),
                 lr = self.diff_lr
             )
             return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_diff, optimizer_map
@@ -744,7 +745,6 @@ class Run:
 
             for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                 # 1️⃣ train mode
-                model[0].train()   # MF + user_embedding + item_embedding
                 model[1].train()   # diff_model
                 # 2️⃣ optimizer 기준으로 grad 초기화
 
@@ -760,7 +760,7 @@ class Run:
                 )
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(list(model[0].parameters()) + list(model[1].parameters()), 1.0)
+                torch.nn.utils.clip_grad_norm_(list(model[1].parameters()), 1.0)
                 optimizer.step()
 
                 task_loss = model[0](
@@ -774,7 +774,7 @@ class Run:
                 )
                 optimizer.zero_grad(set_to_none=True)
                 task_loss.backward()
-                torch.nn.utils.clip_grad_norm_(list(model[0].parameters()) + list(model[1].parameters()), 1.0)
+                torch.nn.utils.clip_grad_norm_(list(model[1].parameters()), 1.0)
                 optimizer.step()
 
 
