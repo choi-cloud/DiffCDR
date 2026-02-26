@@ -284,14 +284,8 @@ class MFBasedModel(torch.nn.Module):
             # src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
             src_uid_emb2 = self.compute_user_graph_embeddings(self.graph_src, use_target=False, device=device)[tgt_uid]
             
-            if item_cond == True:
-                top_proto, bottom_proto = self.get_top_bottom_item_prototypes(tgt_uid)
-                cond_emb1 = top_proto
-                cond_emb2 = bottom_proto
-
-            else:
-                cond_emb1 = src_uid_emb1
-                cond_emb2 = src_uid_emb2
+            cond_emb1 = src_uid_emb1
+            cond_emb2 = src_uid_emb2
 
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
 
@@ -302,6 +296,7 @@ class MFBasedModel(torch.nn.Module):
             else:
                 all_level_vectors1 = cond_emb1
                 all_level_vectors2 = cond_emb2
+                quantized1, quantized2 = None, None
 
             # is_task=False: 노이즈 예측 , is_task=True: ALS + task 로스
             loss = Diff.diffusion_loss_fn_parallel(
@@ -344,17 +339,32 @@ class MFBasedModel(torch.nn.Module):
             cond_emb2 = src_uid_emb2
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
 
-            # ! mf 임베딩과 aggr 임베딩 양자화
             if diff_model.rqvae["RQVAE"] == True:
-                quantized, all_level_vectors1, _ = diff_model.rq_mf(cond_emb1)  # [L, B, D]
-                quantized, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
-                trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0)
-                trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1)
+                quantized1, all_level_vectors1, _ = diff_model.rq_mf(cond_emb1)  # [L, B, D]
+                quantized2, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
+
+                if diff_model.rqvae["start_point"] == "src_u":
+                    trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0)
+                    trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1)
+                elif diff_model.rqvae["start_point"] == "quant_u":
+                    trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, quantized1, all_level_vectors1, iid_emb, device, diff_id=0)
+                    trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, quantized2, all_level_vectors2, iid_emb, device, diff_id=1)
+                elif diff_model.rqvae["start_point"] == "noise":
+                    noise1 = torch.randn_like(src_uid_emb1)
+                    noise2 = torch.randn_like(src_uid_emb2)
+                    trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, noise1, all_level_vectors1, iid_emb, device, diff_id=0)
+                    trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, noise2, all_level_vectors2, iid_emb, device, diff_id=1)
+
             else:
-                all_level_vectors1 = cond_emb1
-                all_level_vectors2 = cond_emb2
-                trans_emb_m, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0)
-                trans_emb_g, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1)
+                if diff_model.rqvae["start_point"] == "noise":
+                    noise1 = torch.randn_like(src_uid_emb1)
+                    noise2 = torch.randn_like(src_uid_emb2)
+                    trans_emb_m, iid_emb = Diff.p_sample_loop(diff_model, noise1, src_uid_emb1, iid_emb, device, diff_id=0)
+                    trans_emb_g, iid_emb = Diff.p_sample_loop(diff_model, noise2, src_uid_emb2, iid_emb, device, diff_id=1)
+                else:
+                    trans_emb_m, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb1, src_uid_emb1, iid_emb, device, diff_id=0)
+                    trans_emb_g, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb2, src_uid_emb2, iid_emb, device, diff_id=1)
+
 
 
 

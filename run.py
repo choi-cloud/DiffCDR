@@ -95,12 +95,15 @@ class Run:
             "set_proj": config["set_proj"],
             "set_aggr": config["set_aggr"],
         }
+        
         self.rqvae_setting = {
             "codebook_num": config["codebook_num"],
             "codebook_size": config["codebook_size"],
             "alpha_rq": config["alpha_rq"],
-            "RQVAE": config["RQVAE"]
+            "RQVAE": config["RQVAE"],
+            "start_point": config["start_point"]
         }
+
         self.w = config["w"]
 
         self.device = "cuda" if config["use_cuda"] else "cpu"

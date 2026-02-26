@@ -438,13 +438,32 @@ def diffusion_loss_fn_parallel(
         return F.mse_loss(x_0_m, output1) + F.mse_loss(x_0_g, output2)  # 예측 노이즈와 실제 노이즈 비교 L1 loss
 
     elif is_task:  # task loss ALM 수행
+        if model.rqvae["RQVAE"] == True:
+            quantized1, all_level_vectors1, _ = model.rq_mf(cond_emb1)  # [L, B, D]
+            quantized2, all_level_vectors2, _ = model.rq_aggr(cond_emb2)  # [L, B, D]
 
-        if model.rqvae["RQVAE"]:
-            final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, q_embs1, iid_emb, device, diff_id=0)
-            final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb2, q_embs2, iid_emb, device, diff_id=1)
+            if model.rqvae["start_point"] == "src_u":
+                final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, q_embs1, iid_emb, device, diff_id=0)
+                final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb2, q_embs2, iid_emb, device, diff_id=1)
+            elif model.rqvae["start_point"] == "quant_u":
+                final_output_m, iid_emb = p_sample_loop_parallel(model, Q_emb1, q_embs1, iid_emb, device, diff_id=0)
+                final_output_g, iid_emb = p_sample_loop_parallel(model, Q_emb2, q_embs2, iid_emb, device, diff_id=1)
+            elif model.rqvae["start_point"] == "noise":
+                noise1 = torch.randn_like(cond_emb1)
+                noise2 = torch.randn_like(cond_emb2)
+                final_output_m, iid_emb = p_sample_loop_parallel(model, noise1, q_embs1, iid_emb, device, diff_id=0)
+                final_output_g, iid_emb = p_sample_loop_parallel(model, noise2, q_embs2, iid_emb, device, diff_id=1)
+
         else:
-            final_output_m, iid_emb = p_sample_loop(model, cond_emb1, q_embs1, iid_emb, device, diff_id=0)
-            final_output_g, iid_emb = p_sample_loop(model, cond_emb2, q_embs2, iid_emb, device, diff_id=1)
+            if model.rqvae["start_point"] == "noise":
+                noise1 = torch.randn_like(cond_emb1)
+                noise2 = torch.randn_like(cond_emb2)
+                final_output_m, iid_emb = p_sample_loop(model, noise1, cond_emb1, iid_emb, device, diff_id=0)
+                final_output_g, iid_emb = p_sample_loop(model, noise2, cond_emb2, iid_emb, device, diff_id=1)
+            else:
+                final_output_m, iid_emb = p_sample_loop(model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0)
+                final_output_g, iid_emb = p_sample_loop(model, cond_emb2, cond_emb2, iid_emb, device, diff_id=1)
+
 
         ### [TRAIN-ALM] 2. Diff1, Diff2 결과 aggregation
         if model.parallel["set_aggr"] == "attn":
