@@ -348,11 +348,8 @@ class MFBasedModel(torch.nn.Module):
             if diff_model.rqvae["RQVAE"] == True:
                 quantized, all_level_vectors1, _ = diff_model.rq_mf(cond_emb1)  # [L, B, D]
                 quantized, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
-                # trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0)
-                # trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1)
-                trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, quantized, all_level_vectors1, iid_emb, device, diff_id=0)
-                trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, quantized, all_level_vectors2, iid_emb, device, diff_id=1)
-
+                trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0)
+                trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1)
             else:
                 all_level_vectors1 = cond_emb1
                 all_level_vectors2 = cond_emb2

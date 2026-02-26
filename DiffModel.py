@@ -440,10 +440,8 @@ def diffusion_loss_fn_parallel(
     elif is_task:  # task loss ALM 수행
 
         if model.rqvae["RQVAE"]:
-            final_output_m, iid_emb = p_sample_loop_parallel(model, Q_emb1, q_embs1, iid_emb, device, diff_id=0)
-            final_output_g, iid_emb = p_sample_loop_parallel(model, Q_emb2, q_embs2, iid_emb, device, diff_id=1)
-            # final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, q_embs1, iid_emb, device, diff_id=0)
-            # final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb2, q_embs2, iid_emb, device, diff_id=1)
+            final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, q_embs1, iid_emb, device, diff_id=0)
+            final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb2, q_embs2, iid_emb, device, diff_id=1)
         else:
             final_output_m, iid_emb = p_sample_loop(model, cond_emb1, q_embs1, iid_emb, device, diff_id=0)
             final_output_g, iid_emb = p_sample_loop(model, cond_emb2, q_embs2, iid_emb, device, diff_id=1)
