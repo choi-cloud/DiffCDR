@@ -126,7 +126,7 @@ if __name__ == "__main__":
     )
 
     print()
-    print("naeun4")
+    print("naeun4 & tf-idf 그래프 사용")
     print()
 
     logfile = utils.make_dir(f"{args.experiment}")

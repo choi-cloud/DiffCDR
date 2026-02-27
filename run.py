@@ -14,7 +14,7 @@ import pickle
 import json
 import os
 
-from utils import write
+from utils import *
 import ast
 
 
@@ -952,6 +952,41 @@ class Run:
         # smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model, diff_model, tgt_graph, use_target=True)
         # diff_model.smooth_user_emb_src = smooth_user_emb_src
         # diff_model.smooth_user_emb_tgt = smooth_user_emb_tgt
+
+        # 저장 경로 (원하는 경로로 수정해도 됨)
+        src_graph_path = f"/home/schoi/DiffCDR/model_save_default/src_graph_{self.task}_{self.ratio}.pth"
+        tgt_graph_path = f"/home/schoi/DiffCDR/model_save_default/tgt_graph_{self.task}_{self.ratio}.pth"
+
+        if os.path.exists(src_graph_path):
+            print("Loading src_graph from file...")
+            src_graph = torch.load(src_graph_path, map_location=self.device)
+        else:
+            print("Building src_graph...")
+            src_graph = build_user_knn_graph_tfidf_cosine_large(
+                src_graph, k=20, max_df_users=300, topL_per_user=80, min_sim=0.02, use_tf_values=False, device=self.device
+            )
+            torch.save(src_graph, src_graph_path)
+            print("src_graph saved.")
+
+        if os.path.exists(tgt_graph_path):
+            print("Loading tgt_graph from file...")
+            tgt_graph = torch.load(tgt_graph_path, map_location=self.device)
+        else:
+            print("Building tgt_graph...")
+            tgt_graph = build_user_knn_graph_tfidf_cosine_large(
+                tgt_graph, k=20, max_df_users=300, topL_per_user=80, min_sim=0.02, use_tf_values=False, device=self.device
+            )
+            torch.save(tgt_graph, tgt_graph_path)
+            print("tgt_graph saved.")
+
+        # 2) residual aggregation
+        src_user_feat = model.src_model.uid_embedding.weight
+        tgt_user_feat = model.tgt_model.uid_embedding.weight
+        src_user_emb_new = posthoc_user_residual_aggregate_from_uu(uu_adj=src_graph["uu_adj"], user_feat=src_user_feat, alpha=0.3)
+        tgt_user_emb_new = posthoc_user_residual_aggregate_from_uu(uu_adj=tgt_graph["uu_adj"], user_feat=tgt_user_feat, alpha=0.3)
+
+        diff_model.src_user_emb_new = src_user_emb_new
+        diff_model.tgt_user_emb_new = tgt_user_emb_new
 
         model.graph_src = graph_train.get("src")
         model.graph_tgt = graph_train.get("tgt")

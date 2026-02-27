@@ -298,6 +298,9 @@ class DiffParallel(nn.Module):
             self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
             self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
 
+        self.src_user_emb_new = None
+        self.tgt_user_emb_new = None
+
     def forward(self, x, t, cond_emb, cond_mask, diff_id):
 
         for idx in range(self.num_layers):

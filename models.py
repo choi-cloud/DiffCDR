@@ -279,12 +279,14 @@ class MFBasedModel(torch.nn.Module):
 
             tgt_emb1 = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
             # tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)  # Aggr
-            tgt_emb2 = self.compute_user_graph_embeddings(self.graph_tgt, use_target=True, device=device)[tgt_uid]
+            # tgt_emb2 = self.compute_user_graph_embeddings(self.graph_tgt, use_target=True, device=device)[tgt_uid]
+            tgt_emb2 = diff_model.tgt_user_emb_new[tgt_uid]
 
             # Diff1: MF 유저 임베딩, Diff2: Aggr 유저 임베딩
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
             # src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
-            src_uid_emb2 = self.compute_user_graph_embeddings(self.graph_src, use_target=False, device=device)[tgt_uid]
+            # src_uid_emb2 = self.compute_user_graph_embeddings(self.graph_src, use_target=False, device=device)[tgt_uid]
+            src_uid_emb2 = diff_model.src_user_emb_new[tgt_uid]
 
             cond_emb1 = src_uid_emb1
             cond_emb2 = src_uid_emb2
@@ -335,7 +337,8 @@ class MFBasedModel(torch.nn.Module):
 
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
             # src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
-            src_uid_emb2 = self.compute_user_graph_embeddings(self.graph_src, use_target=False)[tgt_uid]
+            # src_uid_emb2 = self.compute_user_graph_embeddings(self.graph_src, use_target=False)[tgt_uid]
+            src_uid_emb2 = diff_model.src_user_emb_new[tgt_uid]
 
             cond_emb1 = src_uid_emb1
             cond_emb2 = src_uid_emb2
