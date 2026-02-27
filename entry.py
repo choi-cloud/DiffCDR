@@ -10,15 +10,17 @@ from run import Run
 import utils
 from utils import write
 
+
 def str2bool(v):
     if isinstance(v, bool):
         return v
-    if v.lower() in ('true', '1', 'yes'):
+    if v.lower() in ("true", "1", "yes"):
         return True
-    elif v.lower() in ('false', '0', 'no'):
+    elif v.lower() in ("false", "0", "no"):
         return False
     else:
-        raise argparse.ArgumentTypeError('Boolean value expected.')
+        raise argparse.ArgumentTypeError("Boolean value expected.")
+
 
 def prepare_1():
     parser = argparse.ArgumentParser()
@@ -52,7 +54,6 @@ def prepare_1():
     parser.add_argument("--alpha_rq", type=float, default=1e-2, help="RQVAE loss 가중치")
     parser.add_argument("--RQVAE", type=str2bool, default=True, help="rq 사용 여부")
     parser.add_argument("--start_point", default="src_u", help="[src_u, quant_u, noise]")
-    
 
     # item cond
     parser.add_argument("--item_cond", type=bool, default=False, help="아이템 조건 사용 여부")
@@ -125,7 +126,7 @@ if __name__ == "__main__":
     )
 
     print()
-    print("tgt_global_bias 학습")
+    print("naeun4")
     print()
 
     logfile = utils.make_dir(f"{args.experiment}")

@@ -37,53 +37,58 @@ def get_timestep_embedding(timesteps, embedding_dim: int):
 
 
 class DiffCDR(nn.Module):
-    def __init__(self,num_steps=200, diff_dim=32,input_dim =32,c_scale=0.1,diff_sample_steps=30,diff_task_lambda=0.1,diff_mask_rate=0.1 ):
-        super(DiffCDR,self).__init__()
+    def __init__(self, num_steps=200, diff_dim=32, input_dim=32, c_scale=0.1, diff_sample_steps=30, diff_task_lambda=0.1, diff_mask_rate=0.1):
+        super(DiffCDR, self).__init__()
 
-        #-------------------------------------------
-        #define params
+        # -------------------------------------------
+        # define params
         self.num_steps = num_steps
-        self.betas = torch.linspace(1e-4,0.02 ,num_steps)
+        self.betas = torch.linspace(1e-4, 0.02, num_steps)
 
-        self.alphas = 1-self.betas
-        self.alphas_prod = torch.cumprod(self.alphas,0)
-        self.alphas_prod_p = torch.cat([torch.tensor([1]).float(),self.alphas_prod[:-1]],0)
+        self.alphas = 1 - self.betas
+        self.alphas_prod = torch.cumprod(self.alphas, 0)
+        self.alphas_prod_p = torch.cat([torch.tensor([1]).float(), self.alphas_prod[:-1]], 0)
         self.alphas_bar_sqrt = torch.sqrt(self.alphas_prod)
         self.one_minus_alphas_bar_log = torch.log(1 - self.alphas_prod)
         self.one_minus_alphas_bar_sqrt = torch.sqrt(1 - self.alphas_prod)
 
-        assert self.alphas.shape==self.alphas_prod.shape==self.alphas_prod_p.shape==\
-        self.alphas_bar_sqrt.shape==self.one_minus_alphas_bar_log.shape\
-        ==self.one_minus_alphas_bar_sqrt.shape
+        assert (
+            self.alphas.shape
+            == self.alphas_prod.shape
+            == self.alphas_prod_p.shape
+            == self.alphas_bar_sqrt.shape
+            == self.one_minus_alphas_bar_log.shape
+            == self.one_minus_alphas_bar_sqrt.shape
+        )
 
-        #-----------------------------------------------
+        # -----------------------------------------------
         self.diff_dim = diff_dim
         self.input_dim = input_dim
         self.task_lambda = diff_task_lambda
         self.sample_steps = diff_sample_steps
         self.c_scale = c_scale
         self.mask_rate = diff_mask_rate
-        #-----------------------------------------------
-        
+        # -----------------------------------------------
+
         self.linears = nn.ModuleList(
             [
-                nn.Linear(input_dim,diff_dim),    
-                nn.Linear(diff_dim,diff_dim) ,     
-                nn.Linear(diff_dim,input_dim),  
+                nn.Linear(input_dim, diff_dim),
+                nn.Linear(diff_dim, diff_dim),
+                nn.Linear(diff_dim, input_dim),
             ]
         )
-        
+
         self.step_emb_linear = nn.ModuleList(
-            [   
-                nn.Linear(diff_dim,input_dim),
+            [
+                nn.Linear(diff_dim, input_dim),
             ]
         )
 
         self.cond_emb_linear = nn.ModuleList(
-            [   
-                nn.Linear(input_dim,input_dim),
+            [
+                nn.Linear(input_dim, input_dim),
             ]
-        ) 
+        )
 
         self.num_layers = 1
 
@@ -91,7 +96,7 @@ class DiffCDR(nn.Module):
 
         self.linear_m = nn.Linear(input_dim, input_dim, False)
         self.ln_iid = nn.LayerNorm(input_dim)
-        self.ln_m   = nn.LayerNorm(input_dim)
+        self.ln_m = nn.LayerNorm(input_dim)
 
         self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
         self.style_ln = nn.LayerNorm(input_dim)
@@ -100,33 +105,34 @@ class DiffCDR(nn.Module):
         self.item_style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
         self.item_style_ln = nn.LayerNorm(input_dim)
         self.item_style_scale = nn.Parameter(torch.tensor(0.1))
-        
+
         self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
 
-        #linear for alm 
-        self.al_linear = nn.Linear(input_dim,input_dim,False)
+        # linear for alm
+        self.al_linear = nn.Linear(input_dim, input_dim, False)
 
-    def forward(self, x,t, cond_emb,cond_mask ):
+    def forward(self, x, t, cond_emb, cond_mask):
 
-        for idx in range( self.num_layers ):
-        
-            t_embedding = get_timestep_embedding( t , self.diff_dim)
+        for idx in range(self.num_layers):
+
+            t_embedding = get_timestep_embedding(t, self.diff_dim)
             t_embedding = self.step_emb_linear[idx](t_embedding)
-        
+
             cond_embedding = self.cond_emb_linear[idx](cond_emb)
-        
+
             t_c_emb = t_embedding + cond_embedding * cond_mask.unsqueeze(-1)
             x = x + t_c_emb
-            #x= torch.cat([t_embedding,cond_embedding * cond_mask.unsqueeze(-1),x],axis=1)
+            # x= torch.cat([t_embedding,cond_embedding * cond_mask.unsqueeze(-1),x],axis=1)
 
-            x = self.linears[0](x) 
-            x = self.linears[1](x) 
-            x = self.linears[2](x) 
+            x = self.linears[0](x)
+            x = self.linears[1](x)
+            x = self.linears[2](x)
 
         return x
-        
-    def get_al_emb(self,emb):
-        return self.al_linear (emb)
+
+    def get_al_emb(self, emb):
+        return self.al_linear(emb)
+
 
 class SinusoidalPositionEmbeddings(nn.Module):
     def __init__(self, dim):
@@ -288,11 +294,9 @@ class DiffParallel(nn.Module):
             self.style_ln = nn.LayerNorm(input_dim)
             self.style_scale = nn.Parameter(torch.tensor(0.1))
 
-
         if self.rqvae["RQVAE"]:
             self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
             self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
-
 
     def forward(self, x, t, cond_emb, cond_mask, diff_id):
 
@@ -324,40 +328,40 @@ def q_x_fn(model, x_0, t, device):  # forward
 
     return (alphas_t * x_0 + alphas_1_m_t * noise), noise  # x0에 노이즈를 더함.
 
-def diffusion_loss_fn(model,x_0,cond_emb, iid_emb,y_input,
-                        device,is_task,style_src=None, uid=None, iid=None):
+
+def diffusion_loss_fn(model, x_0, cond_emb, iid_emb, y_input, device, is_task, style_src=None, uid=None, iid=None):
 
     num_steps = model.num_steps
     mask_rate = model.mask_rate
 
     if is_task == False:
 
-        #------------------------
-        #sampling
-        #------------------------
+        # ------------------------
+        # sampling
+        # ------------------------
         batch_size = x_0.shape[0]
-        #sample t
-        t = torch.randint(0,num_steps,size=(batch_size//2,),device=device)
-        if batch_size%2 ==0:
-            t = torch.cat([t,num_steps-1-t],dim=0)
+        # sample t
+        t = torch.randint(0, num_steps, size=(batch_size // 2,), device=device)
+        if batch_size % 2 == 0:
+            t = torch.cat([t, num_steps - 1 - t], dim=0)
         else:
-            extra_t = torch.randint(0,num_steps,size=(1,),device=device)
-            t = torch.cat([t,num_steps-1-t,extra_t],dim=0)
+            extra_t = torch.randint(0, num_steps, size=(1,), device=device)
+            t = torch.cat([t, num_steps - 1 - t, extra_t], dim=0)
         t = t.unsqueeze(-1)
 
-        x,e = q_x_fn(model,x_0,t,device)
-        
-        #random mask
-        cond_mask = 1 * (torch.rand(cond_emb.shape[0],device=device) <= mask_rate  )
+        x, e = q_x_fn(model, x_0, t, device)
+
+        # random mask
+        cond_mask = 1 * (torch.rand(cond_emb.shape[0], device=device) <= mask_rate)
         cond_mask = 1 - cond_mask.int()
 
-        #pred noise
-        output = model(x, t.squeeze(-1),cond_emb,cond_mask )
+        # pred noise
+        output = model(x, t.squeeze(-1), cond_emb, cond_mask)
 
         return F.smooth_l1_loss(e, output)
 
     elif is_task:
-        final_output, iid_emb=p_sample_loop(model,cond_emb,iid_emb,device)
+        final_output, iid_emb = p_sample_loop(model, cond_emb, iid_emb, device)
 
         iid_emb = model.ln_iid(iid_emb)
         final_output_m = model.ln_m(model.linear_m(final_output))
@@ -376,25 +380,41 @@ def diffusion_loss_fn(model,x_0,cond_emb, iid_emb,y_input,
         item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
         item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
 
-        tokens = torch.stack([iid_emb, final_output_m,  style_tok_u, item_style_tok], dim=1)
+        tokens = torch.stack([iid_emb, final_output_m, style_tok_u, item_style_tok], dim=1)
         out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
         final_output = out[:, 0, :]  # (B, D)
 
-        y_pred = torch.sum(final_output * iid_emb, dim=1) 
+        y_pred = torch.sum(final_output * iid_emb, dim=1)
 
-        # domain bias 
+        # domain bias
         mu_t = model.tgt_global_bias
         y_pred = y_pred + mu_t
-        
-        #MSE
-        task_loss =   (y_pred - y_input.squeeze().float()).square().mean()
-        #RMSE
-        #task_loss =   (y_pred - y_input.squeeze().float()).square().sum().sqrt() / y_pred.shape[0]
 
-        return F.smooth_l1_loss(x_0, final_output) + model.task_lambda* task_loss
+        # MSE
+        task_loss = (y_pred - y_input.squeeze().float()).square().mean()
+        # RMSE
+        # task_loss =   (y_pred - y_input.squeeze().float()).square().sum().sqrt() / y_pred.shape[0]
+
+        return F.smooth_l1_loss(x_0, final_output) + model.task_lambda * task_loss
+
 
 def diffusion_loss_fn_parallel(
-    model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_emb, y_input, device, is_task, q_embs1=None, q_embs2=None, style_src=None, uid=None, iid=None, Q_emb1=None, Q_emb2=None
+    model,
+    x_0_m,
+    x_0_g,
+    cond_emb1,
+    cond_emb2,
+    iid_emb,
+    y_input,
+    device,
+    is_task,
+    q_embs1=None,
+    q_embs2=None,
+    style_src=None,
+    uid=None,
+    iid=None,
+    Q_emb1=None,
+    Q_emb2=None,
 ):
 
     num_steps = model.num_steps
@@ -464,7 +484,6 @@ def diffusion_loss_fn_parallel(
                 final_output_m, iid_emb = p_sample_loop(model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0)
                 final_output_g, iid_emb = p_sample_loop(model, cond_emb2, cond_emb2, iid_emb, device, diff_id=1)
 
-
         ### [TRAIN-ALM] 2. Diff1, Diff2 결과 aggregation
         if model.parallel["set_aggr"] == "attn":
             # ! 어텐션으로 최종 임베딩 종합
@@ -500,7 +519,6 @@ def diffusion_loss_fn_parallel(
             y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
             mu_t = model.tgt_global_bias
             y_pred = y_pred + mu_t
-
 
         elif model.parallel["set_aggr"] == "item_d":
             iid_emb = model.ln_iid(iid_emb)
@@ -555,7 +573,6 @@ def diffusion_loss_fn_parallel(
             mu_t = model.tgt_global_bias
             y_pred = y_pred + mu_t
 
-
         elif model.parallel["set_aggr"] == "item_i":
             iid_emb = model.ln_iid(iid_emb)
             final_output_m = model.ln_m(model.linear_m(final_output_m))
@@ -574,7 +591,6 @@ def diffusion_loss_fn_parallel(
             final_output = out[:, 0, :]  # (B, D)
 
             y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
-
 
         elif model.parallel["set_aggr"] == "item_iu":
             iid_emb = model.ln_iid(iid_emb)
@@ -601,7 +617,6 @@ def diffusion_loss_fn_parallel(
 
             y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
 
-
         elif model.parallel["set_aggr"] == "item_u":
             iid_emb = model.ln_iid(iid_emb)
             final_output_m = model.ln_m(model.linear_m(final_output_m))
@@ -621,8 +636,6 @@ def diffusion_loss_fn_parallel(
 
             y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
 
-
-
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
 
@@ -639,6 +652,7 @@ def diffusion_loss_fn_parallel(
             return F.mse_loss((x_0_m + x_0_g) / 2, final_output) + model.task_lambda * task_loss
         elif model.parallel["set_loss"] == 3:
             return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss  # ALM 로스 + task loss
+
 
 # generation fun
 def p_sample(model, cond_emb, x, iid_emb, device, diff_id):  # ALM + task loss

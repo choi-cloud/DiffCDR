@@ -52,8 +52,8 @@ class ResidualQuantizer(nn.Module):
             idx = torch.argmin(dist, dim=-1)  # [B]
             chosen = codebook_l[idx]  # [B, D]
 
-            rq_loss = rq_loss +  F.mse_loss(chosen, residual.detach())
-            
+            rq_loss = rq_loss + F.mse_loss(chosen, residual.detach())
+
             # Commitment loss: 입력 임베딩(residual)을 선택된 코드북 벡터 근처로 끌어당겨
             # 양자화 공간에 안정적으로 정착시키기 위한 loss
             # rq_loss = rq_loss + 0.25*F.mse_loss(residual, chosen.detach())

@@ -95,13 +95,13 @@ class Run:
             "set_proj": config["set_proj"],
             "set_aggr": config["set_aggr"],
         }
-        
+
         self.rqvae_setting = {
             "codebook_num": config["codebook_num"],
             "codebook_size": config["codebook_size"],
             "alpha_rq": config["alpha_rq"],
             "RQVAE": config["RQVAE"],
-            "start_point": config["start_point"]
+            "start_point": config["start_point"],
         }
 
         self.w = config["w"]
@@ -609,10 +609,7 @@ class Run:
             return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_diff, optimizer_map
 
         elif diff_model is not None and isinstance(diff_model, Diff.DiffParallel):
-            optimizer_diff = torch.optim.Adam(
-                list(diff_model.parameters()),
-                lr = self.diff_lr
-            )
+            optimizer_diff = torch.optim.Adam(list(diff_model.parameters()), lr=self.diff_lr)
             return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_diff, optimizer_map
 
     def eval_mae(self, model, data_loader, stage, style_src=None):
@@ -748,7 +745,7 @@ class Run:
 
             for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                 # 1️⃣ train mode
-                model[1].train()   # diff_model
+                model[1].train()  # diff_model
                 # 2️⃣ optimizer 기준으로 grad 초기화
 
                 # 3️⃣ forward
@@ -779,7 +776,6 @@ class Run:
                 task_loss.backward()
                 torch.nn.utils.clip_grad_norm_(list(model[1].parameters()), 1.0)
                 optimizer.step()
-
 
                 task_loss_ls.append(task_loss.item())
 
@@ -949,7 +945,6 @@ class Run:
 
         diff_model.style_tgt_item = style_tgt_item
 
-        
         src_graph = graph_train.get("src")
         tgt_graph = graph_train.get("tgt")
         shared_graph = graph_train.get("shared")
@@ -1090,10 +1085,9 @@ class Run:
             ckpt = torch.load(cache_path, map_location="cpu", weights_only=True)
             style_src = ckpt["style"]
             info = ckpt["info"]
-        else: 
+        else:
             style_src, info = build_src_user_rating_style_from_loader(
-                data_src=data_src, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, device="cpu",
-                cache_path=cache_path
+                data_src=data_src, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, device="cpu", cache_path=cache_path
             )
 
         print(f"\n타겟 도메인 내 아이템의 레이팅 스타일 정보 추출\n")
@@ -1104,10 +1098,8 @@ class Run:
             info_tgt = ckpt["info_tgt"]
         else:
             style_tgt_item, info_tgt = build_tgt_item_rating_style_from_loader(
-                data_tgt=data_tgt, num_items_total=self.iid_all + 1, rating_min=1.0, rating_max=5.0, device="cpu",
-                cache_path=cache_path
+                data_tgt=data_tgt, num_items_total=self.iid_all + 1, rating_min=1.0, rating_max=5.0, device="cpu", cache_path=cache_path
             )
-
 
         criterion = torch.nn.MSELoss()
 
@@ -1253,12 +1245,7 @@ def mae_summary_by_score(y_true, mae):
 
 @torch.no_grad()
 def build_src_user_rating_style_from_loader(
-    data_src,
-    num_users: int,
-    rating_min: float = 1.0,
-    rating_max: float = 5.0,
-    device: str = "cpu",
-    cache_path = ""
+    data_src, num_users: int, rating_min: float = 1.0, rating_max: float = 5.0, device: str = "cpu", cache_path=""
 ):
     """
     data_src yields: (X, y)
@@ -1338,7 +1325,7 @@ def build_src_user_rating_style_from_loader(
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     torch.save(
         {
-            "style": style.cpu(),   # 저장은 CPU 권장
+            "style": style.cpu(),  # 저장은 CPU 권장
             "info": info,
         },
         cache_path,
@@ -1437,11 +1424,10 @@ def build_tgt_item_rating_style_from_loader(
         "num_items_total": num_items_total,
     }
 
-    
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     torch.save(
         {
-            "style_tgt_item": style_item.cpu(),   # 저장은 CPU 권장
+            "style_tgt_item": style_item.cpu(),  # 저장은 CPU 권장
             "info_tgt": info,
         },
         cache_path,
