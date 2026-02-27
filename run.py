@@ -680,8 +680,8 @@ class Run:
 
         targets = torch.tensor(targets).float()
         predicts = torch.tensor(predicts)
-        print(f"Target mean: {targets.mean().item()} +- {targets.std().item()}")
-        print(f"Predic mean: {predicts.mean().item()} +- {predicts.std().item()}")
+        print(f"Target mean: {targets.mean().item():>10.6f} ± {targets.std().item():<10.6f}")
+        print(f"Predic mean: {predicts.mean().item():>10.6f} ± {predicts.std().item():<10.6f}")
 
         return loss(targets, predicts).item(), torch.sqrt(mse_loss(targets, predicts)).item()
 
@@ -936,16 +936,16 @@ class Run:
             write("MAE: {} RMSE: {} ".format(mae, rmse))
 
     def Diff_CDR(self, model, diff_model, data_diff, data_test, optimizer):
-        write("=========Diff_CDR========")
+        write(f"{' Diff_CDR ':=^{30}}")
         for i in range(self.epoch):
             loss, task_loss = self.train(data_diff, [model, diff_model], None, optimizer, i, stage="train_diff", mapping=False, diff=True)
 
             mae, rmse = self.eval_mae([model, diff_model], data_test, stage="test_diff")
             self.update_results(mae, rmse, "diff")
-            write(f"DIFF LOSS {loss.item()}, TASK LOSS {task_loss.item()}, MAE: {mae} RMSE: {rmse}")
+            write(f"DIFF LOSS {loss.item():>10.6f} |  TASK LOSS {task_loss.item():>10.6f} | MAE: {mae:>10.6f} | RMSE: {rmse:>10.6f}")
 
-    def Diff_Parallel(self, model, diff_model, data_diff, data_test, optimizer, graph_train, graph_test, style_src, style_tgt_item):
-        write("=========Diff_Parallel========")
+    def Diff_Parallel(self, model, diff_model, data_diff, data_test, optimizer, graph_train, graph_test, style_src, style_tgt_item, style_tgt_user, style_tgt_domain):
+        write(f"{' Diff_Parallel ':=^{30}}")
 
         diff_model.style_tgt_item = style_tgt_item
 
@@ -981,7 +981,7 @@ class Run:
 
             mae, rmse = self.eval_mae([model, diff_model], data_test, stage="test_diff_parallel", style_src=style_src)
             self.update_results(mae, rmse, "diff_parallel")
-            write(f"DIFF LOSS {loss.item()}, TASK LOSS {task_loss.item()}, MAE: {mae} RMSE: {rmse}")
+            write(f"Epoch {i:<2} :: DIFF LOSS {loss.item():>10.6f} |  TASK LOSS {task_loss.item():>10.6f} | MAE: {mae:>10.6f} | RMSE: {rmse:>10.6f}")
 
     def SS_CDR(self, model, ss_model, data_ss, data_test, optimizer_ss):
         write("==========SS_CDR==========")
@@ -1028,10 +1028,11 @@ class Run:
     def result_print(self, phase):
         print_str = ""
         for p in phase:
+            write(f'⬇️ Eval {p}: MAE & RMSE ')
             for m in ["_mae", "_rmse"]:
                 metric_name = p + m
                 print_str += metric_name + ": {:.6f} ".format(self.results[metric_name])
-        write(print_str)
+                write(f"{self.results[metric_name]:.6f}")
 
     def main(self, exp_part="None_CDR", save_path=None):
         # exp_part 에 따라 모델, 옵티마이져 초기화하고 학습.

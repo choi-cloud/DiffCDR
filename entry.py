@@ -130,7 +130,7 @@ if __name__ == "__main__":
 
     logfile = utils.make_dir(f"{args.experiment}")
     logging.basicConfig(
-        format="%(asctime)s - %(filename)s[line:%(lineno)d] - %(levelname)s: %(message)s",
+        format="%(message)s",
         level=logging.INFO,
         filename=logfile,
         filemode="a",
@@ -138,27 +138,17 @@ if __name__ == "__main__":
     )
 
     utils.log_args_table(args, max_per_line=5, col_width=30)
-    write(f"======= {args.experiment} ======")
+    write(f"{' '+args.experiment+' ':=^{30}}")
     write(f"✅ Task  {args.task}")
     write(f"✅ Ratio {args.ratio}")
     write(f"✅ Model {args.exp_part}")
-    write(f"✅ Item  {args.item_cond}")
 
-    if args.exp_part == "diff_parallel":
-        set_init = ["MF로 초기화", "Aggr로 초기화"]
-        set_loss = ["둘 다 MF", "둘 다 Aggr", "둘 다 MF+Aggr 평균", "따로따로"]
-        set_proj = ["따로 Proj", "합치고 proj", "안 함"]
+    write(f"🍎 emb dim     : {args.emb_dim}")
+    write(f"🍎 Aggrgation  : {args.set_aggr}")
+    write(f"🍎 RQVAE       : {args.RQVAE}")
+    write(f"🍎 start_point : {args.start_point}")
 
-        write(f"⭐ Diff2 초기화  : ({args.set_init}) x_T = {set_init[args.set_init]}")
-        write(f"⭐ Diff loss 계산: ({args.set_loss}) {set_loss[args.set_loss]}")
-        write(f"⭐ Project 위치  : ({args.set_proj}) {set_proj[args.set_proj]}")
-        write(f"⭐ Aggrgation   : {args.set_aggr}")
-
-    write(f"emb dim: {args.emb_dim}")
-    write(f"w = {args.w}")
-    write(f"RQVAE = {args.RQVAE}")
-    write(f"start_point = {args.start_point}")
 
     if not args.process_data_mid and not args.process_data_ready:
         Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth")
-        write(f"==============================")
+        write(f"{'':=^{30}}")
