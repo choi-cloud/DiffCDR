@@ -548,6 +548,46 @@ class Run:
 
         return data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test, graph_data
 
+    def compute_user_graph_embeddings(self, base_model, diff_model, graph_data, use_target=False):
+        if graph_data is None:
+            return None, None
+
+        # 단순 2홉 aggr
+        # simple 2-hop aggregation (user -> items -> users) excluding 1-hop self contribution
+        uv_adj = graph_data["uv_adj"].to(self.device)
+        vu_adj = graph_data["vu_adj"].to(self.device)
+        if use_target:
+            user_feat = base_model.tgt_model.uid_embedding.weight.detach().to(self.device)
+        else:
+            user_feat = base_model.src_model.uid_embedding.weight.detach().to(self.device)
+        with torch.no_grad():
+            # 1-hop: items aggregate from users
+            item_msg = torch.sparse.mm(vu_adj, user_feat)  # [num_items, d]
+
+            # 2-hop: users aggregate from items
+            user_2hop = torch.sparse.mm(uv_adj, item_msg)  # [num_users, d]
+
+            # remove self 1-hop contribution (user -> item -> user)
+            user_deg = torch.sparse.sum(uv_adj, dim=1).to_dense().unsqueeze(1)
+            user_2hop = user_2hop - user_deg * user_feat  # self-removal
+
+            # count real 2-hop neighbors: user -> item -> other_users
+            item_deg = torch.sparse.sum(vu_adj, dim=1).to_dense()
+            item_other = torch.relu(item_deg - 1)  # max(deg-1, 0)
+            two_hop_counts = torch.sparse.mm(uv_adj, item_other[:, None]).to_dense()
+
+            # normalization (avoid division by zero)
+            norm = torch.where(two_hop_counts == 0, torch.ones_like(two_hop_counts), two_hop_counts)
+
+            # final 2-hop embedding
+            user_emb = user_2hop / norm
+
+            # fallback: if no 2-hop neighbors, keep original embedding
+            zero_mask = two_hop_counts.squeeze(1) == 0
+            user_emb[zero_mask] = user_feat[zero_mask]
+
+        return user_emb, None
+        
     def compute_item_aggregation_popularity(self, base_model, graph_data, src_item_num):
         uv_adj = graph_data["uv_adj"].to(self.device)  # [num_users, num_items]
 
@@ -741,6 +781,7 @@ class Run:
             return torch.tensor(loss_ls).mean()
 
         elif diff == True:
+            diff_loss = []
             task_loss_ls = []
 
             # Clear cache at start of epoch (Lazy Update)
@@ -780,11 +821,10 @@ class Run:
                 torch.nn.utils.clip_grad_norm_(list(model[1].parameters()), 1.0)
                 optimizer.step()
 
-
+                diff_loss.append(loss.item())
                 task_loss_ls.append(task_loss.item())
 
-            dummy_loss = torch.zeros(1, device=self.device)
-            return dummy_loss.mean(), torch.tensor(task_loss_ls).mean()
+            return torch.tensor(diff_loss).mean(), torch.tensor(task_loss_ls).mean()
 
     def update_results(self, mae, rmse, phase):
 
@@ -953,10 +993,11 @@ class Run:
         src_graph = graph_train.get("src")
         tgt_graph = graph_train.get("tgt")
         shared_graph = graph_train.get("shared")
-        # smooth_user_emb_src, _ = self.compute_user_graph_embeddings(model, diff_model, src_graph, use_target=False)
-        # smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model, diff_model, tgt_graph, use_target=True)
-        # diff_model.smooth_user_emb_src = smooth_user_emb_src
-        # diff_model.smooth_user_emb_tgt = smooth_user_emb_tgt
+
+        smooth_user_emb_src, _ = self.compute_user_graph_embeddings(model, diff_model, src_graph, use_target=False)
+        smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model, diff_model, tgt_graph, use_target=True)
+        diff_model.smooth_user_emb_src = smooth_user_emb_src
+        diff_model.smooth_user_emb_tgt = smooth_user_emb_tgt
 
         model.graph_src = graph_train.get("src")
         model.graph_tgt = graph_train.get("tgt")

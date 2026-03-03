@@ -226,7 +226,7 @@ class DiffParallel(nn.Module):
         # time embedding
         # self.step_emb_linear = nn.ModuleList([nn.Linear(diff_dim, input_dim)])
 
-        self.cond_emb_linear = nn.ModuleList([nn.Linear(input_dim, input_dim)])
+        self.cond_emb_linear = nn.ModuleList([nn.Linear(input_dim, input_dim), nn.Linear(input_dim, input_dim)])
 
         self.num_layers = 1
 
@@ -242,11 +242,11 @@ class DiffParallel(nn.Module):
         self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
 
         if self.parallel["set_aggr"] == "item_diu":
-            self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
             self.style_ln = nn.LayerNorm(input_dim)
             self.style_scale = nn.Parameter(torch.tensor(0.1))
 
-            self.item_style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.item_style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
             self.item_style_ln = nn.LayerNorm(input_dim)
             self.item_style_scale = nn.Parameter(torch.tensor(0.1))
 
@@ -275,11 +275,11 @@ class DiffParallel(nn.Module):
             self.item_style_scale = nn.Parameter(torch.tensor(0.1))
 
         elif self.parallel["set_aggr"] == "item_iu":
-            self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
             self.style_ln = nn.LayerNorm(input_dim)
             self.style_scale = nn.Parameter(torch.tensor(0.1))
 
-            self.item_style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.item_style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
             self.item_style_ln = nn.LayerNorm(input_dim)
             self.item_style_scale = nn.Parameter(torch.tensor(0.1))
 
@@ -301,7 +301,7 @@ class DiffParallel(nn.Module):
             # t_embedding = self.step_emb_linear[idx](t_embedding)  # linear 통과 -> time embedding
             t_embedding = self.step_mlp(t)
 
-            cond_embedding = self.cond_emb_linear[idx](cond_emb)  # condition(user emb from src) -> linear 통과
+            cond_embedding = self.cond_emb_linear[diff_id](cond_emb)
 
             x = torch.cat([t_embedding, cond_embedding * cond_mask.unsqueeze(-1), x], axis=1)  # * cond_mask.unsqueeze(-1)
 
@@ -480,15 +480,16 @@ def diffusion_loss_fn_parallel(
             final_output_g = model.ln_g(model.linear_g(final_output_g))
 
             uid = uid.long()  # (B,)
+            iid = iid.squeeze(1)
 
             style_src = style_src.to(final_output_m.device)
-            style_u = style_src[uid]  # (B, F)
+            style_u = style_src[uid][:, :2]  # (B, F)
             style_tok = model.style_encoder(style_u)  # (B, D)
             style_tok = model.style_ln(style_tok)  # (B, D)
             style_tok_u = model.style_scale * style_tok  # (B, D)
 
             style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
-            style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
+            style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
             item_style_tok = model.item_style_encoder(style_i)  # (B, D)
             item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
             item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
@@ -582,15 +583,16 @@ def diffusion_loss_fn_parallel(
             final_output_g = model.ln_g(model.linear_g(final_output_g))
 
             uid = uid.long()  # (B,)
+            iid = iid.squeeze(1)
 
             style_src = style_src.to(final_output_m.device)
-            style_u = style_src[uid]  # (B, F)
+            style_u = style_src[uid][:, :2]  # (B, F)
             style_tok = model.style_encoder(style_u)  # (B, D)
             style_tok = model.style_ln(style_tok)  # (B, D)
             style_tok_u = model.style_scale * style_tok  # (B, D)
 
             style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
-            style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
+            style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
             item_style_tok = model.item_style_encoder(style_i)  # (B, D)
             item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
             item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
@@ -630,8 +632,6 @@ def diffusion_loss_fn_parallel(
         # task_loss =   (y_pred - y_input.squeeze().float()).square().sum().sqrt() / y_pred.shape[0]
 
         if model.parallel["set_loss"] == 0:
-            # ! mf 임베딩과 유사해지도록 통일
-            # return F.smooth_l1_loss(x_0_m, final_output) + model.task_lambda * task_loss
             return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
         elif model.parallel["set_loss"] == 1:
             return F.mse_loss(x_0_g, final_output) + model.task_lambda * task_loss
