@@ -291,7 +291,7 @@ class DiffParallel(nn.Module):
 
         if self.rqvae["RQVAE"]:
             self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
-            self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
+            # self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
 
 
     def forward(self, x, t, cond_emb, cond_mask, diff_id):
@@ -394,7 +394,7 @@ def diffusion_loss_fn(model,x_0,cond_emb, iid_emb,y_input,
         return F.smooth_l1_loss(x_0, final_output) + model.task_lambda* task_loss
 
 def diffusion_loss_fn_parallel(
-    model, x_0_m, x_0_g, cond_emb1, cond_emb2, iid_emb, y_input, device, is_task, q_embs1=None, q_embs2=None, style_src=None, uid=None, iid=None, Q_emb1=None, Q_emb2=None
+    model, x_0_m, cond_emb1, iid_emb, y_input, device, is_task, q_embs1=None, style_src=None, uid=None, iid=None, Q_emb1=None
 ):
 
     num_steps = model.num_steps
@@ -419,50 +419,36 @@ def diffusion_loss_fn_parallel(
         ### [TRAIN-DIM] 2. Diff1, Diff2 noised x_0, noise (e) 생성
         if model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
             x_m, e_m = q_x_fn(model, x_0_m, t, device)
-            x_g, e_g = x_m, e_m
         elif model.parallel["set_init"] == 1:  # 각각 MF, Aggr
             x_m, e_m = q_x_fn(model, x_0_m, t, device)
-            x_g, e_g = q_x_fn(model, x_0_g, t, device)
 
         # random mask
         cond_mask1 = 1 * (torch.rand(cond_emb1.shape[0], device=device) <= mask_rate)
         cond_mask1 = 1 - cond_mask1.int()
 
-        cond_mask2 = 1 * (torch.rand(cond_emb2.shape[0], device=device) <= mask_rate)
-        cond_mask2 = 1 - cond_mask2.int()
-
         # [TRAIN-DIM] 3. Diff1, Diff2 -> noise 예측
         output1 = model(x_m, t.squeeze(-1), cond_emb1, cond_mask1, diff_id=0)  # x_t, c1 -> noise
-        output2 = model(x_g, t.squeeze(-1), cond_emb2, cond_mask2, diff_id=1)  # x_t, c2 -> noise
 
-        return F.mse_loss(x_0_m, output1) + F.mse_loss(x_0_g, output2)  # 예측 노이즈와 실제 노이즈 비교 L1 loss
+        return F.mse_loss(x_0_m, output1)  # 예측 노이즈와 실제 노이즈 비교 L1 loss
 
     elif is_task:  # task loss ALM 수행
         if model.rqvae["RQVAE"] == True:
             quantized1, all_level_vectors1, _ = model.rq_mf(cond_emb1)  # [L, B, D]
-            quantized2, all_level_vectors2, _ = model.rq_aggr(cond_emb2)  # [L, B, D]
 
             if model.rqvae["start_point"] == "src_u":
                 final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, q_embs1, iid_emb, device, diff_id=0)
-                final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb2, q_embs2, iid_emb, device, diff_id=1)
             elif model.rqvae["start_point"] == "quant_u":
                 final_output_m, iid_emb = p_sample_loop_parallel(model, Q_emb1, q_embs1, iid_emb, device, diff_id=0)
-                final_output_g, iid_emb = p_sample_loop_parallel(model, Q_emb2, q_embs2, iid_emb, device, diff_id=1)
             elif model.rqvae["start_point"] == "noise":
                 noise1 = torch.randn_like(cond_emb1)
-                noise2 = torch.randn_like(cond_emb2)
                 final_output_m, iid_emb = p_sample_loop_parallel(model, noise1, q_embs1, iid_emb, device, diff_id=0)
-                final_output_g, iid_emb = p_sample_loop_parallel(model, noise2, q_embs2, iid_emb, device, diff_id=1)
 
         else:
             if model.rqvae["start_point"] == "noise":
                 noise1 = torch.randn_like(cond_emb1)
-                noise2 = torch.randn_like(cond_emb2)
                 final_output_m, iid_emb = p_sample_loop(model, noise1, cond_emb1, iid_emb, device, diff_id=0)
-                final_output_g, iid_emb = p_sample_loop(model, noise2, cond_emb2, iid_emb, device, diff_id=1)
             else:
                 final_output_m, iid_emb = p_sample_loop(model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0)
-                final_output_g, iid_emb = p_sample_loop(model, cond_emb2, cond_emb2, iid_emb, device, diff_id=1)
 
 
         ### [TRAIN-ALM] 2. Diff1, Diff2 결과 aggregation
@@ -580,7 +566,6 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_aggr"] == "item_iu":
             iid_emb = model.ln_iid(iid_emb)
             final_output_m = model.ln_m(model.linear_m(final_output_m))
-            final_output_g = model.ln_g(model.linear_g(final_output_g))
 
             uid = uid.long()  # (B,)
             iid = iid.squeeze(1)
@@ -597,7 +582,7 @@ def diffusion_loss_fn_parallel(
             item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
             item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
 
-            tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+            tokens = torch.stack([iid_emb, final_output_m, style_tok_u, item_style_tok], dim=1)
             out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
             final_output = out[:, 0, :]  # (B, D)
 
@@ -632,7 +617,7 @@ def diffusion_loss_fn_parallel(
         # task_loss =   (y_pred - y_input.squeeze().float()).square().sum().sqrt() / y_pred.shape[0]
 
         if model.parallel["set_loss"] == 0:
-            return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
+            return F.mse_loss(x_0_m, final_output_m) + model.task_lambda * task_loss
         elif model.parallel["set_loss"] == 1:
             return F.mse_loss(x_0_g, final_output) + model.task_lambda * task_loss
         elif model.parallel["set_loss"] == 2:

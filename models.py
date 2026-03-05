@@ -276,52 +276,52 @@ class MFBasedModel(torch.nn.Module):
             tgt_uid, iid_input, y_input = x
 
             tgt_emb1 = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
-            tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)  # Aggr
+            # tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)  # Aggr
             # tgt_emb2 = self.compute_user_graph_embeddings(self.graph_tgt, use_target=True, device=device)[tgt_uid]
             
             # Diff1: MF 유저 임베딩, Diff2: Aggr 유저 임베딩
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
-            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
+            # src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
             # src_uid_emb2 = self.compute_user_graph_embeddings(self.graph_src, use_target=False, device=device)[tgt_uid]
             
             cond_emb1 = src_uid_emb1
-            cond_emb2 = src_uid_emb2
+            # cond_emb2 = src_uid_emb2
 
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
 
             # ! mf 임베딩과 aggr 임베딩 양자화
             if diff_model.rqvae["RQVAE"] == True:
                 quantized1, all_level_vectors1, rq_loss1 = diff_model.rq_mf(cond_emb1)  # [L, B, D]
-                quantized2, all_level_vectors2, rq_loss2 = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
+                # quantized2, all_level_vectors2, rq_loss2 = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
             else:
                 all_level_vectors1 = cond_emb1
-                all_level_vectors2 = cond_emb2
+                # all_level_vectors2 = cond_emb2
                 quantized1, quantized2 = None, None
 
             # is_task=False: 노이즈 예측 , is_task=True: ALS + task 로스
             loss = Diff.diffusion_loss_fn_parallel(
                 diff_model,
                 tgt_emb1,
-                tgt_emb2,
+                # tgt_emb2,
                 # ! diff_loss 계산 시에는 양자화하지 않은 기존 소스 임베딩을 컨디션으로 이용
                 src_uid_emb1,   # 시작점
-                src_uid_emb2,
+                # src_uid_emb2,
                 iid_emb,
                 y_input,
                 device,
                 is_task,
                 # ! is_taks가 True일 때만 양자화된 컨디션을 시간축에 따라 이용
                 q_embs1=all_level_vectors1,
-                q_embs2=all_level_vectors2,
+                # q_embs2=all_level_vectors2,
                 style_src=style_src,
                 uid=tgt_uid,
                 iid=iid_input,
                 Q_emb1=quantized1,
-                Q_emb2=quantized2,                
+                # Q_emb2=quantized2,                
             )
 
             if diff_model.rqvae["RQVAE"] == True:
-                total_loss = loss + diff_model.rqvae["alpha_rq"] * (rq_loss1 + rq_loss2)
+                total_loss = loss + diff_model.rqvae["alpha_rq"] * (rq_loss1)
             else:
                 total_loss = loss
 
@@ -341,29 +341,21 @@ class MFBasedModel(torch.nn.Module):
 
             if diff_model.rqvae["RQVAE"] == True:
                 quantized1, all_level_vectors1, _ = diff_model.rq_mf(cond_emb1)  # [L, B, D]
-                quantized2, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
 
                 if diff_model.rqvae["start_point"] == "src_u":
                     trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0)
-                    trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1)
                 elif diff_model.rqvae["start_point"] == "quant_u":
                     trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, quantized1, all_level_vectors1, iid_emb, device, diff_id=0)
-                    trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, quantized2, all_level_vectors2, iid_emb, device, diff_id=1)
                 elif diff_model.rqvae["start_point"] == "noise":
                     noise1 = torch.randn_like(src_uid_emb1)
-                    noise2 = torch.randn_like(src_uid_emb2)
                     trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, noise1, all_level_vectors1, iid_emb, device, diff_id=0)
-                    trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, noise2, all_level_vectors2, iid_emb, device, diff_id=1)
 
             else:
                 if diff_model.rqvae["start_point"] == "noise":
                     noise1 = torch.randn_like(src_uid_emb1)
-                    noise2 = torch.randn_like(src_uid_emb2)
                     trans_emb_m, iid_emb = Diff.p_sample_loop(diff_model, noise1, src_uid_emb1, iid_emb, device, diff_id=0)
-                    trans_emb_g, iid_emb = Diff.p_sample_loop(diff_model, noise2, src_uid_emb2, iid_emb, device, diff_id=1)
                 else:
                     trans_emb_m, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb1, src_uid_emb1, iid_emb, device, diff_id=0)
-                    trans_emb_g, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb2, src_uid_emb2, iid_emb, device, diff_id=1)
 
 
 
@@ -483,7 +475,6 @@ class MFBasedModel(torch.nn.Module):
             elif diff_model.parallel["set_aggr"] == "item_iu":
                 iid_emb = diff_model.ln_iid(iid_emb)
                 final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
-                final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
 
                 uid = tgt_uid.long()
                 iid_input = iid_input.squeeze(1)
@@ -500,7 +491,7 @@ class MFBasedModel(torch.nn.Module):
                 item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
                 item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
 
-                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+                tokens = torch.stack([iid_emb, final_output_m, style_tok_u, item_style_tok], dim=1)
                 out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
                 final_output = out[:, 0, :]  # (B, D)
 
