@@ -457,7 +457,7 @@ class MFBasedModel(torch.nn.Module):
                     final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
 
                 style_tgt_item = diff_model.style_tgt_item.to(trans_emb_m.device)  # [I_total, F_item]
-                style_i = style_tgt_item[iid_input.squeeze(1)]  # (B, F_item)
+                style_i = style_tgt_item[iid_input][:, :2]  # (B, F_item)
                 item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
                 item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
                 item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
@@ -482,7 +482,7 @@ class MFBasedModel(torch.nn.Module):
                 uid = tgt_uid.long()  # (B,)
 
                 style_src = style_src.to(trans_emb_m.device)
-                style_u = style_src[uid]  # (B, F)
+                style_u = style_src[uid][:, :2]  # (B, F)
                 style_tok = diff_model.style_encoder(style_u)  # (B, D)
                 style_tok = diff_model.style_ln(style_tok)  # (B, D)
                 style_tok_u = diff_model.style_scale * style_tok  # (B, D)
@@ -508,7 +508,7 @@ class MFBasedModel(torch.nn.Module):
                 uid = tgt_uid.long()  # (B,)
 
                 style_tgt_item = diff_model.style_tgt_item.to(trans_emb_m.device)  # [I_total, F_item]
-                style_i = style_tgt_item[iid_input.squeeze(1)]  # (B, F_item)
+                style_i = style_tgt_item[iid_input][:, :2]  # (B, F_item)
                 item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
                 item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
                 item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
@@ -563,7 +563,7 @@ class MFBasedModel(torch.nn.Module):
                 uid = tgt_uid.long()  # (B,)
 
                 style_src = style_src.to(trans_emb_m.device)
-                style_u = style_src[uid]  # (B, F)
+                style_u = style_src[uid][:, :2]  # (B, F)
                 style_tok = diff_model.style_encoder(style_u)  # (B, D)
                 style_tok = diff_model.style_ln(style_tok)  # (B, D)
                 style_tok_u = diff_model.style_scale * style_tok  # (B, D)

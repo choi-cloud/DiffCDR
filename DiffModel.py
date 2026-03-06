@@ -248,21 +248,21 @@ class DiffParallel(nn.Module):
             self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
 
         elif self.parallel["set_aggr"] == "item_di":
-            self.item_style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.item_style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
             self.item_style_ln = nn.LayerNorm(input_dim)
             self.item_style_scale = nn.Parameter(torch.tensor(0.1))
 
             self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
 
         elif self.parallel["set_aggr"] == "item_du":
-            self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
             self.style_ln = nn.LayerNorm(input_dim)
             self.style_scale = nn.Parameter(torch.tensor(0.1))
 
             self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
 
         elif self.parallel["set_aggr"] == "item_i":
-            self.item_style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.item_style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
             self.item_style_ln = nn.LayerNorm(input_dim)
             self.item_style_scale = nn.Parameter(torch.tensor(0.1))
 
@@ -276,7 +276,7 @@ class DiffParallel(nn.Module):
             self.item_style_scale = nn.Parameter(torch.tensor(0.1))
 
         elif self.parallel["set_aggr"] == "item_u":
-            self.style_encoder = nn.Sequential(nn.Linear(9, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
             self.style_ln = nn.LayerNorm(input_dim)
             self.style_scale = nn.Parameter(torch.tensor(0.1))
 
@@ -540,7 +540,7 @@ def diffusion_loss_fn_parallel(
                 final_output_g = model.ln_g(model.linear_g(final_output_g))
 
             style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
-            style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
+            style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
             item_style_tok = model.item_style_encoder(style_i)  # (B, D)
             item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
             item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
@@ -565,7 +565,7 @@ def diffusion_loss_fn_parallel(
             uid = uid.long()  # (B,)
 
             style_src = style_src.to(final_output_m.device)
-            style_u = style_src[uid]  # (B, F)
+            style_u = style_src[uid][:, :2]  # (B, F)
             style_tok = model.style_encoder(style_u)  # (B, D)
             style_tok = model.style_ln(style_tok)  # (B, D)
             style_tok_u = model.style_scale * style_tok  # (B, D)
@@ -591,7 +591,7 @@ def diffusion_loss_fn_parallel(
             uid = uid.long()  # (B,)
 
             style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
-            style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
+            style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
             item_style_tok = model.item_style_encoder(style_i)  # (B, D)
             item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
             item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
@@ -646,7 +646,7 @@ def diffusion_loss_fn_parallel(
             uid = uid.long()  # (B,)
 
             style_src = style_src.to(final_output_m.device)
-            style_u = style_src[uid]  # (B, F)
+            style_u = style_src[uid][:, :2]  # (B, F)
             style_tok = model.style_encoder(style_u)  # (B, D)
             style_tok = model.style_ln(style_tok)  # (B, D)
             style_tok_u = model.style_scale * style_tok  # (B, D)
