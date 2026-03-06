@@ -279,6 +279,59 @@ class DiffParallel(nn.Module):
             self.style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
             self.style_ln = nn.LayerNorm(input_dim)
             self.style_scale = nn.Parameter(torch.tensor(0.1))
+    
+        
+        elif self.parallel["set_aggr"] == "mapping": #src stype -> tgt style로 맵핑
+            self.user_style_mapper = nn.Sequential(nn.Linear(2, 2))
+
+            self.map_user_style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.tgt_item_style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+
+            self.map_user_style_ln = nn.LayerNorm(input_dim)
+            self.tgt_item_style_ln = nn.LayerNorm(input_dim)
+
+            self.map_user_style_scale = nn.Parameter(torch.tensor(0.1))
+            self.tgt_item_style_scale = nn.Parameter(torch.tensor(0.1))
+
+            self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
+
+        elif self.parallel["set_aggr"] == "mapping_dx": #src stype -> tgt style로 맵핑
+            self.user_style_mapper = nn.Sequential(nn.Linear(2, 2))
+
+            self.map_user_style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.tgt_item_style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+
+            self.map_user_style_ln = nn.LayerNorm(input_dim)
+            self.tgt_item_style_ln = nn.LayerNorm(input_dim)
+
+            self.map_user_style_scale = nn.Parameter(torch.tensor(0.1))
+            self.tgt_item_style_scale = nn.Parameter(torch.tensor(0.1))
+
+        elif self.parallel["set_aggr"] == "domainmap": #src stype + domain bias -> tgt style로 맵핑
+            self.user_style_mapper = nn.Sequential(nn.Linear(4, 2)) 
+
+            self.map_user_style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.tgt_item_style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+
+            self.map_user_style_ln = nn.LayerNorm(input_dim)
+            self.tgt_item_style_ln = nn.LayerNorm(input_dim)
+
+            self.map_user_style_scale = nn.Parameter(torch.tensor(0.1))
+            self.tgt_item_style_scale = nn.Parameter(torch.tensor(0.1))
+
+            self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
+
+        elif self.parallel["set_aggr"] == "domainmap_dx": #src stype + domain bias -> tgt style로 맵핑
+            self.user_style_mapper = nn.Sequential(nn.Linear(4, 2)) 
+
+            self.map_user_style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+            self.tgt_item_style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+
+            self.map_user_style_ln = nn.LayerNorm(input_dim)
+            self.tgt_item_style_ln = nn.LayerNorm(input_dim)
+
+            self.map_user_style_scale = nn.Parameter(torch.tensor(0.1))
+            self.tgt_item_style_scale = nn.Parameter(torch.tensor(0.1))
 
 
         if self.rqvae["RQVAE"]:
@@ -660,10 +713,150 @@ def diffusion_loss_fn_parallel(
 
             y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
 
+        elif model.parallel["set_aggr"] == "nobias":
+            iid_emb = model.ln_iid(iid_emb)
+            final_output_m = model.ln_m(model.linear_m(final_output_m))
+            final_output_g = model.ln_g(model.linear_g(final_output_g))
 
+            tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
+            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            final_output = out[:, 0, :]  # (B, D)
+
+            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+
+
+        elif model.parallel["set_aggr"] == "mapping": #src stype -> tgt style로 맵핑
+            iid_emb = model.ln_iid(iid_emb)
+            final_output_m = model.ln_m(model.linear_m(final_output_m))
+            final_output_g = model.ln_g(model.linear_g(final_output_g))
+
+            uid = uid.long()  # (B,)
+            iid = iid.squeeze(1)
+
+            # src -> tgt style mapping 
+            style_src = style_src.to(final_output_m.device)
+            style_u = style_src[uid][:, :2]
+            mapped_style = model.user_style_mapper(style_u)
+            mapped_style_tok = model. map_user_style_encoder(mapped_style)
+            mapped_style_tok = model.map_user_style_ln(mapped_style_tok)  # (B, D)
+            mapped_style_tok = model.map_user_style_scale * mapped_style_tok 
+
+            style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+            style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
+            item_style_tok = model.tgt_item_style_encoder(style_i)  # (B, D)
+            item_style_tok = model.tgt_item_style_ln(item_style_tok)  # (B, D)
+            item_style_tok = model.tgt_item_style_scale * item_style_tok  # (B, D)
+
+            tokens = torch.stack([iid_emb, final_output_m, final_output_g, mapped_style_tok, item_style_tok], dim=1)
+            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            final_output = out[:, 0, :]  # (B, D)
+
+            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+            mu_t = model.tgt_global_bias
+            y_pred = y_pred + mu_t
+
+            mapping_loss = F.mse_loss(mapped_style, model.style_tgt_user[uid, :2])
+        
+        elif model.parallel["set_aggr"] == "mapping_dx": #src stype -> tgt style로 맵핑
+            iid_emb = model.ln_iid(iid_emb)
+            final_output_m = model.ln_m(model.linear_m(final_output_m))
+            final_output_g = model.ln_g(model.linear_g(final_output_g))
+
+            uid = uid.long()  # (B,)
+            iid = iid.squeeze(1)
+
+            # src -> tgt style mapping 
+            style_src = style_src.to(final_output_m.device)
+            style_u = style_src[uid][:, :2]
+            mapped_style = model.user_style_mapper(style_u)
+
+            mapping_loss = F.mse_loss(mapped_style, model.style_tgt_user[uid, :2])
+
+            mapped_style_tok = model. map_user_style_encoder(mapped_style.detach())
+            mapped_style_tok = model.map_user_style_ln(mapped_style_tok)  # (B, D)
+            mapped_style_tok = model.map_user_style_scale * mapped_style_tok 
+
+            style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+            style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
+            item_style_tok = model.tgt_item_style_encoder(style_i)  # (B, D)
+            item_style_tok = model.tgt_item_style_ln(item_style_tok)  # (B, D)
+            item_style_tok = model.tgt_item_style_scale * item_style_tok  # (B, D)
+
+            tokens = torch.stack([iid_emb, final_output_m, final_output_g, mapped_style_tok, item_style_tok], dim=1)
+            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            final_output = out[:, 0, :]  # (B, D)
+
+            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+
+        elif model.parallel["set_aggr"] == "domainmap": #src stype -> tgt style로 맵핑
+            iid_emb = model.ln_iid(iid_emb)
+            final_output_m = model.ln_m(model.linear_m(final_output_m))
+            final_output_g = model.ln_g(model.linear_g(final_output_g))
+
+            uid = uid.long()  # (B,)
+            iid = iid.squeeze(1)
+
+            # src -> tgt style mapping 
+            style_src = style_src.to(final_output_m.device)
+            style_u = style_src[uid][:, :2]
+            style_u_d = torch.cat([style_u, model.style_tgt_domain[:2].unsqueeze(0).expand(style_u.size(0), -1)], dim=1)
+            mapped_style = model.user_style_mapper(style_u_d)
+            mapped_style_tok = model. map_user_style_encoder(mapped_style)
+            mapped_style_tok = model.map_user_style_ln(mapped_style_tok)  # (B, D)
+            mapped_style_tok = model.map_user_style_scale * mapped_style_tok 
+
+            style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+            style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
+            item_style_tok = model.tgt_item_style_encoder(style_i)  # (B, D)
+            item_style_tok = model.tgt_item_style_ln(item_style_tok)  # (B, D)
+            item_style_tok = model.tgt_item_style_scale * item_style_tok  # (B, D)
+
+            tokens = torch.stack([iid_emb, final_output_m, final_output_g, mapped_style_tok, item_style_tok], dim=1)
+            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            final_output = out[:, 0, :]  # (B, D)
+
+            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+            mu_t = model.tgt_global_bias
+            y_pred = y_pred + mu_t
+
+            mapping_loss = F.mse_loss(mapped_style, model.style_tgt_user[uid, :2])
+
+        elif model.parallel["set_aggr"] == "domainmap_dx": #src stype -> tgt style로 맵핑
+            iid_emb = model.ln_iid(iid_emb)
+            final_output_m = model.ln_m(model.linear_m(final_output_m))
+            final_output_g = model.ln_g(model.linear_g(final_output_g))
+
+            uid = uid.long()  # (B,)
+            iid = iid.squeeze(1)
+
+            # src -> tgt style mapping 
+            style_src = style_src.to(final_output_m.device)
+            style_u = style_src[uid][:, :2]
+            style_u_d = torch.cat([style_u, model.style_tgt_domain[:2].unsqueeze(0).expand(style_u.size(0), -1)], dim=1)
+            mapped_style = model.user_style_mapper(style_u_d)
+            mapping_loss = F.mse_loss(mapped_style, model.style_tgt_user[uid, :2])
+
+            mapped_style_tok = model. map_user_style_encoder(mapped_style.detach())
+            mapped_style_tok = model.map_user_style_ln(mapped_style_tok)  # (B, D)
+            mapped_style_tok = model.map_user_style_scale * mapped_style_tok 
+
+            style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+            style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
+            item_style_tok = model.tgt_item_style_encoder(style_i)  # (B, D)
+            item_style_tok = model.tgt_item_style_ln(item_style_tok)  # (B, D)
+            item_style_tok = model.tgt_item_style_scale * item_style_tok  # (B, D)
+
+            tokens = torch.stack([iid_emb, final_output_m, final_output_g, mapped_style_tok, item_style_tok], dim=1)
+            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            final_output = out[:, 0, :]  # (B, D)
+
+            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
 
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
+
+        if model.parallel["set_aggr"] in ["mapping", "mapping_dx", "domainmap", "domainmap_dx"]:
+            task_loss += (10 * mapping_loss)
 
         # RMSE
         # task_loss =   (y_pred - y_input.squeeze().float()).square().sum().sqrt() / y_pred.shape[0]

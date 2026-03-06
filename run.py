@@ -990,6 +990,9 @@ class Run:
 
         diff_model.style_tgt_item = style_tgt_item
 
+        diff_model.style_tgt_user = style_tgt_user.cuda() 
+        diff_model.style_tgt_domain = style_tgt_domain.cuda()
+
         src_graph = graph_train.get("src")
         tgt_graph = graph_train.get("tgt")
         shared_graph = graph_train.get("shared")
@@ -1137,6 +1140,18 @@ class Run:
                 data_src=data_src, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, device="cpu",
                 cache_path=cache_path
             )
+        
+        print(f"\n타겟 도메인 내 유저의 레이팅 스타일 정보 추출\n")
+        cache_path = f"{self.stylecache_root}_tgt_user.pt"
+        if os.path.exists(cache_path):
+            ckpt = torch.load(cache_path, map_location="cpu", weights_only=True)
+            style_tgt_user = ckpt["style"]
+            info = ckpt["info"]
+        else: 
+            style_tgt_user, info = build_src_user_rating_style_from_loader(
+                data_src=data_tgt, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, device="cpu",
+                cache_path=cache_path
+            )
 
         print(f"\n타겟 도메인 내 아이템의 레이팅 스타일 정보 추출\n")
         cache_path = f"{self.stylecache_root}_tgt_item.pt"
@@ -1150,7 +1165,18 @@ class Run:
                 cache_path=cache_path
             )
 
-
+        print(f"\n타겟 도메인 전체 레이팅 스타일 정보 추출\n")
+        cache_path = f"{self.stylecache_root}_tgt_domain.pt"
+        if os.path.exists(cache_path):
+            ckpt = torch.load(cache_path, map_location="cpu", weights_only=True)
+            style_tgt_domain = ckpt["style_tgt_domain"]
+            info_tgt_domain = ckpt["info_tgt_domain"]
+        else:
+            style_tgt_domain, info_tgt_domain = build_tgt_domain_rating_style_from_loader(
+                data_tgt=data_tgt, rating_min=1.0, rating_max=5.0, device="cpu",
+                cache_path=cache_path
+            )
+        
         criterion = torch.nn.MSELoss()
 
         if exp_part == "None_CDR":
@@ -1234,7 +1260,7 @@ class Run:
             print("None_CDR model loaded")
             # optimizer_diff: DiffParallel 의 파라미터만 포함, model에 있는 user/item embedding update X
             self.Diff_Parallel(
-                model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"], style_src, style_tgt_item
+                model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"], style_src, style_tgt_item, style_tgt_user, style_tgt_domain
             )
             self.result_print(["diff_parallel"])
 
@@ -1388,6 +1414,103 @@ def build_src_user_rating_style_from_loader(
 
     return style, info
 
+@torch.no_grad()
+def build_tgt_domain_rating_style_from_loader(
+    data_tgt,
+    rating_min: float = 1.0,
+    rating_max: float = 5.0,
+    device: str = "cpu",
+    cache_path="",
+):
+    """
+    data_tgt yields: (X, y)
+      - X: [B,2]
+      - y: [B,1] rating
+
+    Returns
+    -------
+    style_tgt_domain: FloatTensor [9]
+    info: dict
+    """
+
+    # 누적 통계
+    sum_r = torch.tensor(0.0, dtype=torch.float64)
+    sumsq_r = torch.tensor(0.0, dtype=torch.float64)
+    cnt = torch.tensor(0.0, dtype=torch.float64)
+
+    rmin = torch.tensor(float("inf"), dtype=torch.float64)
+    rmax = torch.tensor(float("-inf"), dtype=torch.float64)
+
+    cnt_min = torch.tensor(0.0, dtype=torch.float64)
+    cnt_max = torch.tensor(0.0, dtype=torch.float64)
+
+    for _, y in data_tgt:
+        r = y.detach().to("cpu").double().view(-1)
+
+        if r.numel() == 0:
+            continue
+
+        sum_r += r.sum()
+        sumsq_r += (r * r).sum()
+        cnt += r.numel()
+
+        rmin = torch.minimum(rmin, r.min())
+        rmax = torch.maximum(rmax, r.max())
+
+        cnt_min += (r <= rating_min + 1e-12).double().sum()
+        cnt_max += (r >= rating_max - 1e-12).double().sum()
+
+    if cnt == 0:
+        raise ValueError("No ratings found in data_tgt.")
+
+    # 통계 계산
+    mean = sum_r / cnt
+    ex2 = sumsq_r / cnt
+    var = torch.clamp(ex2 - mean * mean, min=0.0)
+    std = torch.sqrt(var + 1e-12)
+
+    frac_min = cnt_min / cnt
+    frac_max = cnt_max / cnt
+    frac_extreme = (cnt_min + cnt_max) / cnt
+
+    # [9]
+    style_tgt_domain = torch.tensor(
+        [
+            mean,
+            var,
+            std,
+            rmin,
+            rmax,
+            cnt,
+            frac_min,
+            frac_max,
+            frac_extreme,
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+
+    info = {
+        "feature_names": [
+            "mean", "var", "std",
+            "min", "max", "cnt",
+            "frac_min", "frac_max", "frac_extreme"
+        ],
+        "rating_min": rating_min,
+        "rating_max": rating_max,
+    }
+
+    if cache_path:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        torch.save(
+            {
+                "style_tgt_domain": style_tgt_domain.cpu(),
+                "info_tgt_domain": info,
+            },
+            cache_path,
+        )
+
+    return style_tgt_domain, info
 
 @torch.no_grad()
 def build_tgt_item_rating_style_from_loader(

@@ -151,7 +151,10 @@ if __name__ == "__main__":
     write(f"🍎 RQVAE       : {args.RQVAE}")
     write(f"🍎 start_point : {args.start_point}")
 
+    write(f"🍏 Bias        : {args.set_aggr}")
 
     if not args.process_data_mid and not args.process_data_ready:
         Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth")
         write(f"{'':=^{30}}")
+
+ 
