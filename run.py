@@ -94,6 +94,7 @@ class Run:
             "set_init": config["set_init"],
             "set_proj": config["set_proj"],
             "set_aggr": config["set_aggr"],
+            "aggregation": config["aggregation"],
         }
         
         self.rqvae_setting = {
@@ -984,12 +985,11 @@ class Run:
             self.update_results(mae, rmse, "diff")
             write(f"DIFF LOSS {loss.item():>10.6f} |  TASK LOSS {task_loss.item():>10.6f} | MAE: {mae:>10.6f} | RMSE: {rmse:>10.6f}")
 
-    def Diff_Parallel(self, model, diff_model, data_diff, data_test, optimizer, graph_train, graph_test, style_src, style_tgt_item, style_tgt_user, style_tgt_domain):
+    def Diff_Parallel(self, model, diff_model, data_diff, data_test, optimizer, graph_train, graph_test, style_src, style_tgt_item):
         write(f"{' Diff_Parallel ':=^{30}}")
 
         diff_model.style_tgt_item = style_tgt_item
 
-        
         src_graph = graph_train.get("src")
         tgt_graph = graph_train.get("tgt")
         shared_graph = graph_train.get("shared")

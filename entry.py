@@ -45,6 +45,7 @@ def prepare_1():
     parser.add_argument("--set_init", type=int, default=1, help="디퓨전2의 초기 x_T 설정, 0: MF, 1: aggr")
     parser.add_argument("--set_proj", type=int, default=1, help="diff 결과 proj 위치 - 0: 따로, 1: aggr 이후 같이")
     parser.add_argument("--set_aggr", type=str, default="item_diu", help="[item_diu, item_d, item_i, item_u, item_di, item_du, item_iu]")
+    parser.add_argument("--aggregation", type=str2bool, default=True, help="MF+Aggr or MF only")
 
     # RQVAE(code_dim=input_dim, num_levels=4, codebook_size=256)
     parser.add_argument("--codebook_num", type=int, default=4, help="RQVAE 코드북 개수(level)")
@@ -82,6 +83,7 @@ def prepare_2(args, config_path):
         config["set_init"] = int(args.set_init)
         config["set_proj"] = int(args.set_proj)
         config["set_aggr"] = args.set_aggr
+        config["aggregation"] = args.aggregation
         config["item_cond"] = args.item_cond
         config["codebook_num"] = args.codebook_num
         config["codebook_size"] = args.codebook_size
@@ -144,7 +146,8 @@ if __name__ == "__main__":
     write(f"✅ Model {args.exp_part}")
 
     write(f"🍎 emb dim     : {args.emb_dim}")
-    write(f"🍎 Aggrgation  : {args.set_aggr}")
+    write(f"🍎 bias  : {args.set_aggr}")
+    write(f"🍎 aggregation  : {args.aggregation}")
     write(f"🍎 RQVAE       : {args.RQVAE}")
     write(f"🍎 start_point : {args.start_point}")
 

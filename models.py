@@ -276,13 +276,14 @@ class MFBasedModel(torch.nn.Module):
             tgt_uid, iid_input, y_input = x
 
             tgt_emb1 = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
-            tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)  # Aggr
-            # tgt_emb2 = self.compute_user_graph_embeddings(self.graph_tgt, use_target=True, device=device)[tgt_uid]
-            
-            # Diff1: MF 유저 임베딩, Diff2: Aggr 유저 임베딩
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
-            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
-            # src_uid_emb2 = self.compute_user_graph_embeddings(self.graph_src, use_target=False, device=device)[tgt_uid]
+
+            if diff_model.aggregation:
+                tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)  # Aggr
+                src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
+            else:
+                tgt_emb2 = torch.zeros_like(tgt_emb1)
+                src_uid_emb2 = torch.zeros_like(src_uid_emb1)
             
             cond_emb1 = src_uid_emb1
             cond_emb2 = src_uid_emb2
@@ -292,7 +293,10 @@ class MFBasedModel(torch.nn.Module):
             # ! mf 임베딩과 aggr 임베딩 양자화
             if diff_model.rqvae["RQVAE"] == True:
                 quantized1, all_level_vectors1, rq_loss1 = diff_model.rq_mf(cond_emb1)  # [L, B, D]
-                quantized2, all_level_vectors2, rq_loss2 = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
+                if diff_model.aggregation:
+                    quantized2, all_level_vectors2, rq_loss2 = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
+                else:
+                    quantized2, all_level_vectors2, rq_loss2 = None, cond_emb2, 0.0
             else:
                 all_level_vectors1 = cond_emb1
                 all_level_vectors2 = cond_emb2
@@ -321,7 +325,8 @@ class MFBasedModel(torch.nn.Module):
             )
 
             if diff_model.rqvae["RQVAE"] == True:
-                total_loss = loss + diff_model.rqvae["alpha_rq"] * (rq_loss1 + rq_loss2)
+                rq_loss = rq_loss1 + rq_loss2 if diff_model.aggregation else rq_loss1
+                total_loss = loss + diff_model.rqvae["alpha_rq"] * rq_loss
             else:
                 total_loss = loss
 
@@ -332,8 +337,11 @@ class MFBasedModel(torch.nn.Module):
             tgt_uid, iid_input, _ = x
 
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
-            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
-            # src_uid_emb2 = self.compute_user_graph_embeddings(self.graph_src, use_target=False)[tgt_uid]
+
+            if diff_model.aggregation:
+                src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
+            else:
+                src_uid_emb2 = torch.zeros_like(src_uid_emb1)
 
             cond_emb1 = src_uid_emb1
             cond_emb2 = src_uid_emb2
@@ -341,29 +349,38 @@ class MFBasedModel(torch.nn.Module):
 
             if diff_model.rqvae["RQVAE"] == True:
                 quantized1, all_level_vectors1, _ = diff_model.rq_mf(cond_emb1)  # [L, B, D]
-                quantized2, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
+                if diff_model.aggregation:
+                    quantized2, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
 
                 if diff_model.rqvae["start_point"] == "src_u":
                     trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0)
-                    trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1)
+                    if diff_model.aggregation:
+                        trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1)
                 elif diff_model.rqvae["start_point"] == "quant_u":
                     trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, quantized1, all_level_vectors1, iid_emb, device, diff_id=0)
-                    trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, quantized2, all_level_vectors2, iid_emb, device, diff_id=1)
+                    if diff_model.aggregation:
+                        trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, quantized2, all_level_vectors2, iid_emb, device, diff_id=1)
                 elif diff_model.rqvae["start_point"] == "noise":
                     noise1 = torch.randn_like(src_uid_emb1)
-                    noise2 = torch.randn_like(src_uid_emb2)
                     trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, noise1, all_level_vectors1, iid_emb, device, diff_id=0)
-                    trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, noise2, all_level_vectors2, iid_emb, device, diff_id=1)
+                    if diff_model.aggregation:
+                        noise2 = torch.randn_like(src_uid_emb2)
+                        trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, noise2, all_level_vectors2, iid_emb, device, diff_id=1)
 
             else:
                 if diff_model.rqvae["start_point"] == "noise":
                     noise1 = torch.randn_like(src_uid_emb1)
-                    noise2 = torch.randn_like(src_uid_emb2)
                     trans_emb_m, iid_emb = Diff.p_sample_loop(diff_model, noise1, src_uid_emb1, iid_emb, device, diff_id=0)
-                    trans_emb_g, iid_emb = Diff.p_sample_loop(diff_model, noise2, src_uid_emb2, iid_emb, device, diff_id=1)
+                    if diff_model.aggregation:
+                        noise2 = torch.randn_like(src_uid_emb2)
+                        trans_emb_g, iid_emb = Diff.p_sample_loop(diff_model, noise2, src_uid_emb2, iid_emb, device, diff_id=1)
                 else:
                     trans_emb_m, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb1, src_uid_emb1, iid_emb, device, diff_id=0)
-                    trans_emb_g, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb2, src_uid_emb2, iid_emb, device, diff_id=1)
+                    if diff_model.aggregation:
+                        trans_emb_g, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb2, src_uid_emb2, iid_emb, device, diff_id=1)
+
+            if not diff_model.aggregation:
+                trans_emb_g = torch.zeros_like(trans_emb_m)
 
 
 
@@ -371,17 +388,26 @@ class MFBasedModel(torch.nn.Module):
             ### [TEST] 2. Diff1, Diff2 결과 aggregation
             if diff_model.parallel["set_aggr"] == "attn":
                 # ! 어텐션으로 최종 임베딩 종합
-                trans_emb = diff_model.attn_layer(torch.cat([trans_emb_m, trans_emb_g], dim=1))
+                if diff_model.aggregation:
+                    trans_emb = diff_model.attn_layer(torch.stack([trans_emb_m, trans_emb_g], dim=1))
+                else:
+                    trans_emb = diff_model.attn_layer(trans_emb_m.unsqueeze(1))
+                trans_emb = trans_emb[:, 0, :]
 
             elif diff_model.parallel["set_aggr"] == "item_attn":
                 # 아이템을 쿼리로 사용
-                trans_emb = diff_model.attn_layer(torch.cat([trans_emb_m, trans_emb_g], dim=1), query=torch.cat([iid_emb, iid_emb], dim=1))
+                if diff_model.aggregation:
+                    trans_emb = diff_model.attn_layer(torch.stack([trans_emb_m, trans_emb_g], dim=1), query=iid_emb.unsqueeze(1))
+                else:
+                    trans_emb = diff_model.attn_layer(trans_emb_m.unsqueeze(1), query=iid_emb.unsqueeze(1))
+                trans_emb = trans_emb[:, 0, :]
 
             elif diff_model.parallel["set_aggr"] == "item_diu":
                 # 아이템 포함해서 self attn -> 아이템 출력만 사용
                 iid_emb = diff_model.ln_iid(iid_emb)
                 final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
-                final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
+                if diff_model.aggregation:
+                    final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
 
                 uid = tgt_uid.long()
                 iid_input = iid_input.squeeze(1)
@@ -398,7 +424,10 @@ class MFBasedModel(torch.nn.Module):
                 item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
                 item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
 
-                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+                if diff_model.aggregation:
+                    tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+                else:
+                    tokens = torch.stack([iid_emb, final_output_m, style_tok_u, item_style_tok], dim=1)
                 out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))
                 final_output = out[:, 0, :]
 
@@ -409,9 +438,11 @@ class MFBasedModel(torch.nn.Module):
             elif diff_model.parallel["set_aggr"] == "item_d":
                 iid_emb = diff_model.ln_iid(iid_emb)
                 final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
-                final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
-
-                tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
+                if diff_model.aggregation:
+                    final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
+                    tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
+                else:
+                    tokens = torch.stack([iid_emb, final_output_m], dim=1)
                 out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
                 final_output = out[:, 0, :]  # (B, D)
 
@@ -422,7 +453,8 @@ class MFBasedModel(torch.nn.Module):
             elif diff_model.parallel["set_aggr"] == "item_di":
                 iid_emb = diff_model.ln_iid(iid_emb)
                 final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
-                final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
+                if diff_model.aggregation:
+                    final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
 
                 style_tgt_item = diff_model.style_tgt_item.to(trans_emb_m.device)  # [I_total, F_item]
                 style_i = style_tgt_item[iid_input.squeeze(1)]  # (B, F_item)
@@ -430,7 +462,10 @@ class MFBasedModel(torch.nn.Module):
                 item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
                 item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
 
-                tokens = torch.stack([iid_emb, final_output_m, final_output_g, item_style_tok], dim=1)
+                if diff_model.aggregation:
+                    tokens = torch.stack([iid_emb, final_output_m, final_output_g, item_style_tok], dim=1)
+                else:
+                    tokens = torch.stack([iid_emb, final_output_m, item_style_tok], dim=1)
                 out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
                 final_output = out[:, 0, :]  # (B, D)
 
@@ -441,7 +476,8 @@ class MFBasedModel(torch.nn.Module):
             elif diff_model.parallel["set_aggr"] == "item_du":
                 iid_emb = diff_model.ln_iid(iid_emb)
                 final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
-                final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
+                if diff_model.aggregation:
+                    final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
 
                 uid = tgt_uid.long()  # (B,)
 
@@ -451,7 +487,10 @@ class MFBasedModel(torch.nn.Module):
                 style_tok = diff_model.style_ln(style_tok)  # (B, D)
                 style_tok_u = diff_model.style_scale * style_tok  # (B, D)
 
-                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u], dim=1)
+                if diff_model.aggregation:
+                    tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u], dim=1)
+                else:
+                    tokens = torch.stack([iid_emb, final_output_m, style_tok_u], dim=1)
                 out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
                 final_output = out[:, 0, :]  # (B, D)
 
@@ -463,7 +502,8 @@ class MFBasedModel(torch.nn.Module):
             elif diff_model.parallel["set_aggr"] == "item_i":
                 iid_emb = diff_model.ln_iid(iid_emb)
                 final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
-                final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
+                if diff_model.aggregation:
+                    final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
 
                 uid = tgt_uid.long()  # (B,)
 
@@ -473,7 +513,10 @@ class MFBasedModel(torch.nn.Module):
                 item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
                 item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
 
-                tokens = torch.stack([iid_emb, final_output_m, final_output_g, item_style_tok], dim=1)
+                if diff_model.aggregation:
+                    tokens = torch.stack([iid_emb, final_output_m, final_output_g, item_style_tok], dim=1)
+                else:
+                    tokens = torch.stack([iid_emb, final_output_m, item_style_tok], dim=1)
                 out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
                 final_output = out[:, 0, :]  # (B, D)
 
@@ -483,7 +526,8 @@ class MFBasedModel(torch.nn.Module):
             elif diff_model.parallel["set_aggr"] == "item_iu":
                 iid_emb = diff_model.ln_iid(iid_emb)
                 final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
-                final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
+                if diff_model.aggregation:
+                    final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
 
                 uid = tgt_uid.long()
                 iid_input = iid_input.squeeze(1)
@@ -500,7 +544,10 @@ class MFBasedModel(torch.nn.Module):
                 item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
                 item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
 
-                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+                if diff_model.aggregation:
+                    tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+                else:
+                    tokens = torch.stack([iid_emb, final_output_m, style_tok_u, item_style_tok], dim=1)
                 out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
                 final_output = out[:, 0, :]  # (B, D)
 
@@ -510,7 +557,8 @@ class MFBasedModel(torch.nn.Module):
             elif diff_model.parallel["set_aggr"] == "item_u":
                 iid_emb = diff_model.ln_iid(iid_emb)
                 final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
-                final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
+                if diff_model.aggregation:
+                    final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
 
                 uid = tgt_uid.long()  # (B,)
 
@@ -519,8 +567,11 @@ class MFBasedModel(torch.nn.Module):
                 style_tok = diff_model.style_encoder(style_u)  # (B, D)
                 style_tok = diff_model.style_ln(style_tok)  # (B, D)
                 style_tok_u = diff_model.style_scale * style_tok  # (B, D)
-
-                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u], dim=1)
+                
+                if diff_model.aggregation:
+                    tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u], dim=1)
+                else:
+                    tokens = torch.stack([iid_emb, final_output_m, style_tok_u], dim=1)
                 out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
                 final_output = out[:, 0, :]  # (B, D)
 

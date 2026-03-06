@@ -191,6 +191,7 @@ class DiffParallel(nn.Module):
 
         # Parallel setting
         self.parallel = parallel
+        self.aggregation = parallel.get("aggregation", True)
 
         # RQVAE setting
         self.rqvae = rqvae
@@ -205,28 +206,17 @@ class DiffParallel(nn.Module):
         )
 
         # time, condition, noised emb -> reverse 하는 3FC diffusion solver
-        self.diff_models = nn.ModuleList(
-            [
-                nn.ModuleList(
-                    [  # diff model 1 -- MF condition
-                        nn.Linear(input_dim * 3, input_dim),
-                        # nn.Linear(diff_dim, diff_dim),
-                        # nn.Linear(diff_dim, input_dim),
-                    ]
-                ),
-                nn.ModuleList(
-                    [  # diff model 2 -- Aggr condition
-                        nn.Linear(input_dim * 3, input_dim),
-                        # nn.Linear(diff_dim, diff_dim),
-                        # nn.Linear(diff_dim, input_dim),
-                    ]
-                ),
-            ]
-        )
+        self.diff_models = nn.ModuleList([
+            nn.ModuleList([nn.Linear(input_dim * 3, input_dim)]) # MF
+        ])
+        if self.aggregation:
+            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim)])) # Aggr
         # time embedding
         # self.step_emb_linear = nn.ModuleList([nn.Linear(diff_dim, input_dim)])
 
-        self.cond_emb_linear = nn.ModuleList([nn.Linear(input_dim, input_dim), nn.Linear(input_dim, input_dim)])
+        self.cond_emb_linear = nn.ModuleList([nn.Linear(input_dim, input_dim)])
+        if self.aggregation:
+            self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
 
         self.num_layers = 1
 
@@ -234,11 +224,13 @@ class DiffParallel(nn.Module):
         self.al_linear = nn.Linear(input_dim, input_dim, False)
 
         self.linear_m = nn.Linear(input_dim, input_dim, False)
-        self.linear_g = nn.Linear(input_dim, input_dim, False)
+        if self.aggregation:
+            self.linear_g = nn.Linear(input_dim, input_dim, False)
 
         self.ln_iid = nn.LayerNorm(input_dim)
         self.ln_m = nn.LayerNorm(input_dim)
-        self.ln_g = nn.LayerNorm(input_dim)
+        if self.aggregation:
+            self.ln_g = nn.LayerNorm(input_dim)
         self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
 
         if self.parallel["set_aggr"] == "item_diu":
@@ -291,7 +283,8 @@ class DiffParallel(nn.Module):
 
         if self.rqvae["RQVAE"]:
             self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
-            self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
+            if self.aggregation:
+                self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
 
 
     def forward(self, x, t, cond_emb, cond_mask, diff_id):
@@ -417,12 +410,14 @@ def diffusion_loss_fn_parallel(
         t = t.unsqueeze(-1)
 
         ### [TRAIN-DIM] 2. Diff1, Diff2 noised x_0, noise (e) 생성
-        if model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
-            x_m, e_m = q_x_fn(model, x_0_m, t, device)
-            x_g, e_g = x_m, e_m
-        elif model.parallel["set_init"] == 1:  # 각각 MF, Aggr
-            x_m, e_m = q_x_fn(model, x_0_m, t, device)
-            x_g, e_g = q_x_fn(model, x_0_g, t, device)
+        x_m, e_m = q_x_fn(model, x_0_m, t, device)
+        if model.aggregation:
+            if model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
+                x_g, e_g = x_m, e_m
+            elif model.parallel["set_init"] == 1:  # 각각 MF, Aggr
+                x_g, e_g = q_x_fn(model, x_0_g, t, device)
+        else:
+            x_g, e_g = None, None
 
         # random mask
         cond_mask1 = 1 * (torch.rand(cond_emb1.shape[0], device=device) <= mask_rate)
@@ -433,51 +428,68 @@ def diffusion_loss_fn_parallel(
 
         # [TRAIN-DIM] 3. Diff1, Diff2 -> noise 예측
         output1 = model(x_m, t.squeeze(-1), cond_emb1, cond_mask1, diff_id=0)  # x_t, c1 -> noise
-        output2 = model(x_g, t.squeeze(-1), cond_emb2, cond_mask2, diff_id=1)  # x_t, c2 -> noise
-
-        return F.mse_loss(x_0_m, output1) + F.mse_loss(x_0_g, output2)  # 예측 노이즈와 실제 노이즈 비교 L1 loss
+        
+        if model.aggregation:
+            output2 = model(x_g, t.squeeze(-1), cond_emb2, cond_mask2, diff_id=1)  # x_t, c2 -> noise
+            return F.mse_loss(x_0_m, output1) + F.mse_loss(x_0_g, output2) 
+        else:
+            return F.mse_loss(x_0_m, output1)
 
     elif is_task:  # task loss ALM 수행
         if model.rqvae["RQVAE"] == True:
-            quantized1, all_level_vectors1, _ = model.rq_mf(cond_emb1)  # [L, B, D]
-            quantized2, all_level_vectors2, _ = model.rq_aggr(cond_emb2)  # [L, B, D]
-
             if model.rqvae["start_point"] == "src_u":
                 final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, q_embs1, iid_emb, device, diff_id=0)
-                final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb2, q_embs2, iid_emb, device, diff_id=1)
+                if model.aggregation:
+                    final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb2, q_embs2, iid_emb, device, diff_id=1)
             elif model.rqvae["start_point"] == "quant_u":
                 final_output_m, iid_emb = p_sample_loop_parallel(model, Q_emb1, q_embs1, iid_emb, device, diff_id=0)
-                final_output_g, iid_emb = p_sample_loop_parallel(model, Q_emb2, q_embs2, iid_emb, device, diff_id=1)
+                if model.aggregation:
+                    final_output_g, iid_emb = p_sample_loop_parallel(model, Q_emb2, q_embs2, iid_emb, device, diff_id=1)
             elif model.rqvae["start_point"] == "noise":
                 noise1 = torch.randn_like(cond_emb1)
-                noise2 = torch.randn_like(cond_emb2)
                 final_output_m, iid_emb = p_sample_loop_parallel(model, noise1, q_embs1, iid_emb, device, diff_id=0)
-                final_output_g, iid_emb = p_sample_loop_parallel(model, noise2, q_embs2, iid_emb, device, diff_id=1)
+                if model.aggregation:
+                    noise2 = torch.randn_like(cond_emb2)
+                    final_output_g, iid_emb = p_sample_loop_parallel(model, noise2, q_embs2, iid_emb, device, diff_id=1)
 
         else:
             if model.rqvae["start_point"] == "noise":
                 noise1 = torch.randn_like(cond_emb1)
-                noise2 = torch.randn_like(cond_emb2)
                 final_output_m, iid_emb = p_sample_loop(model, noise1, cond_emb1, iid_emb, device, diff_id=0)
-                final_output_g, iid_emb = p_sample_loop(model, noise2, cond_emb2, iid_emb, device, diff_id=1)
+                if model.aggregation:
+                    noise2 = torch.randn_like(cond_emb2)
+                    final_output_g, iid_emb = p_sample_loop(model, noise2, cond_emb2, iid_emb, device, diff_id=1)
             else:
                 final_output_m, iid_emb = p_sample_loop(model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0)
-                final_output_g, iid_emb = p_sample_loop(model, cond_emb2, cond_emb2, iid_emb, device, diff_id=1)
+                if model.aggregation:
+                    final_output_g, iid_emb = p_sample_loop(model, cond_emb2, cond_emb2, iid_emb, device, diff_id=1)
+
+        if not model.aggregation:
+            final_output_g = torch.zeros_like(final_output_m)
 
 
         ### [TRAIN-ALM] 2. Diff1, Diff2 결과 aggregation
         if model.parallel["set_aggr"] == "attn":
             # ! 어텐션으로 최종 임베딩 종합
-            final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1))
+            if model.aggregation:
+                final_output = model.attn_layer(torch.stack([final_output_m, final_output_g], dim=1))
+            else:
+                final_output = model.attn_layer(final_output_m.unsqueeze(1))
+            final_output = final_output[:, 0, :]
 
         elif model.parallel["set_aggr"] == "item_attn":
             # 아이템을 쿼리로 사용
-            final_output = model.attn_layer(torch.cat([final_output_m, final_output_g], dim=1), query=torch.cat([iid_emb, iid_emb], dim=1))
+            if model.aggregation:
+                final_output = model.attn_layer(torch.stack([final_output_m, final_output_g], dim=1), query=iid_emb.unsqueeze(1))
+            else:
+                final_output = model.attn_layer(final_output_m.unsqueeze(1), query=iid_emb.unsqueeze(1))
+            final_output = final_output[:, 0, :]
 
         elif model.parallel["set_aggr"] == "item_diu":
             iid_emb = model.ln_iid(iid_emb)
             final_output_m = model.ln_m(model.linear_m(final_output_m))
-            final_output_g = model.ln_g(model.linear_g(final_output_g))
+            if model.aggregation:
+                final_output_g = model.ln_g(model.linear_g(final_output_g))
 
             uid = uid.long()  # (B,)
             iid = iid.squeeze(1)
@@ -494,7 +506,10 @@ def diffusion_loss_fn_parallel(
             item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
             item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
 
-            tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+            if model.aggregation:
+                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+            else:
+                tokens = torch.stack([iid_emb, final_output_m, style_tok_u, item_style_tok], dim=1)
             out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
             final_output = out[:, 0, :]  # (B, D)
 
@@ -506,9 +521,11 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_aggr"] == "item_d":
             iid_emb = model.ln_iid(iid_emb)
             final_output_m = model.ln_m(model.linear_m(final_output_m))
-            final_output_g = model.ln_g(model.linear_g(final_output_g))
-
-            tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
+            if model.aggregation:
+                final_output_g = model.ln_g(model.linear_g(final_output_g))
+                tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
+            else:
+                tokens = torch.stack([iid_emb, final_output_m], dim=1)
             out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
             final_output = out[:, 0, :]  # (B, D)
 
@@ -519,7 +536,8 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_aggr"] == "item_di":
             iid_emb = model.ln_iid(iid_emb)
             final_output_m = model.ln_m(model.linear_m(final_output_m))
-            final_output_g = model.ln_g(model.linear_g(final_output_g))
+            if model.aggregation:
+                final_output_g = model.ln_g(model.linear_g(final_output_g))
 
             style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
             style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
@@ -527,7 +545,10 @@ def diffusion_loss_fn_parallel(
             item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
             item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
 
-            tokens = torch.stack([iid_emb, final_output_m, final_output_g, item_style_tok], dim=1)
+            if model.aggregation:
+                tokens = torch.stack([iid_emb, final_output_m, final_output_g, item_style_tok], dim=1)
+            else:
+                tokens = torch.stack([iid_emb, final_output_m, item_style_tok], dim=1)
             out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
             final_output = out[:, 0, :]  # (B, D)
 
@@ -538,7 +559,8 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_aggr"] == "item_du":
             iid_emb = model.ln_iid(iid_emb)
             final_output_m = model.ln_m(model.linear_m(final_output_m))
-            final_output_g = model.ln_g(model.linear_g(final_output_g))
+            if model.aggregation:
+                final_output_g = model.ln_g(model.linear_g(final_output_g))
 
             uid = uid.long()  # (B,)
 
@@ -548,7 +570,10 @@ def diffusion_loss_fn_parallel(
             style_tok = model.style_ln(style_tok)  # (B, D)
             style_tok_u = model.style_scale * style_tok  # (B, D)
 
-            tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u], dim=1)
+            if model.aggregation:
+                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u], dim=1)
+            else:
+                tokens = torch.stack([iid_emb, final_output_m, style_tok_u], dim=1)
             out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
             final_output = out[:, 0, :]  # (B, D)
 
@@ -560,7 +585,8 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_aggr"] == "item_i":
             iid_emb = model.ln_iid(iid_emb)
             final_output_m = model.ln_m(model.linear_m(final_output_m))
-            final_output_g = model.ln_g(model.linear_g(final_output_g))
+            if model.aggregation:
+                final_output_g = model.ln_g(model.linear_g(final_output_g))
 
             uid = uid.long()  # (B,)
 
@@ -570,7 +596,10 @@ def diffusion_loss_fn_parallel(
             item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
             item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
 
-            tokens = torch.stack([iid_emb, final_output_m, final_output_g, item_style_tok], dim=1)
+            if model.aggregation:
+                tokens = torch.stack([iid_emb, final_output_m, final_output_g, item_style_tok], dim=1)
+            else:
+                tokens = torch.stack([iid_emb, final_output_m, item_style_tok], dim=1)
             out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
             final_output = out[:, 0, :]  # (B, D)
 
@@ -580,7 +609,8 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_aggr"] == "item_iu":
             iid_emb = model.ln_iid(iid_emb)
             final_output_m = model.ln_m(model.linear_m(final_output_m))
-            final_output_g = model.ln_g(model.linear_g(final_output_g))
+            if model.aggregation:
+                final_output_g = model.ln_g(model.linear_g(final_output_g))
 
             uid = uid.long()  # (B,)
             iid = iid.squeeze(1)
@@ -597,7 +627,10 @@ def diffusion_loss_fn_parallel(
             item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
             item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
 
-            tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+            if model.aggregation:
+                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+            else:
+                tokens = torch.stack([iid_emb, final_output_m, style_tok_u, item_style_tok], dim=1)
             out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
             final_output = out[:, 0, :]  # (B, D)
 
@@ -607,7 +640,8 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_aggr"] == "item_u":
             iid_emb = model.ln_iid(iid_emb)
             final_output_m = model.ln_m(model.linear_m(final_output_m))
-            final_output_g = model.ln_g(model.linear_g(final_output_g))
+            if model.aggregation:
+                final_output_g = model.ln_g(model.linear_g(final_output_g))
 
             uid = uid.long()  # (B,)
 
@@ -617,7 +651,10 @@ def diffusion_loss_fn_parallel(
             style_tok = model.style_ln(style_tok)  # (B, D)
             style_tok_u = model.style_scale * style_tok  # (B, D)
 
-            tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u], dim=1)
+            if model.aggregation:
+                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u], dim=1)
+            else:
+                tokens = torch.stack([iid_emb, final_output_m, style_tok_u], dim=1)
             out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
             final_output = out[:, 0, :]  # (B, D)
 
@@ -632,7 +669,10 @@ def diffusion_loss_fn_parallel(
         # task_loss =   (y_pred - y_input.squeeze().float()).square().sum().sqrt() / y_pred.shape[0]
 
         if model.parallel["set_loss"] == 0:
-            return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
+            loss = F.mse_loss(x_0_m, final_output_m) + model.task_lambda * task_loss
+            if model.aggregation:
+                loss += F.mse_loss(x_0_g, final_output_g)
+            return loss
         elif model.parallel["set_loss"] == 1:
             return F.mse_loss(x_0_g, final_output) + model.task_lambda * task_loss
         elif model.parallel["set_loss"] == 2:
