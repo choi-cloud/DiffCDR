@@ -52,8 +52,10 @@ def prepare_1():
     parser.add_argument("--codebook_size", type=int, default=256, help="RQVAE 코드북 크기")
     parser.add_argument("--alpha_rq", type=float, default=1e-2, help="RQVAE loss 가중치")
     parser.add_argument("--RQVAE", type=str2bool, default=True, help="rq 사용 여부")
+    parser.add_argument("--pretrain_rq", type=str2bool, default=True, help="rqvae pretrain 여부")
+    parser.add_argument("--pretrain_epochs", type=int, default=50, help="rqvae pretrain epoch")
+    parser.add_argument("--freeze_rq", type=str2bool, default=True, help="rqvae 파라미터 고정 여부")
     parser.add_argument("--start_point", default="src_u", help="[src_u, quant_u, noise]")
-    
 
     # item cond
     parser.add_argument("--item_cond", type=bool, default=False, help="아이템 조건 사용 여부")
@@ -91,6 +93,9 @@ def prepare_2(args, config_path):
         config["w"] = args.w
         config["emb_dim"] = args.emb_dim
         config["RQVAE"] = args.RQVAE
+        config["pretrain_rq"] = args.pretrain_rq
+        config["pretrain_epochs"] = args.pretrain_epochs
+        config["freeze_rq"] = args.freeze_rq
         config["start_point"] = args.start_point
 
     return config

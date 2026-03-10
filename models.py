@@ -450,6 +450,19 @@ class MFBasedModel(torch.nn.Module):
                 mu_t = diff_model.tgt_global_bias
                 y_pred = y_pred + mu_t
 
+            elif diff_model.parallel["set_aggr"] == "item":
+                iid_emb = diff_model.ln_iid(iid_emb)
+                final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
+                if diff_model.aggregation:
+                    final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
+                    tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
+                else:
+                    tokens = torch.stack([iid_emb, final_output_m], dim=1)
+                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+                final_output = out[:, 0, :]  # (B, D)
+
+                y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+                
             elif diff_model.parallel["set_aggr"] == "item_di":
                 iid_emb = diff_model.ln_iid(iid_emb)
                 final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))

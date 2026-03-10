@@ -102,7 +102,10 @@ class Run:
             "codebook_size": config["codebook_size"],
             "alpha_rq": config["alpha_rq"],
             "RQVAE": config["RQVAE"],
-            "start_point": config["start_point"]
+            "start_point": config["start_point"],
+            "pretrain_rq": config["pretrain_rq"],
+            "pretrain_epochs": config["pretrain_epochs"],
+            "freeze_rq": config["freeze_rq"]
         }
 
         self.w = config["w"]
@@ -999,11 +1002,31 @@ class Run:
         diff_model.smooth_user_emb_src = smooth_user_emb_src
         diff_model.smooth_user_emb_tgt = smooth_user_emb_tgt
 
+        # [PRETRAIN] RQ-VAE pretraining if requested
+        if self.rqvae_setting.get("pretrain_rq", False):
+            self.pretrain_rqvae(model, diff_model, data_diff)
+
+        # [FREEZE] Freeze RQ-VAE parameters if requested
+        if self.rqvae_setting.get("freeze_rq", False):
+            write("Freezing RQ-VAE parameters.")
+            if hasattr(diff_model, "rq_mf"):
+                for p in diff_model.rq_mf.parameters():
+                    p.requires_grad = False
+            if self.parallel_setting.get("aggregation", True) and hasattr(diff_model, "rq_aggr"):
+                for p in diff_model.rq_aggr.parameters():
+                    p.requires_grad = False
+
         model.graph_src = graph_train.get("src")
         model.graph_tgt = graph_train.get("tgt")
         model.shared_graph = graph_train.get("shared")
 
         for i in range(self.epoch):
+            # [DEBUG] Verify parameter freezing
+            # if hasattr(diff_model, "rq_mf"):
+            #     req_grad = diff_model.rq_mf.codebooks.requires_grad
+            #     val_start = diff_model.rq_mf.codebooks.detach().clone()
+            #     write(f"\n[DEBUG] Epoch {i} START | RQ-VAE Requires Grad: {req_grad}")
+            #     write(f"[DEBUG] Epoch {i} START | Codebook Sample (first 5): {val_start[0, 0, :5].cpu().numpy()}")
 
             # diff_model.smooth_user_emb_src = smooth_user_emb_src
             # diff_model.smooth_user_emb_tgt = smooth_user_emb_tgt
@@ -1023,6 +1046,74 @@ class Run:
             mae, rmse = self.eval_mae([model, diff_model], data_test, stage="test_diff_parallel", style_src=style_src)
             self.update_results(mae, rmse, "diff_parallel")
             write(f"Epoch {i:<2} :: DIFF LOSS {loss.item():>10.6f} |  TASK LOSS {task_loss.item():>10.6f} | MAE: {mae:>10.6f} | RMSE: {rmse:>10.6f}")
+
+            # [DEBUG] Check gradients and calculate parameter shift
+            # if hasattr(diff_model, "rq_mf"):
+            #     p = diff_model.rq_mf.codebooks
+            #     grad = p.grad if p.grad is not None else torch.zeros_like(p)
+            #     
+            #     # 가중치가 실제로 변한 vector 개수 (L, K, D) 에서 (L, K) 차원별로 체크
+            #     val_end = p.detach()
+            #     diff_vec = (val_end - val_start).abs().sum(dim=-1) # [L, K]
+            #     updated_vecs = (diff_vec > 1e-10).sum().item()
+            #     total_vecs = p.shape[0] * p.shape[1]
+            # 
+            #     # gradient가 흐른 vector 개수
+            #     grad_vec = grad.abs().sum(dim=-1) # [L, K]
+            #     active_grads = (grad_vec > 0).sum().item()
+            #     
+            #     grad_norm = grad.abs().sum().item()
+            #     shift_total = diff_vec.sum().item()
+            #     shift_max = (val_end - val_start).abs().max().item()
+            #     
+            #     write(f"[DEBUG] Epoch {i} END   | Codebook Grad Abs Sum: {grad_norm:.6f}")
+            #     write(f"[DEBUG] Epoch {i} END   | Active Grads (Vectors): {active_grads} / {total_vecs}")
+            #     write(f"[DEBUG] Epoch {i} END   | Actually Updated (Vectors): {updated_vecs} / {total_vecs}")
+            #     write(f"[DEBUG] Epoch {i} END   | Codebook Total Shift: {shift_total:.6f}")
+            #     write(f"[DEBUG] Epoch {i} END   | Codebook Max Shift: {shift_max:.10f}\n")
+
+    def pretrain_rqvae(self, model, diff_model, data_diff):
+        write(f"{' RQ-VAE Pretraining ':=^{30}}")
+        pretrain_epochs = self.rqvae_setting.get("pretrain_epochs", 50)
+        
+        params = []
+        if hasattr(diff_model, "rq_mf"):
+            params += list(diff_model.rq_mf.parameters())
+        if self.parallel_setting.get("aggregation", True) and hasattr(diff_model, "rq_aggr"):
+            params += list(diff_model.rq_aggr.parameters())
+            
+        if not params:
+            write("No RQ-VAE parameters found to pretrain.")
+            return
+
+        optimizer = torch.optim.Adam(params, lr=0.001)
+        
+        diff_model.train()
+        for epoch in range(pretrain_epochs):
+            total_loss = 0
+            for batch in data_diff:
+                tgt_uid, iid_input, y_input = [b.to(self.device) for b in batch]
+                
+                # Fetch MF embeddings (Condition)
+                src_uid_emb1 = model.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
+                
+                # MF path loss
+                _, _, loss1 = diff_model.rq_mf(src_uid_emb1)
+                loss = loss1
+                
+                # Aggr path loss if applicable
+                if self.parallel_setting.get("aggregation", True) and hasattr(diff_model, "rq_aggr"):
+                    src_uid_emb2 = model._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
+                    _, _, loss2 = diff_model.rq_aggr(src_uid_emb2)
+                    loss += loss2
+                
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+            
+            if (epoch + 1) % 10 == 0 or epoch == 0:
+                write(f"Pretrain RQ Epoch {epoch+1}/{pretrain_epochs} | Loss: {total_loss/len(data_diff):.6f}")
 
     def SS_CDR(self, model, ss_model, data_ss, data_test, optimizer_ss):
         write("==========SS_CDR==========")

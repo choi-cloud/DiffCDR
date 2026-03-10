@@ -1,7 +1,6 @@
 *.ipynb
 *.md
 *.sh
-*.json
 *.log
 *.csv
 *.pth

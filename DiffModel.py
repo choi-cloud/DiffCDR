@@ -280,7 +280,9 @@ class DiffParallel(nn.Module):
             self.style_ln = nn.LayerNorm(input_dim)
             self.style_scale = nn.Parameter(torch.tensor(0.1))
 
-
+        else:
+            pass
+            
         if self.rqvae["RQVAE"]:
             self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
             if self.aggregation:
@@ -533,54 +535,18 @@ def diffusion_loss_fn_parallel(
             mu_t = model.tgt_global_bias
             y_pred = y_pred + mu_t
 
-        elif model.parallel["set_aggr"] == "item_di":
+        elif model.parallel["set_aggr"] == "item":
             iid_emb = model.ln_iid(iid_emb)
             final_output_m = model.ln_m(model.linear_m(final_output_m))
             if model.aggregation:
                 final_output_g = model.ln_g(model.linear_g(final_output_g))
-
-            style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
-            style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
-            item_style_tok = model.item_style_encoder(style_i)  # (B, D)
-            item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
-            item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
-
-            if model.aggregation:
-                tokens = torch.stack([iid_emb, final_output_m, final_output_g, item_style_tok], dim=1)
+                tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
             else:
-                tokens = torch.stack([iid_emb, final_output_m, item_style_tok], dim=1)
+                tokens = torch.stack([iid_emb, final_output_m], dim=1)
             out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
             final_output = out[:, 0, :]  # (B, D)
 
             y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
-            mu_t = model.tgt_global_bias
-            y_pred = y_pred + mu_t
-
-        elif model.parallel["set_aggr"] == "item_du":
-            iid_emb = model.ln_iid(iid_emb)
-            final_output_m = model.ln_m(model.linear_m(final_output_m))
-            if model.aggregation:
-                final_output_g = model.ln_g(model.linear_g(final_output_g))
-
-            uid = uid.long()  # (B,)
-
-            style_src = style_src.to(final_output_m.device)
-            style_u = style_src[uid][:, :2]  # (B, F)
-            style_tok = model.style_encoder(style_u)  # (B, D)
-            style_tok = model.style_ln(style_tok)  # (B, D)
-            style_tok_u = model.style_scale * style_tok  # (B, D)
-
-            if model.aggregation:
-                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u], dim=1)
-            else:
-                tokens = torch.stack([iid_emb, final_output_m, style_tok_u], dim=1)
-            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
-            final_output = out[:, 0, :]  # (B, D)
-
-            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
-            mu_t = model.tgt_global_bias
-            y_pred = y_pred + mu_t
-
 
         elif model.parallel["set_aggr"] == "item_i":
             iid_emb = model.ln_iid(iid_emb)
