@@ -555,6 +555,7 @@ def diffusion_loss_fn_parallel(
                 final_output_g = model.ln_g(model.linear_g(final_output_g))
 
             uid = uid.long()  # (B,)
+            iid = iid.squeeze(1)
 
             style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
             style_i = style_tgt_item[iid][:, :2]  # (B, F_item)

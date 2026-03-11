@@ -518,7 +518,8 @@ class MFBasedModel(torch.nn.Module):
                 if diff_model.aggregation:
                     final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
 
-                uid = tgt_uid.long()  # (B,)
+                uid = tgt_uid.long()
+                iid_input = iid_input.squeeze(1)
 
                 style_tgt_item = diff_model.style_tgt_item.to(trans_emb_m.device)  # [I_total, F_item]
                 style_i = style_tgt_item[iid_input][:, :2]  # (B, F_item)
