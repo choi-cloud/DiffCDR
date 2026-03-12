@@ -95,6 +95,9 @@ class Run:
             "lacdr_rmse": 10,
         }
 
+        if config["set_aggr"] in ["item", "item_i"]: 
+            config["bias_mapping"] = "None"
+            
         self.parallel_setting = {
             "set_loss": config["set_loss"],
             "set_init": config["set_init"],
