@@ -57,6 +57,7 @@ def prepare_1():
     parser.add_argument("--freeze_rq", type=str2bool, default=True, help="rqvae 파라미터 고정 여부")
     parser.add_argument("--cross_cond", type=str2bool, default=True, help="MF vs Aggr 컨디션 교차 여부")
     parser.add_argument("--start_point", default="src_u", help="[src_u, quant_u, noise]")
+    parser.add_argument("--rqvae_lr", type=float, default=0.001, help="rqvae pretrain lr")
 
     # item cond
     parser.add_argument("--item_cond", type=bool, default=False, help="아이템 조건 사용 여부")
@@ -65,6 +66,8 @@ def prepare_1():
     parser.add_argument("--diff_scale", type=float, default=0.1, help="Classifier-free guidance scale")
     parser.add_argument("--diff_mask_rate", type=float, default=0.1, help="Diffusion condition mask rate")
     parser.add_argument("--emb_dim", type=int, default=10, help="MF emb dim")
+    parser.add_argument("--bias_mapping", type=str, default='None', help="[None, user, user_domain] mapper input")
+
 
     args = parser.parse_args()
 
@@ -85,12 +88,14 @@ def prepare_2(args, config_path):
         config["lr"] = args.lr
         config["la_lr"] = args.la_lr
         config["diff_lr"] = args.diff_lr
+        config["rqvae_lr"] = args.rqvae_lr
         config["set_loss"] = int(args.set_loss)
         config["set_init"] = int(args.set_init)
         config["set_proj"] = int(args.set_proj)
         config["set_aggr"] = args.set_aggr
         config["aggregation"] = args.aggregation
         config["item_cond"] = args.item_cond
+        config["bias_mapping"] = args.bias_mapping
         config["codebook_num"] = args.codebook_num
         config["codebook_size"] = args.codebook_size
         config["alpha_rq"] = args.alpha_rq
@@ -164,6 +169,8 @@ if __name__ == "__main__":
     write(f"🍎 RQVAE       : {args.RQVAE}")
     write(f"🍎 start_point : {args.start_point}")
 
+    write(f"🍏 cross cond   : {args.cross_cond}")
+    write(f"🍏 bias mapping : {args.bias_mapping}")
 
     if not args.process_data_mid and not args.process_data_ready:
         Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth")

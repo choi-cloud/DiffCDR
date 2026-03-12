@@ -70,6 +70,12 @@ class Run:
             self.root + "stylecache/_" + str(int(self.ratio[0] * 10)) + "_" + str(int(self.ratio[1] * 10)) + "/tgt_" + self.tgt + "_src_" + self.src
         )
 
+        aggretaion_name = str(True) if config["aggregation"] == "aggregation" else str(config["aggregation"])
+        self.rqvae_ckpt_root = (
+            self.root + "rqvae_ckpt/" + self.src + "_" + str(int(self.ratio[0] * 10)) + "_" + str(int(self.ratio[1] * 10)) 
+            + "/" + str(config["codebook_num"]) + "_" + str(config["codebook_size"]) + "_" + str(config["pretrain_epochs"]) + "ep_" + str(config["rqvae_lr"]) + "lr_" + aggretaion_name
+        )
+
         self.results = {
             "tgt_mae": 10,
             "tgt_rmse": 10,
@@ -95,6 +101,7 @@ class Run:
             "set_proj": config["set_proj"],
             "set_aggr": config["set_aggr"],
             "aggregation": config["aggregation"],
+            "bias_mapping": config["bias_mapping"],
         }
         
         self.rqvae_setting = {
@@ -106,9 +113,10 @@ class Run:
             "pretrain_rq": config["pretrain_rq"],
             "pretrain_epochs": config["pretrain_epochs"],
             "freeze_rq": config["freeze_rq"],
+            "rqvae_lr": config["rqvae_lr"],
             "cross_cond": config["cross_cond"],
         }
-
+        
         self.w = config["w"]
 
         self.device = "cuda" if config["use_cuda"] else "cpu"
@@ -989,10 +997,13 @@ class Run:
             self.update_results(mae, rmse, "diff")
             write(f"DIFF LOSS {loss.item():>10.6f} |  TASK LOSS {task_loss.item():>10.6f} | MAE: {mae:>10.6f} | RMSE: {rmse:>10.6f}")
 
-    def Diff_Parallel(self, model, diff_model, data_diff, data_test, optimizer, graph_train, graph_test, style_src, style_tgt_item):
+    def Diff_Parallel(self, model, diff_model, data_diff, data_test, optimizer, graph_train, graph_test, style_src, style_tgt_item, style_tgt_user, style_tgt_domain):
         write(f"{' Diff_Parallel ':=^{30}}")
 
         diff_model.style_tgt_item = style_tgt_item
+
+        diff_model.style_tgt_user = style_tgt_user.cuda() 
+        diff_model.style_tgt_domain = style_tgt_domain.cuda()
 
         src_graph = graph_train.get("src")
         tgt_graph = graph_train.get("tgt")
@@ -1005,7 +1016,11 @@ class Run:
 
         # [PRETRAIN] RQ-VAE pretraining if requested
         if self.rqvae_setting.get("pretrain_rq", False):
-            self.pretrain_rqvae(model, diff_model, data_diff)
+            if os.path.exists(self.rqvae_ckpt_root):
+                self.load_rqvae(diff_model, self.rqvae_ckpt_root)
+            else: 
+                self.pretrain_rqvae(model, diff_model, data_diff)
+                self.save_rqvae(diff_model, self.rqvae_ckpt_root)
 
         # [FREEZE] Freeze RQ-VAE parameters if requested
         if self.rqvae_setting.get("freeze_rq", False):
@@ -1073,6 +1088,32 @@ class Run:
             #     write(f"[DEBUG] Epoch {i} END   | Codebook Total Shift: {shift_total:.6f}")
             #     write(f"[DEBUG] Epoch {i} END   | Codebook Max Shift: {shift_max:.10f}\n")
 
+    def save_rqvae(self, diff_model, path):
+        save_dir = os.path.dirname(path)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+            
+        state = {}
+
+        if hasattr(diff_model, "rq_mf"):
+            state["rq_mf"] = diff_model.rq_mf.state_dict()
+
+        if self.parallel_setting.get("aggregation", True) and hasattr(diff_model, "rq_aggr"):
+            state["rq_aggr"] = diff_model.rq_aggr.state_dict()
+
+        torch.save(state, path)
+        write(f"Saved RQ-VAE checkpoint to {path}")
+    
+    def load_rqvae(self, diff_model, path):
+        write(f"Loading pretrained RQ-VAE.")
+        ckpt = torch.load(path, map_location=self.device, weights_only=True)
+
+        if "rq_mf" in ckpt and hasattr(diff_model, "rq_mf"):
+            diff_model.rq_mf.load_state_dict(ckpt["rq_mf"])
+
+        if "rq_aggr" in ckpt and hasattr(diff_model, "rq_aggr"):
+            diff_model.rq_aggr.load_state_dict(ckpt["rq_aggr"])
+        
     def pretrain_rqvae(self, model, diff_model, data_diff):
         write(f"{' RQ-VAE Pretraining ':=^{30}}")
         pretrain_epochs = self.rqvae_setting.get("pretrain_epochs", 50)
@@ -1087,7 +1128,7 @@ class Run:
             write("No RQ-VAE parameters found to pretrain.")
             return
 
-        optimizer = torch.optim.Adam(params, lr=0.001)
+        optimizer = torch.optim.Adam(params, lr=self.rqvae_setting["rqvae_lr"])
         
         diff_model.train()
         for epoch in range(pretrain_epochs):
@@ -1243,6 +1284,30 @@ class Run:
             )
 
 
+        print(f"\n타겟 도메인 내 유저의 레이팅 스타일 정보 추출\n")
+        cache_path = f"{self.stylecache_root}_tgt_user.pt"
+        if os.path.exists(cache_path):
+            ckpt = torch.load(cache_path, map_location="cpu", weights_only=True)
+            style_tgt_user = ckpt["style"]
+            info = ckpt["info"]
+        else: 
+            style_tgt_user, info = build_src_user_rating_style_from_loader(
+                data_src=data_tgt, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, device="cpu",
+                cache_path=cache_path
+            )
+        
+        print(f"\n타겟 도메인 전체 레이팅 스타일 정보 추출\n")
+        cache_path = f"{self.stylecache_root}_tgt_domain.pt"
+        if os.path.exists(cache_path):
+            ckpt = torch.load(cache_path, map_location="cpu", weights_only=True)
+            style_tgt_domain = ckpt["style_tgt_domain"]
+            info_tgt_domain = ckpt["info_tgt_domain"]
+        else:
+            style_tgt_domain, info_tgt_domain = build_tgt_domain_rating_style_from_loader(
+                data_tgt=data_tgt, rating_min=1.0, rating_max=5.0, device="cpu",
+                cache_path=cache_path
+            )
+
         criterion = torch.nn.MSELoss()
 
         if exp_part == "None_CDR":
@@ -1326,7 +1391,7 @@ class Run:
             print("None_CDR model loaded")
             # optimizer_diff: DiffParallel 의 파라미터만 포함, model에 있는 user/item embedding update X
             self.Diff_Parallel(
-                model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"], style_src, style_tgt_item
+                model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"], style_src, style_tgt_item, style_tgt_user, style_tgt_domain
             )
             self.result_print(["diff_parallel"])
 
@@ -1383,6 +1448,105 @@ def mae_summary_by_score(y_true, mae):
             }
         )
     return pd.DataFrame(rows)
+
+
+@torch.no_grad()
+def build_tgt_domain_rating_style_from_loader(
+    data_tgt,
+    rating_min: float = 1.0,
+    rating_max: float = 5.0,
+    device: str = "cpu",
+    cache_path="",
+):
+    """
+    data_tgt yields: (X, y)
+      - X: [B,2]
+      - y: [B,1] rating
+
+    Returns
+    -------
+    style_tgt_domain: FloatTensor [9]
+    info: dict
+    """
+
+    # 누적 통계
+    sum_r = torch.tensor(0.0, dtype=torch.float64)
+    sumsq_r = torch.tensor(0.0, dtype=torch.float64)
+    cnt = torch.tensor(0.0, dtype=torch.float64)
+
+    rmin = torch.tensor(float("inf"), dtype=torch.float64)
+    rmax = torch.tensor(float("-inf"), dtype=torch.float64)
+
+    cnt_min = torch.tensor(0.0, dtype=torch.float64)
+    cnt_max = torch.tensor(0.0, dtype=torch.float64)
+
+    for _, y in data_tgt:
+        r = y.detach().to("cpu").double().view(-1)
+
+        if r.numel() == 0:
+            continue
+
+        sum_r += r.sum()
+        sumsq_r += (r * r).sum()
+        cnt += r.numel()
+
+        rmin = torch.minimum(rmin, r.min())
+        rmax = torch.maximum(rmax, r.max())
+
+        cnt_min += (r <= rating_min + 1e-12).double().sum()
+        cnt_max += (r >= rating_max - 1e-12).double().sum()
+
+    if cnt == 0:
+        raise ValueError("No ratings found in data_tgt.")
+
+    # 통계 계산
+    mean = sum_r / cnt
+    ex2 = sumsq_r / cnt
+    var = torch.clamp(ex2 - mean * mean, min=0.0)
+    std = torch.sqrt(var + 1e-12)
+
+    frac_min = cnt_min / cnt
+    frac_max = cnt_max / cnt
+    frac_extreme = (cnt_min + cnt_max) / cnt
+
+    # [9]
+    style_tgt_domain = torch.tensor(
+        [
+            mean,
+            var,
+            std,
+            rmin,
+            rmax,
+            cnt,
+            frac_min,
+            frac_max,
+            frac_extreme,
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+
+    info = {
+        "feature_names": [
+            "mean", "var", "std",
+            "min", "max", "cnt",
+            "frac_min", "frac_max", "frac_extreme"
+        ],
+        "rating_min": rating_min,
+        "rating_max": rating_max,
+    }
+
+    if cache_path:
+        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+        torch.save(
+            {
+                "style_tgt_domain": style_tgt_domain.cpu(),
+                "info_tgt_domain": info,
+            },
+            cache_path,
+        )
+
+    return style_tgt_domain, info
 
 
 @torch.no_grad()

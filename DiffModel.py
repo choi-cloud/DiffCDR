@@ -213,6 +213,8 @@ class DiffParallel(nn.Module):
             # MF path (diff_id=0 always for MF if it exists)
             self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim)]))
             self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
+            self.linear_m = nn.Linear(input_dim, input_dim, False)
+            self.ln_m = nn.LayerNorm(input_dim)
 
         if self.aggregation in ["aggregation", "aggregation_ab2"]:
             # Aggr path
@@ -220,21 +222,21 @@ class DiffParallel(nn.Module):
             # if 'aggregation_ab2': Aggr is index 0
             self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim)]))
             self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
+            self.linear_g = nn.Linear(input_dim, input_dim, False)
+            self.ln_g = nn.LayerNorm(input_dim)
 
         self.num_layers = 1
 
         # linear for alm
         self.al_linear = nn.Linear(input_dim, input_dim, False)
 
-        self.linear_m = nn.Linear(input_dim, input_dim, False)
-        if self.aggregation != "none":
-            self.linear_g = nn.Linear(input_dim, input_dim, False)
-
         self.ln_iid = nn.LayerNorm(input_dim)
-        self.ln_m = nn.LayerNorm(input_dim)
-        if self.aggregation != "none":
-            self.ln_g = nn.LayerNorm(input_dim)
         self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
+
+        if self.parallel["bias_mapping"] == 'user_domain': 
+            self.user_style_mapper = nn.Sequential(nn.Linear(4, 2)) 
+        elif self.parallel["bias_mapping"] == 'user': 
+            self.user_style_mapper = nn.Sequential(nn.Linear(2, 2)) 
 
         if self.parallel["set_aggr"] == "item_diu":
             self.style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
@@ -285,7 +287,6 @@ class DiffParallel(nn.Module):
 
         else:
             pass
-            
         if self.rqvae["RQVAE"]:
             self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
             if self.aggregation != "none":
@@ -397,7 +398,6 @@ def diffusion_loss_fn_parallel(
 
     num_steps = model.num_steps
     mask_rate = model.mask_rate
-
     if is_task == False:  # DIM loss 먼저
 
         # ------------------------
@@ -415,15 +415,15 @@ def diffusion_loss_fn_parallel(
         t = t.unsqueeze(-1)
 
         ### [TRAIN-DIM] 2. Diff1, Diff2 noised x_0, noise (e) 생성
-        x_m, e_m = q_x_fn(model, x_0_m, t, device)
-        if model.aggregation:
-            if model.parallel["set_init"] == 0:  # x_0 둘다 MF ui로
-                x_g, e_g = x_m, e_m
-            elif model.parallel["set_init"] == 1:  # 각각 MF, Aggr
-                x_g, e_g = q_x_fn(model, x_0_g, t, device)
-        else:
-            x_g, e_g = None, None
+        if model.aggregation in ["aggregation", "aggregation_ab1"]:
+            x_m, e_m = q_x_fn(model, x_0_m, t, device)
+        if model.aggregation in ["aggregation", "aggregation_ab2"]:
+            x_g, e_g = q_x_fn(model, x_0_g, t, device)
 
+         # ! Condition Crossing
+        if model.rqvae["cross_cond"] == True:
+            cond_emb1, cond_emb2 = cond_emb2, cond_emb1
+                
         # random mask
         cond_mask1 = 1 * (torch.rand(cond_emb1.shape[0], device=device) <= mask_rate)
         cond_mask1 = 1 - cond_mask1.int()
@@ -440,93 +440,50 @@ def diffusion_loss_fn_parallel(
             output1 = model(x_m, t.squeeze(-1), cond_emb1, cond_mask1, diff_id=0)  # MF path
             return F.mse_loss(x_0_m, output1)
         elif model.aggregation == "aggregation_ab2":
-            # In ab2, the first (and only) path is physically index 0 but it's the Aggr path
-            # We use x_g (Aggr target) and cond_emb2 (which is MF source if swapped)
             output1 = model(x_g, t.squeeze(-1), cond_emb2, cond_mask2, diff_id=0)
             return F.mse_loss(x_0_g, output1)
-        else:
-            output1 = model(x_m, t.squeeze(-1), cond_emb1, cond_mask1, diff_id=0)
-            return F.mse_loss(x_0_m, output1)
 
     elif is_task:  # task loss ALM 수행
+        if model.rqvae["start_point"] == "src_u":
+            start1, start2 = cond_emb1, cond_emb2 
+        elif model.rqvae["start_point"] == "quant_u":
+            start1, start2 = Q_emb1, Q_emb2
+        elif model.rqvae["start_point"] == "noise":
+            start1, start2 = noise1 = torch.randn_like(cond_emb1), torch.randn_like(cond_emb2)
+
         if model.rqvae["RQVAE"] == True:
-            if model.rqvae["start_point"] == "src_u":
-                if model.aggregation in ["aggregation", "aggregation_ab1"]:
-                    final_output_m, iid_emb = p_sample_loop_parallel(model, cond_emb1, q_embs1, iid_emb, device, diff_id=0)
-                if model.aggregation == "aggregation":
-                    final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb2, q_embs2, iid_emb, device, diff_id=1)
-                elif model.aggregation == "aggregation_ab2":
-                    final_output_g, iid_emb = p_sample_loop_parallel(model, cond_emb2, q_embs2, iid_emb, device, diff_id=0)
-            elif model.rqvae["start_point"] == "quant_u":
-                if model.aggregation in ["aggregation", "aggregation_ab1"]:
-                    final_output_m, iid_emb = p_sample_loop_parallel(model, Q_emb1, q_embs1, iid_emb, device, diff_id=0)
-                if model.aggregation == "aggregation":
-                    final_output_g, iid_emb = p_sample_loop_parallel(model, Q_emb2, q_embs2, iid_emb, device, diff_id=1)
-                elif model.aggregation == "aggregation_ab2":
-                    final_output_g, iid_emb = p_sample_loop_parallel(model, Q_emb2, q_embs2, iid_emb, device, diff_id=0)
-            elif model.rqvae["start_point"] == "noise":
-                if model.aggregation in ["aggregation", "aggregation_ab1"]:
-                    noise1 = torch.randn_like(cond_emb1)
-                    final_output_m, iid_emb = p_sample_loop_parallel(model, noise1, q_embs1, iid_emb, device, diff_id=0)
-                if model.aggregation == "aggregation":
-                    noise2 = torch.randn_like(cond_emb2)
-                    final_output_g, iid_emb = p_sample_loop_parallel(model, noise2, q_embs2, iid_emb, device, diff_id=1)
-                elif model.aggregation == "aggregation_ab2":
-                    noise2 = torch.randn_like(cond_emb2)
-                    final_output_g, iid_emb = p_sample_loop_parallel(model, noise2, q_embs2, iid_emb, device, diff_id=0)
+            cond1, cond2 = q_embs1, q_embs2
+            p_sample = p_sample_loop_parallel # 코드북으로 컨디션 추상화 
+        else: 
+            cond1, cond2 = cond_emb1, cond_emb2 
+            p_sample = p_sample_loop 
 
-        else:
-            if model.rqvae["start_point"] == "noise":
-                if model.aggregation in ["aggregation", "aggregation_ab1"]:
-                    noise1 = torch.randn_like(cond_emb1)
-                    final_output_m, iid_emb = p_sample_loop(model, noise1, cond_emb1, iid_emb, device, diff_id=0)
-                if model.aggregation == "aggregation":
-                    noise2 = torch.randn_like(cond_emb2)
-                    final_output_g, iid_emb = p_sample_loop(model, noise2, cond_emb2, iid_emb, device, diff_id=1)
-                elif model.aggregation == "aggregation_ab2":
-                    noise2 = torch.randn_like(cond_emb2)
-                    final_output_g, iid_emb = p_sample_loop(model, noise2, cond_emb2, iid_emb, device, diff_id=0)
-            else:
-                if model.aggregation in ["aggregation", "aggregation_ab1"]:
-                    final_output_m, iid_emb = p_sample_loop(model, cond_emb1, cond_emb1, iid_emb, device, diff_id=0)
-                if model.aggregation == "aggregation":
-                    final_output_g, iid_emb = p_sample_loop(model, cond_emb2, cond_emb2, iid_emb, device, diff_id=1)
-                elif model.aggregation == "aggregation_ab2":
-                    final_output_g, iid_emb = p_sample_loop(model, cond_emb2, cond_emb2, iid_emb, device, diff_id=0)
+        if model.rqvae["cross_cond"] == True:
+            cond_emb1, cond_emb2 = cond_emb2, cond_emb1
 
-        if model.aggregation == "aggregation_ab1":
-            final_output_g = torch.zeros_like(final_output_m)
-        elif model.aggregation == "aggregation_ab2":
-            final_output_m = torch.zeros_like(final_output_g)
+        iid_emb = model.ln_iid(iid_emb)
 
-
-        if model.parallel["set_aggr"] == "item":
-            iid_emb = model.ln_iid(iid_emb)
+        if model.aggregation == "aggregation":
+            final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0)
+            final_output_g, iid_emb = p_sample(model, start2, cond2, iid_emb, device, diff_id=1)
             final_output_m = model.ln_m(model.linear_m(final_output_m))
-            if model.aggregation == "aggregation":
-                final_output_g = model.ln_g(model.linear_g(final_output_g))
-                tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
-            elif model.aggregation == "aggregation_ab1":
-                tokens = torch.stack([iid_emb, final_output_m], dim=1)
-            elif model.aggregation == "aggregation_ab2":
-                final_output_g = model.ln_g(model.linear_g(final_output_g))
-                tokens = torch.stack([iid_emb, final_output_g], dim=1)
-            else:
-                tokens = torch.stack([iid_emb, final_output_m], dim=1)
-            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
-            final_output = out[:, 0, :]  # (B, D)
+            final_output_g = model.ln_g(model.linear_g(final_output_g))
+            base_tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
 
-            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+        elif model.aggregation == "aggregation_ab1":
+            final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0)
+            final_output_m = model.ln_m(model.linear_m(final_output_m))
+            base_tokens = torch.stack([iid_emb, final_output_m], dim=1)
+
+        elif model.aggregation == "aggregation_ab2":
+            final_output_g, iid_emb = p_sample(model, start2, cond2, iid_emb, device, diff_id=0)
+            final_output_g = model.ln_g(model.linear_g(final_output_g))
+            base_tokens = torch.stack([iid_emb, final_output_g], dim=1)
+
+        if model.parallel["set_aggr"] == "item": 
+            tokens = base_tokens
 
         elif model.parallel["set_aggr"] == "item_i":
-            iid_emb = model.ln_iid(iid_emb)
-            final_output_m = model.ln_m(model.linear_m(final_output_m))
-            if model.aggregation == "aggregation":
-                final_output_g = model.ln_g(model.linear_g(final_output_g))
-            elif model.aggregation == "aggregation_ab2":
-                final_output_g = model.ln_g(model.linear_g(final_output_g))
-
-            uid = uid.long()  # (B,)
             iid = iid.squeeze(1)
 
             style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
@@ -535,33 +492,26 @@ def diffusion_loss_fn_parallel(
             item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
             item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
 
-            if model.aggregation == "aggregation":
-                tokens = torch.stack([iid_emb, final_output_m, final_output_g, item_style_tok], dim=1)
-            elif model.aggregation == "aggregation_ab1":
-                tokens = torch.stack([iid_emb, final_output_m, item_style_tok], dim=1)
-            elif model.aggregation == "aggregation_ab2":
-                tokens = torch.stack([iid_emb, final_output_g, item_style_tok], dim=1)
-            else:
-                tokens = torch.stack([iid_emb, final_output_m, item_style_tok], dim=1)
-            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
-            final_output = out[:, 0, :]  # (B, D)
-
-            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
-
-
+            tokens = torch.cat([base_tokens, item_style_tok.unsqueeze(1)], dim=1)
+        
         elif model.parallel["set_aggr"] == "item_iu":
-            iid_emb = model.ln_iid(iid_emb)
-            final_output_m = model.ln_m(model.linear_m(final_output_m))
-            if model.aggregation == "aggregation":
-                final_output_g = model.ln_g(model.linear_g(final_output_g))
-            elif model.aggregation == "aggregation_ab2":
-                final_output_g = model.ln_g(model.linear_g(final_output_g))
-
             uid = uid.long()  # (B,)
             iid = iid.squeeze(1)
 
             style_src = style_src.to(final_output_m.device)
             style_u = style_src[uid][:, :2]  # (B, F)
+
+            if model.parallel["bias_mapping"] == 'user':
+                style_u = model.user_style_mapper(style_u)            
+                mapping_loss = F.mse_loss(style_u, model.style_tgt_user[uid, :2])
+                style_u = style_u.detach()
+            elif model.parallel["bias_mapping"] == 'user_domain':
+                style_u = style_src[uid][:, :2]
+                style_u = torch.cat([style_u, model.style_tgt_domain[:2].unsqueeze(0).expand(style_u.size(0), -1)], dim=1)
+                style_u = model.user_style_mapper(style_u)    
+                mapping_loss = F.mse_loss(style_u, model.style_tgt_user[uid, :2])
+                style_u = style_u.detach()
+
             style_tok = model.style_encoder(style_u)  # (B, D)
             style_tok = model.style_ln(style_tok)  # (B, D)
             style_tok_u = model.style_scale * style_tok  # (B, D)
@@ -571,51 +521,35 @@ def diffusion_loss_fn_parallel(
             item_style_tok = model.item_style_encoder(style_i)  # (B, D)
             item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
             item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
-
-            if model.aggregation == "aggregation":
-                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
-            elif model.aggregation == "aggregation_ab1":
-                tokens = torch.stack([iid_emb, final_output_m, style_tok_u, item_style_tok], dim=1)
-            elif model.aggregation == "aggregation_ab2":
-                tokens = torch.stack([iid_emb, final_output_g, style_tok_u, item_style_tok], dim=1)
-            else:
-                tokens = torch.stack([iid_emb, final_output_m, style_tok_u, item_style_tok], dim=1)
-            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
-            final_output = out[:, 0, :]  # (B, D)
-
-            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
-
+            
+            tokens = torch.cat([base_tokens, style_tok_u.unsqueeze(1), item_style_tok.unsqueeze(1)], dim=1)
 
         elif model.parallel["set_aggr"] == "item_u":
-            iid_emb = model.ln_iid(iid_emb)
-            final_output_m = model.ln_m(model.linear_m(final_output_m))
-            if model.aggregation == "aggregation":
-                final_output_g = model.ln_g(model.linear_g(final_output_g))
-            elif model.aggregation == "aggregation_ab2":
-                final_output_g = model.ln_g(model.linear_g(final_output_g))
-
             uid = uid.long()  # (B,)
 
             style_src = style_src.to(final_output_m.device)
             style_u = style_src[uid][:, :2]  # (B, F)
+            
+            if model.parallel["bias_mapping"] == 'user':
+                style_u = model.user_style_mapper(style_u)            
+                mapping_loss = F.mse_loss(style_u, model.style_tgt_user[uid, :2])
+                style_u = style_u.detach()
+            elif model.parallel["bias_mapping"] == 'user_domain':
+                style_u = style_src[uid][:, :2]
+                style_u = torch.cat([style_u, model.style_tgt_domain[:2].unsqueeze(0).expand(style_u.size(0), -1)], dim=1)
+                style_u = model.user_style_mapper(style_u)    
+                mapping_loss = F.mse_loss(style_u, model.style_tgt_user[uid, :2])
+                style_u = style_u.detach()
+
             style_tok = model.style_encoder(style_u)  # (B, D)
             style_tok = model.style_ln(style_tok)  # (B, D)
             style_tok_u = model.style_scale * style_tok  # (B, D)
 
-            if model.aggregation == "aggregation":
-                tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u], dim=1)
-            elif model.aggregation == "aggregation_ab1":
-                tokens = torch.stack([iid_emb, final_output_m, style_tok_u], dim=1)
-            elif model.aggregation == "aggregation_ab2":
-                tokens = torch.stack([iid_emb, final_output_g, style_tok_u], dim=1)
-            else:
-                tokens = torch.stack([iid_emb, final_output_m, style_tok_u], dim=1)
-            out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
-            final_output = out[:, 0, :]  # (B, D)
+            tokens = torch.cat([base_tokens, style_tok_u.unsqueeze(1)], dim=1)
 
-            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
-
-
+        out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+        final_output = out[:, 0, :]  # (B, D)
+        y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
 
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
@@ -623,20 +557,16 @@ def diffusion_loss_fn_parallel(
         # RMSE
         # task_loss =   (y_pred - y_input.squeeze().float()).square().sum().sqrt() / y_pred.shape[0]
 
+        if model.parallel["bias_mapping"] in ["user", "user_domain"]:
+            task_loss += (10 * mapping_loss)
+
         if model.parallel["set_loss"] == 0:
-            if model.aggregation == "aggregation_ab2":
-                return F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
-            
-            loss = F.mse_loss(x_0_m, final_output_m) + model.task_lambda * task_loss
             if model.aggregation == "aggregation":
-                loss += F.mse_loss(x_0_g, final_output_g)
-            return loss
-        elif model.parallel["set_loss"] == 1:
-            return F.mse_loss(x_0_g, final_output) + model.task_lambda * task_loss
-        elif model.parallel["set_loss"] == 2:
-            return F.mse_loss((x_0_m + x_0_g) / 2, final_output) + model.task_lambda * task_loss
-        elif model.parallel["set_loss"] == 3:
-            return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss  # ALM 로스 + task loss
+                return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
+            elif model.aggregation == "aggregation_ab1":
+                return F.mse_loss(x_0_m, final_output_m) + model.task_lambda * task_loss
+            elif model.aggregation == "aggregation_ab2":
+                return F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
 
 # generation fun
 def p_sample(model, cond_emb, x, iid_emb, device, diff_id):  # ALM + task loss
