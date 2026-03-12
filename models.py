@@ -302,6 +302,12 @@ class MFBasedModel(torch.nn.Module):
                 all_level_vectors2 = cond_emb2
                 quantized1, quantized2 = None, None
 
+            # ! Condition Crossing
+            if diff_model.rqvae.get("cross_cond", False) and diff_model.aggregation:
+                src_uid_emb1, src_uid_emb2 = src_uid_emb2, src_uid_emb1
+                all_level_vectors1, all_level_vectors2 = all_level_vectors2, all_level_vectors1
+                quantized1, quantized2 = quantized2, quantized1
+
             # is_task=False: 노이즈 예측 , is_task=True: ALS + task 로스
             loss = Diff.diffusion_loss_fn_parallel(
                 diff_model,
@@ -352,6 +358,12 @@ class MFBasedModel(torch.nn.Module):
                 if diff_model.aggregation:
                     quantized2, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
 
+                # ! Condition Crossing
+                if diff_model.rqvae.get("cross_cond", False) and diff_model.aggregation:
+                    src_uid_emb1, src_uid_emb2 = src_uid_emb2, src_uid_emb1
+                    all_level_vectors1, all_level_vectors2 = all_level_vectors2, all_level_vectors1
+                    quantized1, quantized2 = quantized2, quantized1
+
                 if diff_model.rqvae["start_point"] == "src_u":
                     trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0)
                     if diff_model.aggregation:
@@ -368,74 +380,27 @@ class MFBasedModel(torch.nn.Module):
                         trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, noise2, all_level_vectors2, iid_emb, device, diff_id=1)
 
             else:
+                # ! Condition Crossing
+                if diff_model.rqvae.get("cross_cond", False) and diff_model.aggregation:
+                    c1_cond, c2_cond = src_uid_emb2, src_uid_emb1
+                else:
+                    c1_cond, c2_cond = src_uid_emb1, src_uid_emb2
+
                 if diff_model.rqvae["start_point"] == "noise":
                     noise1 = torch.randn_like(src_uid_emb1)
-                    trans_emb_m, iid_emb = Diff.p_sample_loop(diff_model, noise1, src_uid_emb1, iid_emb, device, diff_id=0)
+                    trans_emb_m, iid_emb = Diff.p_sample_loop(diff_model, noise1, c1_cond, iid_emb, device, diff_id=0)
                     if diff_model.aggregation:
                         noise2 = torch.randn_like(src_uid_emb2)
-                        trans_emb_g, iid_emb = Diff.p_sample_loop(diff_model, noise2, src_uid_emb2, iid_emb, device, diff_id=1)
+                        trans_emb_g, iid_emb = Diff.p_sample_loop(diff_model, noise2, c2_cond, iid_emb, device, diff_id=1)
                 else:
-                    trans_emb_m, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb1, src_uid_emb1, iid_emb, device, diff_id=0)
+                    trans_emb_m, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb1, c1_cond, iid_emb, device, diff_id=0)
                     if diff_model.aggregation:
-                        trans_emb_g, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb2, src_uid_emb2, iid_emb, device, diff_id=1)
+                        trans_emb_g, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb2, c2_cond, iid_emb, device, diff_id=1)
 
             if not diff_model.aggregation:
                 trans_emb_g = torch.zeros_like(trans_emb_m)
 
-
-
-
-            ### [TEST] 2. Diff1, Diff2 결과 aggregation
-            if diff_model.parallel["set_aggr"] == "attn":
-                # ! 어텐션으로 최종 임베딩 종합
-                if diff_model.aggregation:
-                    trans_emb = diff_model.attn_layer(torch.stack([trans_emb_m, trans_emb_g], dim=1))
-                else:
-                    trans_emb = diff_model.attn_layer(trans_emb_m.unsqueeze(1))
-                trans_emb = trans_emb[:, 0, :]
-
-            elif diff_model.parallel["set_aggr"] == "item_attn":
-                # 아이템을 쿼리로 사용
-                if diff_model.aggregation:
-                    trans_emb = diff_model.attn_layer(torch.stack([trans_emb_m, trans_emb_g], dim=1), query=iid_emb.unsqueeze(1))
-                else:
-                    trans_emb = diff_model.attn_layer(trans_emb_m.unsqueeze(1), query=iid_emb.unsqueeze(1))
-                trans_emb = trans_emb[:, 0, :]
-
-            elif diff_model.parallel["set_aggr"] == "item_diu":
-                # 아이템 포함해서 self attn -> 아이템 출력만 사용
-                iid_emb = diff_model.ln_iid(iid_emb)
-                final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
-                if diff_model.aggregation:
-                    final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
-
-                uid = tgt_uid.long()
-                iid_input = iid_input.squeeze(1)
-                # style token
-                style_src = style_src.to(trans_emb_g.device)
-                style_u = style_src[uid][:, :2]  # (B, F)
-                style_tok = diff_model.style_encoder(style_u)  # (B, D)
-                style_tok = diff_model.style_ln(style_tok)  # (B, D)
-                style_tok_u = diff_model.style_scale * style_tok  # (B, D)
-
-                style_tgt_item = diff_model.style_tgt_item.to(trans_emb_g.device)  # [I_total, F_item]
-                style_i = style_tgt_item[iid_input][:, :2]  # (B, F_item)
-                item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
-                item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
-                item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
-
-                if diff_model.aggregation:
-                    tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
-                else:
-                    tokens = torch.stack([iid_emb, final_output_m, style_tok_u, item_style_tok], dim=1)
-                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))
-                final_output = out[:, 0, :]
-
-                y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
-                mu_t = diff_model.tgt_global_bias
-                y_pred = y_pred + mu_t
-                    
-            elif diff_model.parallel["set_aggr"] == "item_d":
+            if diff_model.parallel["set_aggr"] == "item":
                 iid_emb = diff_model.ln_iid(iid_emb)
                 final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
                 if diff_model.aggregation:
@@ -447,70 +412,6 @@ class MFBasedModel(torch.nn.Module):
                 final_output = out[:, 0, :]  # (B, D)
 
                 y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
-                mu_t = diff_model.tgt_global_bias
-                y_pred = y_pred + mu_t
-
-            elif diff_model.parallel["set_aggr"] == "item":
-                iid_emb = diff_model.ln_iid(iid_emb)
-                final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
-                if diff_model.aggregation:
-                    final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
-                    tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
-                else:
-                    tokens = torch.stack([iid_emb, final_output_m], dim=1)
-                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
-                final_output = out[:, 0, :]  # (B, D)
-
-                y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
-                
-            elif diff_model.parallel["set_aggr"] == "item_di":
-                iid_emb = diff_model.ln_iid(iid_emb)
-                final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
-                if diff_model.aggregation:
-                    final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
-
-                style_tgt_item = diff_model.style_tgt_item.to(trans_emb_m.device)  # [I_total, F_item]
-                style_i = style_tgt_item[iid_input][:, :2]  # (B, F_item)
-                item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
-                item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
-                item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
-
-                if diff_model.aggregation:
-                    tokens = torch.stack([iid_emb, final_output_m, final_output_g, item_style_tok], dim=1)
-                else:
-                    tokens = torch.stack([iid_emb, final_output_m, item_style_tok], dim=1)
-                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
-                final_output = out[:, 0, :]  # (B, D)
-
-                y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
-                mu_t = diff_model.tgt_global_bias
-                y_pred = y_pred + mu_t
-
-            elif diff_model.parallel["set_aggr"] == "item_du":
-                iid_emb = diff_model.ln_iid(iid_emb)
-                final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
-                if diff_model.aggregation:
-                    final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
-
-                uid = tgt_uid.long()  # (B,)
-
-                style_src = style_src.to(trans_emb_m.device)
-                style_u = style_src[uid][:, :2]  # (B, F)
-                style_tok = diff_model.style_encoder(style_u)  # (B, D)
-                style_tok = diff_model.style_ln(style_tok)  # (B, D)
-                style_tok_u = diff_model.style_scale * style_tok  # (B, D)
-
-                if diff_model.aggregation:
-                    tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u], dim=1)
-                else:
-                    tokens = torch.stack([iid_emb, final_output_m, style_tok_u], dim=1)
-                out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
-                final_output = out[:, 0, :]  # (B, D)
-
-                y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
-                mu_t = diff_model.tgt_global_bias
-                y_pred = y_pred + mu_t
-
 
             elif diff_model.parallel["set_aggr"] == "item_i":
                 iid_emb = diff_model.ln_iid(iid_emb)

@@ -55,11 +55,15 @@ def prepare_1():
     parser.add_argument("--pretrain_rq", type=str2bool, default=True, help="rqvae pretrain 여부")
     parser.add_argument("--pretrain_epochs", type=int, default=50, help="rqvae pretrain epoch")
     parser.add_argument("--freeze_rq", type=str2bool, default=True, help="rqvae 파라미터 고정 여부")
+    parser.add_argument("--cross_cond", type=str2bool, default=True, help="MF vs Aggr 컨디션 교차 여부")
     parser.add_argument("--start_point", default="src_u", help="[src_u, quant_u, noise]")
 
     # item cond
     parser.add_argument("--item_cond", type=bool, default=False, help="아이템 조건 사용 여부")
     parser.add_argument("--w", type=float, default=0.0, help="Diffusion inference - uncond 가중치 w")
+    parser.add_argument("--diff_task_lambda", type=float, default=0.1, help="Task loss weight")
+    parser.add_argument("--diff_scale", type=float, default=0.1, help="Classifier-free guidance scale")
+    parser.add_argument("--diff_mask_rate", type=float, default=0.1, help="Diffusion condition mask rate")
     parser.add_argument("--emb_dim", type=int, default=10, help="MF emb dim")
 
     args = parser.parse_args()
@@ -96,7 +100,11 @@ def prepare_2(args, config_path):
         config["pretrain_rq"] = args.pretrain_rq
         config["pretrain_epochs"] = args.pretrain_epochs
         config["freeze_rq"] = args.freeze_rq
+        config["cross_cond"] = args.cross_cond
         config["start_point"] = args.start_point
+        config["diff_task_lambda"] = args.diff_task_lambda
+        config["diff_scale"] = args.diff_scale
+        config["diff_mask_rate"] = args.diff_mask_rate
 
     return config
 

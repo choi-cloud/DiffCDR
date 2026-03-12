@@ -105,7 +105,8 @@ class Run:
             "start_point": config["start_point"],
             "pretrain_rq": config["pretrain_rq"],
             "pretrain_epochs": config["pretrain_epochs"],
-            "freeze_rq": config["freeze_rq"]
+            "freeze_rq": config["freeze_rq"],
+            "cross_cond": config["cross_cond"],
         }
 
         self.w = config["w"]
