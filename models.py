@@ -278,7 +278,7 @@ class MFBasedModel(torch.nn.Module):
             tgt_emb1 = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
 
-            if diff_model.aggregation:
+            if diff_model.aggregation != "none":
                 tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)  # Aggr
                 src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
             else:
@@ -293,7 +293,7 @@ class MFBasedModel(torch.nn.Module):
             # ! mf 임베딩과 aggr 임베딩 양자화
             if diff_model.rqvae["RQVAE"] == True:
                 quantized1, all_level_vectors1, rq_loss1 = diff_model.rq_mf(cond_emb1)  # [L, B, D]
-                if diff_model.aggregation:
+                if diff_model.aggregation != "none":
                     quantized2, all_level_vectors2, rq_loss2 = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
                 else:
                     quantized2, all_level_vectors2, rq_loss2 = None, cond_emb2, 0.0
@@ -303,7 +303,7 @@ class MFBasedModel(torch.nn.Module):
                 quantized1, quantized2 = None, None
 
             # ! Condition Crossing
-            if diff_model.rqvae.get("cross_cond", False) and diff_model.aggregation:
+            if diff_model.rqvae.get("cross_cond", False) and diff_model.aggregation != "none":
                 src_uid_emb1, src_uid_emb2 = src_uid_emb2, src_uid_emb1
                 all_level_vectors1, all_level_vectors2 = all_level_vectors2, all_level_vectors1
                 quantized1, quantized2 = quantized2, quantized1
@@ -331,7 +331,7 @@ class MFBasedModel(torch.nn.Module):
             )
 
             if diff_model.rqvae["RQVAE"] == True:
-                rq_loss = rq_loss1 + rq_loss2 if diff_model.aggregation else rq_loss1
+                rq_loss = rq_loss1 + rq_loss2 if diff_model.aggregation != "none" else rq_loss1
                 total_loss = loss + diff_model.rqvae["alpha_rq"] * rq_loss
             else:
                 total_loss = loss
@@ -344,7 +344,7 @@ class MFBasedModel(torch.nn.Module):
 
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
 
-            if diff_model.aggregation:
+            if diff_model.aggregation != "none":
                 src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
             else:
                 src_uid_emb2 = torch.zeros_like(src_uid_emb1)
@@ -353,59 +353,80 @@ class MFBasedModel(torch.nn.Module):
             cond_emb2 = src_uid_emb2
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
 
+            trans_emb_m = torch.zeros((src_uid_emb1.shape[0], self.emb_dim)).to(device)
+            trans_emb_g = torch.zeros((src_uid_emb1.shape[0], self.emb_dim)).to(device)
+
             if diff_model.rqvae["RQVAE"] == True:
                 quantized1, all_level_vectors1, _ = diff_model.rq_mf(cond_emb1)  # [L, B, D]
-                if diff_model.aggregation:
+                if diff_model.aggregation != "none":
                     quantized2, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
 
                 # ! Condition Crossing
-                if diff_model.rqvae.get("cross_cond", False) and diff_model.aggregation:
+                if diff_model.rqvae.get("cross_cond", False) and diff_model.aggregation != "none":
                     src_uid_emb1, src_uid_emb2 = src_uid_emb2, src_uid_emb1
                     all_level_vectors1, all_level_vectors2 = all_level_vectors2, all_level_vectors1
                     quantized1, quantized2 = quantized2, quantized1
 
                 if diff_model.rqvae["start_point"] == "src_u":
-                    trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0)
-                    if diff_model.aggregation:
-                        trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=1)
+                    if diff_model.aggregation in ["aggregation", "aggregation_ab1"]:
+                        trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb1, all_level_vectors1, iid_emb, device, diff_id=0)
+                    if diff_model.aggregation in ["aggregation", "aggregation_ab2"]:
+                        # If ab2, there is only one path, so it's at diff_id=0 but refers to Aggr
+                        aggr_diff_id = 1 if diff_model.aggregation == "aggregation" else 0
+                        trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, src_uid_emb2, all_level_vectors2, iid_emb, device, diff_id=aggr_diff_id)
                 elif diff_model.rqvae["start_point"] == "quant_u":
-                    trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, quantized1, all_level_vectors1, iid_emb, device, diff_id=0)
-                    if diff_model.aggregation:
-                        trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, quantized2, all_level_vectors2, iid_emb, device, diff_id=1)
+                    if diff_model.aggregation in ["aggregation", "aggregation_ab1"]:
+                        trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, quantized1, all_level_vectors1, iid_emb, device, diff_id=0)
+                    if diff_model.aggregation in ["aggregation", "aggregation_ab2"]:
+                        aggr_diff_id = 1 if diff_model.aggregation == "aggregation" else 0
+                        trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, quantized2, all_level_vectors2, iid_emb, device, diff_id=aggr_diff_id)
                 elif diff_model.rqvae["start_point"] == "noise":
-                    noise1 = torch.randn_like(src_uid_emb1)
-                    trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, noise1, all_level_vectors1, iid_emb, device, diff_id=0)
-                    if diff_model.aggregation:
+                    if diff_model.aggregation in ["aggregation", "aggregation_ab1"]:
+                        noise1 = torch.randn_like(src_uid_emb1)
+                        trans_emb_m, iid_emb = Diff.p_sample_loop_parallel(diff_model, noise1, all_level_vectors1, iid_emb, device, diff_id=0)
+                    if diff_model.aggregation in ["aggregation", "aggregation_ab2"]:
                         noise2 = torch.randn_like(src_uid_emb2)
-                        trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, noise2, all_level_vectors2, iid_emb, device, diff_id=1)
+                        aggr_diff_id = 1 if diff_model.aggregation == "aggregation" else 0
+                        trans_emb_g, iid_emb = Diff.p_sample_loop_parallel(diff_model, noise2, all_level_vectors2, iid_emb, device, diff_id=aggr_diff_id)
 
             else:
                 # ! Condition Crossing
-                if diff_model.rqvae.get("cross_cond", False) and diff_model.aggregation:
+                if diff_model.rqvae.get("cross_cond", False) and diff_model.aggregation != "none":
                     c1_cond, c2_cond = src_uid_emb2, src_uid_emb1
                 else:
                     c1_cond, c2_cond = src_uid_emb1, src_uid_emb2
 
                 if diff_model.rqvae["start_point"] == "noise":
-                    noise1 = torch.randn_like(src_uid_emb1)
-                    trans_emb_m, iid_emb = Diff.p_sample_loop(diff_model, noise1, c1_cond, iid_emb, device, diff_id=0)
-                    if diff_model.aggregation:
+                    if diff_model.aggregation in ["aggregation", "aggregation_ab1"]:
+                        noise1 = torch.randn_like(src_uid_emb1)
+                        trans_emb_m, iid_emb = Diff.p_sample_loop(diff_model, noise1, c1_cond, iid_emb, device, diff_id=0)
+                    if diff_model.aggregation in ["aggregation", "aggregation_ab2"]:
                         noise2 = torch.randn_like(src_uid_emb2)
-                        trans_emb_g, iid_emb = Diff.p_sample_loop(diff_model, noise2, c2_cond, iid_emb, device, diff_id=1)
+                        aggr_diff_id = 1 if diff_model.aggregation == "aggregation" else 0
+                        trans_emb_g, iid_emb = Diff.p_sample_loop(diff_model, noise2, c2_cond, iid_emb, device, diff_id=aggr_diff_id)
                 else:
-                    trans_emb_m, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb1, c1_cond, iid_emb, device, diff_id=0)
-                    if diff_model.aggregation:
-                        trans_emb_g, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb2, c2_cond, iid_emb, device, diff_id=1)
+                    if diff_model.aggregation in ["aggregation", "aggregation_ab1"]:
+                        trans_emb_m, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb1, c1_cond, iid_emb, device, diff_id=0)
+                    if diff_model.aggregation in ["aggregation", "aggregation_ab2"]:
+                        aggr_diff_id = 1 if diff_model.aggregation == "aggregation" else 0
+                        trans_emb_g, iid_emb = Diff.p_sample_loop(diff_model, src_uid_emb2, c2_cond, iid_emb, device, diff_id=aggr_diff_id)
 
-            if not diff_model.aggregation:
+            if diff_model.aggregation == "aggregation_ab1":
                 trans_emb_g = torch.zeros_like(trans_emb_m)
+            elif diff_model.aggregation == "aggregation_ab2":
+                trans_emb_m = torch.zeros_like(trans_emb_g)
 
             if diff_model.parallel["set_aggr"] == "item":
                 iid_emb = diff_model.ln_iid(iid_emb)
                 final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
-                if diff_model.aggregation:
+                if diff_model.aggregation == "aggregation":
                     final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
                     tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
+                elif diff_model.aggregation == "aggregation_ab1":
+                    tokens = torch.stack([iid_emb, final_output_m], dim=1)
+                elif diff_model.aggregation == "aggregation_ab2":
+                    final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
+                    tokens = torch.stack([iid_emb, final_output_g], dim=1)
                 else:
                     tokens = torch.stack([iid_emb, final_output_m], dim=1)
                 out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
@@ -428,8 +449,12 @@ class MFBasedModel(torch.nn.Module):
                 item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
                 item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
 
-                if diff_model.aggregation:
+                if diff_model.aggregation == "aggregation":
                     tokens = torch.stack([iid_emb, final_output_m, final_output_g, item_style_tok], dim=1)
+                elif diff_model.aggregation == "aggregation_ab1":
+                    tokens = torch.stack([iid_emb, final_output_m, item_style_tok], dim=1)
+                elif diff_model.aggregation == "aggregation_ab2":
+                    tokens = torch.stack([iid_emb, final_output_g, item_style_tok], dim=1)
                 else:
                     tokens = torch.stack([iid_emb, final_output_m, item_style_tok], dim=1)
                 out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
@@ -459,8 +484,12 @@ class MFBasedModel(torch.nn.Module):
                 item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
                 item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
 
-                if diff_model.aggregation:
+                if diff_model.aggregation == "aggregation":
                     tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u, item_style_tok], dim=1)
+                elif diff_model.aggregation == "aggregation_ab1":
+                    tokens = torch.stack([iid_emb, final_output_m, style_tok_u, item_style_tok], dim=1)
+                elif diff_model.aggregation == "aggregation_ab2":
+                    tokens = torch.stack([iid_emb, final_output_g, style_tok_u, item_style_tok], dim=1)
                 else:
                     tokens = torch.stack([iid_emb, final_output_m, style_tok_u, item_style_tok], dim=1)
                 out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
@@ -472,7 +501,9 @@ class MFBasedModel(torch.nn.Module):
             elif diff_model.parallel["set_aggr"] == "item_u":
                 iid_emb = diff_model.ln_iid(iid_emb)
                 final_output_m = diff_model.ln_m(diff_model.linear_m(trans_emb_m))
-                if diff_model.aggregation:
+                if diff_model.aggregation == "aggregation":
+                    final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
+                elif diff_model.aggregation == "aggregation_ab2":
                     final_output_g = diff_model.ln_g(diff_model.linear_g(trans_emb_g))
 
                 uid = tgt_uid.long()  # (B,)
@@ -483,8 +514,12 @@ class MFBasedModel(torch.nn.Module):
                 style_tok = diff_model.style_ln(style_tok)  # (B, D)
                 style_tok_u = diff_model.style_scale * style_tok  # (B, D)
                 
-                if diff_model.aggregation:
+                if diff_model.aggregation == "aggregation":
                     tokens = torch.stack([iid_emb, final_output_m, final_output_g, style_tok_u], dim=1)
+                elif diff_model.aggregation == "aggregation_ab1":
+                    tokens = torch.stack([iid_emb, final_output_m, style_tok_u], dim=1)
+                elif diff_model.aggregation == "aggregation_ab2":
+                    tokens = torch.stack([iid_emb, final_output_g, style_tok_u], dim=1)
                 else:
                     tokens = torch.stack([iid_emb, final_output_m, style_tok_u], dim=1)
                 out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)

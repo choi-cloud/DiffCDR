@@ -1013,7 +1013,7 @@ class Run:
             if hasattr(diff_model, "rq_mf"):
                 for p in diff_model.rq_mf.parameters():
                     p.requires_grad = False
-            if self.parallel_setting.get("aggregation", True) and hasattr(diff_model, "rq_aggr"):
+            if self.parallel_setting.get("aggregation", "aggregation") != "none" and hasattr(diff_model, "rq_aggr"):
                 for p in diff_model.rq_aggr.parameters():
                     p.requires_grad = False
 
@@ -1080,7 +1080,7 @@ class Run:
         params = []
         if hasattr(diff_model, "rq_mf"):
             params += list(diff_model.rq_mf.parameters())
-        if self.parallel_setting.get("aggregation", True) and hasattr(diff_model, "rq_aggr"):
+        if self.parallel_setting.get("aggregation", "aggregation") != "none" and hasattr(diff_model, "rq_aggr"):
             params += list(diff_model.rq_aggr.parameters())
             
         if not params:
@@ -1103,7 +1103,7 @@ class Run:
                 loss = loss1
                 
                 # Aggr path loss if applicable
-                if self.parallel_setting.get("aggregation", True) and hasattr(diff_model, "rq_aggr"):
+                if self.parallel_setting.get("aggregation", "aggregation") != "none" and hasattr(diff_model, "rq_aggr"):
                     src_uid_emb2 = model._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
                     _, _, loss2 = diff_model.rq_aggr(src_uid_emb2)
                     loss += loss2

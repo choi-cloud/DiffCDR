@@ -45,7 +45,7 @@ def prepare_1():
     parser.add_argument("--set_init", type=int, default=1, help="디퓨전2의 초기 x_T 설정, 0: MF, 1: aggr")
     parser.add_argument("--set_proj", type=int, default=1, help="diff 결과 proj 위치 - 0: 따로, 1: aggr 이후 같이")
     parser.add_argument("--set_aggr", type=str, default="item_diu", help="[item_diu, item_d, item_i, item_u, item_di, item_du, item_iu]")
-    parser.add_argument("--aggregation", type=str2bool, default=True, help="MF+Aggr or MF only")
+    parser.add_argument("--aggregation", type=str, default="aggregation", help="[aggregation, aggregation_ab1, aggregation_ab2]")
 
     # RQVAE(code_dim=input_dim, num_levels=4, codebook_size=256)
     parser.add_argument("--codebook_num", type=int, default=4, help="RQVAE 코드북 개수(level)")
