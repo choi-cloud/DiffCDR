@@ -459,7 +459,7 @@ def diffusion_loss_fn_parallel(
             p_sample = p_sample_loop 
 
         if model.rqvae["cross_cond"] == True:
-            cond_emb1, cond_emb2 = cond_emb2, cond_emb1
+            cond1, cond2 = cond2, cond1
 
         iid_emb = model.ln_iid(iid_emb)
 
