@@ -395,7 +395,7 @@ class MFBasedModel(torch.nn.Module):
 
             elif diff_model.parallel["set_aggr"] == "item_i":
                 iid = iid_input.squeeze(1)
-                style_tgt_item = diff_model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+                style_tgt_item = diff_model.style_tgt_item.to(start1.device)  # [I_total, F_item]
                 style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
                 item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
                 item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
@@ -406,7 +406,7 @@ class MFBasedModel(torch.nn.Module):
             elif diff_model.parallel["set_aggr"] == "item_iu":
                 uid = tgt_uid.long()  # (B,)
                 iid = iid_input.squeeze(1)
-                style_src = style_src.to(final_output_m.device)
+                style_src = style_src.to(start1.device)
                 style_u = style_src[uid][:, :2]  # (B, F)
 
                 if diff_model.parallel["bias_mapping"] == 'user':
@@ -424,7 +424,7 @@ class MFBasedModel(torch.nn.Module):
                 style_tok = diff_model.style_ln(style_tok)  # (B, D)
                 style_tok_u = diff_model.style_scale * style_tok  # (B, D)
 
-                style_tgt_item = diff_model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+                style_tgt_item = diff_model.style_tgt_item.to(start1.device)  # [I_total, F_item]
                 style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
                 item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
                 item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
@@ -435,7 +435,7 @@ class MFBasedModel(torch.nn.Module):
 
             elif diff_model.parallel["set_aggr"] == "item_u":
                 uid = tgt_uid.long()  # (B,)
-                style_src = style_src.to(final_output_m.device)
+                style_src = style_src.to(start1.device)
                 style_u = style_src[uid][:, :2]  # (B, F)
                 
                 if diff_model.parallel["bias_mapping"] == 'user':
