@@ -277,12 +277,8 @@ class MFBasedModel(torch.nn.Module):
             tgt_emb1 = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
 
-            if diff_model.aggregation in ["aggregation", "aggregation_ab2"]:
-                tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)  # Aggr
-                src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
-            else:
-                tgt_emb2 = torch.zeros_like(tgt_emb1)
-                src_uid_emb2 = torch.zeros_like(src_uid_emb1)
+            tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)  # Aggr
+            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
             
             cond_emb1 = src_uid_emb1
             cond_emb2 = src_uid_emb2
