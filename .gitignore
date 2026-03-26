@@ -8,4 +8,7 @@
 *.txt
 *.gz
 *.pdf
-
+*.xlsx
+parse_excel.py
+parse_logs.py
+parse_logs_by_ratio.py

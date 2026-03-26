@@ -70,7 +70,7 @@ class Run:
             self.root + "stylecache/_" + str(int(self.ratio[0] * 10)) + "_" + str(int(self.ratio[1] * 10)) + "/tgt_" + self.tgt + "_src_" + self.src
         )
 
-        aggretaion_name = str(True) if config["aggregation"] == "aggregation" else str(config["aggregation"])
+        aggretaion_name = str(True)
         self.rqvae_ckpt_root = (
             self.root + "rqvae_ckpt/" + self.src + "_" + str(int(self.ratio[0] * 10)) + "_" + str(int(self.ratio[1] * 10)) 
             + "/" + str(config["codebook_num"]) + "_" + str(config["codebook_size"]) + "_" + str(config["pretrain_epochs"]) + "ep_" + str(config["rqvae_lr"]) + "lr_" + aggretaion_name

@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 import math
 
-from dpm_solver_pytorch import model_wrapper, model_wrapper_hierarchical_cond, NoiseScheduleVP, DPM_Solver
+from dpm_solver_pytorch import model_wrapper, model_wrapper_hierarchical_cond, NoiseScheduleVP, DPM_Solver, hierarchical_cond_from_levels
 from utils import AttentionLayer, SimilarityProjector
 
 from rqvae import ResidualQuantizer
@@ -420,10 +420,6 @@ def diffusion_loss_fn_parallel(
         if model.aggregation in ["aggregation", "aggregation_ab2"]:
             x_g, e_g = q_x_fn(model, x_0_g, t, device)
 
-         # ! Condition Crossing
-        if model.rqvae["cross_cond"] == True:
-            cond_emb1, cond_emb2 = cond_emb2, cond_emb1
-                
         # random mask
         cond_mask1 = 1 * (torch.rand(cond_emb1.shape[0], device=device) <= mask_rate)
         cond_mask1 = 1 - cond_mask1.int()
@@ -432,15 +428,28 @@ def diffusion_loss_fn_parallel(
         cond_mask2 = 1 - cond_mask2.int()
 
         # [TRAIN-DIM] 3. Diff1, Diff2 -> noise 예측
+        # [NEW] Apply hierarchical RQ conditioning during training for consistency
+        if model.rqvae["RQVAE"] == True and q_embs1 is not None:
+             ns = NoiseScheduleVP(schedule="linear")
+             t_cont = t.squeeze(-1).float() / model.num_steps
+             c1 = hierarchical_cond_from_levels(q_embs1, t_cont, ns)
+             c2 = hierarchical_cond_from_levels(q_embs2, t_cont, ns) if q_embs2 is not None else cond_emb2
+        else:
+             c1, c2 = cond_emb1, cond_emb2
+
         if model.aggregation == "aggregation":
-            output1 = model(x_m, t.squeeze(-1), cond_emb1, cond_mask1, diff_id=0)  # MF path
-            output2 = model(x_g, t.squeeze(-1), cond_emb2, cond_mask2, diff_id=1)  # Aggr path
+            # [OLD] output1 = model(x_m, t.squeeze(-1), cond_emb1, cond_mask1, diff_id=0)  # MF path
+            # [OLD] output2 = model(x_g, t.squeeze(-1), cond_emb2, cond_mask2, diff_id=1)  # Aggr path
+            output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)  # [NEW] MF path
+            output2 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=1)  # [NEW] Aggr path
             return F.mse_loss(x_0_m, output1) + F.mse_loss(x_0_g, output2)
         elif model.aggregation == "aggregation_ab1":
-            output1 = model(x_m, t.squeeze(-1), cond_emb1, cond_mask1, diff_id=0)  # MF path
+            # [OLD] output1 = model(x_m, t.squeeze(-1), cond_emb1, cond_mask1, diff_id=0)  # MF path
+            output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)  # [NEW] MF path
             return F.mse_loss(x_0_m, output1)
         elif model.aggregation == "aggregation_ab2":
-            output1 = model(x_g, t.squeeze(-1), cond_emb2, cond_mask2, diff_id=0)
+            # [OLD] output1 = model(x_g, t.squeeze(-1), cond_emb2, cond_mask2, diff_id=0)
+            output1 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=0)  # [NEW] Aggr path
             return F.mse_loss(x_0_g, output1)
 
     elif is_task:  # task loss ALM 수행
@@ -458,9 +467,6 @@ def diffusion_loss_fn_parallel(
             cond1, cond2 = cond_emb1, cond_emb2 
             p_sample = p_sample_loop 
 
-        if model.rqvae["cross_cond"] == True:
-            cond1, cond2 = cond2, cond1
-
         iid_emb = model.ln_iid(iid_emb)
 
         if model.aggregation == "aggregation":
@@ -468,17 +474,17 @@ def diffusion_loss_fn_parallel(
             final_output_g, iid_emb = p_sample(model, start2, cond2, iid_emb, device, diff_id=1)
             final_output_m = model.ln_m(model.linear_m(final_output_m))
             final_output_g = model.ln_g(model.linear_g(final_output_g))
-            base_tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
+            base_tokens = torch.stack([final_output_m, final_output_g], dim=1)
 
         elif model.aggregation == "aggregation_ab1":
             final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0)
             final_output_m = model.ln_m(model.linear_m(final_output_m))
-            base_tokens = torch.stack([iid_emb, final_output_m], dim=1)
+            base_tokens = torch.stack([final_output_m], dim=1)
 
         elif model.aggregation == "aggregation_ab2":
             final_output_g, iid_emb = p_sample(model, start2, cond2, iid_emb, device, diff_id=0)
             final_output_g = model.ln_g(model.linear_g(final_output_g))
-            base_tokens = torch.stack([iid_emb, final_output_g], dim=1)
+            base_tokens = torch.stack([final_output_g], dim=1)
 
         if model.parallel["set_aggr"] == "item": 
             tokens = base_tokens
@@ -486,7 +492,7 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_aggr"] == "item_i":
             iid = iid.squeeze(1)
 
-            style_tgt_item = model.style_tgt_item.to(start1.device)  # [I_total, F_item]
+            style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
             style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
             item_style_tok = model.item_style_encoder(style_i)  # (B, D)
             item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
@@ -498,7 +504,7 @@ def diffusion_loss_fn_parallel(
             uid = uid.long()  # (B,)
             iid = iid.squeeze(1)
 
-            style_src = style_src.to(start1.device)
+            style_src = style_src.to(final_output_m.device)
             style_u = style_src[uid][:, :2]  # (B, F)
 
             if model.parallel["bias_mapping"] == 'user':
@@ -516,7 +522,7 @@ def diffusion_loss_fn_parallel(
             style_tok = model.style_ln(style_tok)  # (B, D)
             style_tok_u = model.style_scale * style_tok  # (B, D)
 
-            style_tgt_item = model.style_tgt_item.to(start1.device)  # [I_total, F_item]
+            style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
             style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
             item_style_tok = model.item_style_encoder(style_i)  # (B, D)
             item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
@@ -527,7 +533,7 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_aggr"] == "item_u":
             uid = uid.long()  # (B,)
 
-            style_src = style_src.to(start1.device)
+            style_src = style_src.to(final_output_m.device)
             style_u = style_src[uid][:, :2]  # (B, F)
             
             if model.parallel["bias_mapping"] == 'user':
