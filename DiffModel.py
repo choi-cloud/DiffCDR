@@ -420,6 +420,10 @@ def diffusion_loss_fn_parallel(
         if model.aggregation in ["aggregation", "aggregation_ab2"]:
             x_g, e_g = q_x_fn(model, x_0_g, t, device)
 
+        # ! Condition Crossing
+        if model.rqvae["cross_cond"] == True:
+            cond_emb1, cond_emb2 = cond_emb2, cond_emb1
+
         # random mask
         cond_mask1 = 1 * (torch.rand(cond_emb1.shape[0], device=device) <= mask_rate)
         cond_mask1 = 1 - cond_mask1.int()
@@ -458,7 +462,7 @@ def diffusion_loss_fn_parallel(
         elif model.rqvae["start_point"] == "quant_u":
             start1, start2 = Q_emb1, Q_emb2
         elif model.rqvae["start_point"] == "noise":
-            start1, start2 = noise1 = torch.randn_like(cond_emb1), torch.randn_like(cond_emb2)
+            start1, start2 = torch.randn_like(cond_emb1), torch.randn_like(cond_emb2)
 
         if model.rqvae["RQVAE"] == True:
             cond1, cond2 = q_embs1, q_embs2
@@ -492,7 +496,7 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_aggr"] == "item_i":
             iid = iid.squeeze(1)
 
-            style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+            style_tgt_item = model.style_tgt_item.to(base_tokens.device)  # [I_total, F_item]
             style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
             item_style_tok = model.item_style_encoder(style_i)  # (B, D)
             item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
@@ -504,7 +508,7 @@ def diffusion_loss_fn_parallel(
             uid = uid.long()  # (B,)
             iid = iid.squeeze(1)
 
-            style_src = style_src.to(final_output_m.device)
+            style_src = style_src.to(base_tokens.device)
             style_u = style_src[uid][:, :2]  # (B, F)
 
             if model.parallel["bias_mapping"] == 'user':
@@ -522,7 +526,7 @@ def diffusion_loss_fn_parallel(
             style_tok = model.style_ln(style_tok)  # (B, D)
             style_tok_u = model.style_scale * style_tok  # (B, D)
 
-            style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
+            style_tgt_item = model.style_tgt_item.to(base_tokens.device)  # [I_total, F_item]
             style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
             item_style_tok = model.item_style_encoder(style_i)  # (B, D)
             item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
@@ -533,7 +537,7 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_aggr"] == "item_u":
             uid = uid.long()  # (B,)
 
-            style_src = style_src.to(final_output_m.device)
+            style_src = style_src.to(base_tokens.device)
             style_u = style_src[uid][:, :2]  # (B, F)
             
             if model.parallel["bias_mapping"] == 'user':
