@@ -441,6 +441,10 @@ def diffusion_loss_fn_parallel(
         else:
              c1, c2 = cond_emb1, cond_emb2
 
+                # ! Condition Crossing
+        if model.rqvae["cross_cond"] == True:
+            c1, c2 = c2, c1
+
         if model.aggregation == "aggregation":
             # [OLD] output1 = model(x_m, t.squeeze(-1), cond_emb1, cond_mask1, diff_id=0)  # MF path
             # [OLD] output2 = model(x_g, t.squeeze(-1), cond_emb2, cond_mask2, diff_id=1)  # Aggr path
