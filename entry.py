@@ -41,27 +41,21 @@ def prepare_1():
     parser.add_argument("--experiment", default="DiffCDR")
 
     # parallel setting
-    parser.add_argument("--set_loss", type=int, default=0, help="loss 계산, 0: MF, 1: aggr, 2: avg, 3: 따로따로")
-    parser.add_argument("--set_init", type=int, default=1, help="디퓨전2의 초기 x_T 설정, 0: MF, 1: aggr")
-    parser.add_argument("--set_proj", type=int, default=1, help="diff 결과 proj 위치 - 0: 따로, 1: aggr 이후 같이")
     parser.add_argument("--set_aggr", type=str, default="item_iu", help="[item_diu, item_d, item_i, item_u, item_di, item_du, item_iu]")
     parser.add_argument("--aggregation", type=str, default="aggregation", help="[aggregation, aggregation_ab1, aggregation_ab2]")
 
     # RQVAE(code_dim=input_dim, num_levels=4, codebook_size=256)
     parser.add_argument("--codebook_num", type=int, default=4, help="RQVAE 코드북 개수(level)")
     parser.add_argument("--codebook_size", type=int, default=64, help="RQVAE 코드북 크기")
-    parser.add_argument("--alpha_rq", type=float, default=1e-2, help="RQVAE loss 가중치")
     parser.add_argument("--RQVAE", type=str2bool, default=True, help="rq 사용 여부")
     parser.add_argument("--pretrain_rq", type=str2bool, default=True, help="rqvae pretrain 여부")
     parser.add_argument("--pretrain_epochs", type=int, default=50, help="rqvae pretrain epoch")
     parser.add_argument("--freeze_rq", type=str2bool, default=True, help="rqvae 파라미터 고정 여부")
-    parser.add_argument("--cross_cond", type=str2bool, default=True, help="MF vs Aggr 컨디션 교차 여부")
+    parser.add_argument("--cross_cond", type=str2bool, default=False, help="MF vs Aggr 컨디션 교차 여부")
     parser.add_argument("--start_point", default="noise", help="[src_u, quant_u, noise]")
     parser.add_argument("--rqvae_lr", type=float, default=0.001, help="rqvae pretrain lr")
 
     # item cond
-    parser.add_argument("--item_cond", type=bool, default=False, help="아이템 조건 사용 여부")
-    parser.add_argument("--w", type=float, default=0.0, help="Diffusion inference - uncond 가중치 w")
     parser.add_argument("--diff_task_lambda", type=float, default=1.0, help="Task loss weight")
     parser.add_argument("--diff_scale", type=float, default=0.5, help="Classifier-free guidance scale")
     parser.add_argument("--diff_mask_rate", type=float, default=0.1, help="Diffusion condition mask rate")
@@ -89,17 +83,11 @@ def prepare_2(args, config_path):
         config["la_lr"] = args.la_lr
         config["diff_lr"] = args.diff_lr
         config["rqvae_lr"] = args.rqvae_lr
-        config["set_loss"] = int(args.set_loss)
-        config["set_init"] = int(args.set_init)
-        config["set_proj"] = int(args.set_proj)
         config["set_aggr"] = args.set_aggr
         config["aggregation"] = args.aggregation
-        config["item_cond"] = args.item_cond
         config["bias_mapping"] = args.bias_mapping
         config["codebook_num"] = args.codebook_num
         config["codebook_size"] = args.codebook_size
-        config["alpha_rq"] = args.alpha_rq
-        config["w"] = args.w
         config["emb_dim"] = args.emb_dim
         config["RQVAE"] = args.RQVAE
         config["pretrain_rq"] = args.pretrain_rq
@@ -144,9 +132,6 @@ if __name__ == "__main__":
         )
     )
 
-    print()
-    print("tgt_global_bias 학습")
-    print()
 
     logfile = utils.make_dir(f"{args.experiment}")
     logging.basicConfig(

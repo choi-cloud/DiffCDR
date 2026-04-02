@@ -54,123 +54,6 @@ class MFBasedModel(torch.nn.Module):
     def clear_graph_cache(self):
         self.graph_emb_cache = {}
 
-    @torch.no_grad()
-    def build_user_prototype_cache(
-        self,
-        device,
-        top_p=0.01,  # 상위 p%
-        bottom_p=0.005,  # 하위 p%
-        user_batch=256,
-    ):
-        """
-        Memory-safe prototype cache builder
-        """
-        uid_emb_all = self.src_model.uid_embedding.weight.detach().to(device)
-        iid_emb = self.src_model.iid_embedding.weight.detach().to(device)
-
-        num_users = uid_emb_all.size(0)
-        num_items = iid_emb.size(0)
-        d = uid_emb_all.size(1)
-
-        # percentage → k (NO clamp)
-        topk = int(num_items * top_p)
-        bottomk = int(num_items * bottom_p)
-
-        # prototype cache
-        top_proto = torch.zeros((num_users, d), device=device)
-        bot_proto = torch.zeros((num_users, d), device=device)
-
-        for start in range(0, num_users, user_batch):
-            end = min(start + user_batch, num_users)
-
-            u_emb = uid_emb_all[start:end]  # [B, d]
-
-            # score matrix for this batch only
-            scores = torch.matmul(u_emb, iid_emb.t())  # [B, I]
-
-            # ---------- TOP PROTOTYPE ----------
-            if topk > 0:
-                top_idx = torch.topk(scores, k=topk, dim=1).indices  # [B, topk]
-                top_proto[start:end] = iid_emb[top_idx].mean(dim=1)
-            else:
-                # clean skip
-                top_proto[start:end] = torch.zeros_like(u_emb)
-
-            # ---------- BOTTOM PROTOTYPE (REPULSION) ----------
-            if bottomk > 0:
-                bot_idx = torch.topk(scores, k=bottomk, dim=1, largest=False).indices  # [B, bottomk]
-
-                bottom_mean = iid_emb[bot_idx].mean(dim=1)  # [B, d]
-                # bot_proto[start:end] = F.normalize(
-                #     u_emb - bottom_mean, dim=1
-                # )
-                bot_proto[start:end] = iid_emb[bot_idx].mean(dim=1)
-            else:
-                # clean skip
-                bot_proto[start:end] = torch.zeros_like(u_emb)
-
-            # very important to free memory
-            del scores
-
-            if start % (user_batch * 20) == 0:
-                torch.cuda.empty_cache()
-
-        # store cache
-        self.user_proto_cache = {"top": top_proto.detach(), "bottom": bot_proto.detach()}
-
-    @torch.no_grad()
-    def get_top_bottom_item_prototypes(self, uid):
-        top = self.user_proto_cache["top"][uid]
-        bottom = self.user_proto_cache["bottom"][uid]
-        return top, bottom
-
-    def compute_user_graph_embeddings(self, graph_data, use_target=False, device='cuda'):
-        if graph_data is None:
-            return None, None
-        
-        # Check cache first
-        cache_key = "tgt" if use_target else "src"
-        if cache_key in self.graph_emb_cache:
-            return self.graph_emb_cache[cache_key]
-
-        # 단순 2홉 aggr
-        # simple 2-hop aggregation (user -> items -> users) excluding 1-hop self contribution
-        uv_adj = graph_data["uv_adj"].to(device)
-        vu_adj = graph_data["vu_adj"].to(device)
-        if use_target:
-            user_feat = self.tgt_model.uid_embedding.weight#.detach().to(self.device)
-        else:
-            user_feat = self.src_model.uid_embedding.weight#.detach().to(self.device)
-        # with torch.no_grad():
-        # 1-hop: items aggregate from users
-        item_msg = torch.sparse.mm(vu_adj, user_feat)  # [num_items, d]
-
-        # 2-hop: users aggregate from items
-        user_2hop = torch.sparse.mm(uv_adj, item_msg)  # [num_users, d]
-
-        # remove self 1-hop contribution (user -> item -> user)
-        user_deg = torch.sparse.sum(uv_adj, dim=1).to_dense().unsqueeze(1)
-        user_2hop = user_2hop - user_deg * user_feat  # self-removal
-
-        # count real 2-hop neighbors: user -> item -> other_users
-        item_deg = torch.sparse.sum(vu_adj, dim=1).to_dense()
-        item_other = torch.relu(item_deg - 1)  # max(deg-1, 0)
-        two_hop_counts = torch.sparse.mm(uv_adj, item_other[:, None]).to_dense()
-
-        # normalization (avoid division by zero)
-        norm = torch.where(two_hop_counts == 0, torch.ones_like(two_hop_counts), two_hop_counts)
-
-        # final 2-hop embedding
-        user_emb = user_2hop / norm
-
-        # fallback: if no 2-hop neighbors, keep original embedding
-        zero_mask = two_hop_counts.squeeze(1) == 0
-        user_emb[zero_mask] = user_feat[zero_mask]
-        
-        # Store in cache (Detached to avoid graph memory explosion)
-        self.graph_emb_cache[cache_key] = user_emb.detach()
-
-        return user_emb
 
     def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False, item_cond=False, style_src=None):
         if stage == "train_src":
@@ -289,10 +172,7 @@ class MFBasedModel(torch.nn.Module):
             if diff_model.rqvae["RQVAE"] == True:
                 quantized1, all_level_vectors1, rq_loss1 = diff_model.rq_mf(cond_emb1)  # [L, B, D]
                 quantized2, all_level_vectors2, rq_loss2 = diff_model.rq_aggr(cond_emb2)
-                # if diff_model.aggregation in ["aggregation", "aggregation_ab2"]:
-                #     quantized2, all_level_vectors2, rq_loss2 = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
-                # else:
-                #     quantized2, all_level_vectors2, rq_loss2 = None, cond_emb2, 0.0
+                
             else:
                 all_level_vectors1 = cond_emb1
                 all_level_vectors2 = cond_emb2
@@ -304,14 +184,12 @@ class MFBasedModel(torch.nn.Module):
                 diff_model,
                 tgt_emb1,
                 tgt_emb2,
-                # ! diff_loss 계산 시에는 양자화하지 않은 기존 소스 임베딩을 컨디션으로 이용
-                src_uid_emb1,   # 시작점
+                src_uid_emb1,   
                 src_uid_emb2,
                 iid_emb,
                 y_input,
                 device,
                 is_task,
-                # ! is_taks가 True일 때만 양자화된 컨디션을 시간축에 따라 이용
                 q_embs1=all_level_vectors1,
                 q_embs2=all_level_vectors2,
                 style_src=style_src,
@@ -321,26 +199,14 @@ class MFBasedModel(torch.nn.Module):
                 Q_emb2=quantized2,                
             )
 
-            if diff_model.rqvae["pretrain_rq"] == False:
-                rq_loss = rq_loss1 + rq_loss2 if diff_model.aggregation else rq_loss1
-                total_loss = loss + diff_model.rqvae["alpha_rq"] * rq_loss
-            else:
-                total_loss = loss
-
-            return total_loss
+            return loss
 
         elif stage == "test_diff_parallel":  # DiffParallel - test
 
             tgt_uid, iid_input, _ = x
 
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
-
             src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False) 
-
-            # if diff_model.aggregation in ["aggregation", "aggregation_ab2"]:
-            #     src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
-            # else:
-            #     src_uid_emb2 = torch.zeros_like(src_uid_emb1)
 
             cond_emb1 = src_uid_emb1
             cond_emb2 = src_uid_emb2
@@ -349,11 +215,7 @@ class MFBasedModel(torch.nn.Module):
             if diff_model.rqvae["RQVAE"] == True:
                 quantized1, all_level_vectors1, _ = diff_model.rq_mf(cond_emb1)  # [L, B, D]
                 quantized2, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2) 
-                # if diff_model.aggregation in ["aggregation", "aggregation_ab2"]:
-                #     quantized2, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2)  # [L, B, D]
-                # else:
-                #     quantized2, all_level_vectors2, _ = None, cond_emb2, 0.0
-
+   
                 cond1, cond2 = all_level_vectors1, all_level_vectors2
                 p_sample = Diff.p_sample_loop_parallel
 
@@ -366,10 +228,7 @@ class MFBasedModel(torch.nn.Module):
             elif diff_model.rqvae["start_point"] == "quant_u":
                 start1, start2 = quantized1, quantized2
             elif diff_model.rqvae["start_point"] == "noise":
-                start1, start2 = noise1 = torch.randn_like(src_uid_emb1), torch.randn_like(src_uid_emb2)
-
-            if diff_model.rqvae["cross_cond"] == True:
-                cond1, cond2 = cond2, cond1 
+                start1, start2 = torch.randn_like(src_uid_emb1), torch.randn_like(src_uid_emb2)
 
             iid_emb = diff_model.ln_iid(iid_emb)
 
@@ -411,15 +270,8 @@ class MFBasedModel(torch.nn.Module):
 
                 if diff_model.parallel["bias_mapping"] == 'user':
                     style_u = diff_model.user_style_mapper(style_u)            
-                    mapping_loss = F.mse_loss(style_u, diff_model.style_tgt_user[uid, :2])
                     style_u = style_u.detach()
-                elif diff_model.parallel["bias_mapping"] == 'user_domain':
-                    style_u = style_src[uid][:, :2]
-                    style_u = torch.cat([style_u, diff_model.style_tgt_domain[:2].unsqueeze(0).expand(style_u.size(0), -1)], dim=1)
-                    style_u = diff_model.user_style_mapper(style_u)    
-                    mapping_loss = F.mse_loss(style_u, diff_model.style_tgt_user[uid, :2])
-                    style_u = style_u.detach()
-
+               
                 style_tok = diff_model.style_encoder(style_u)  # (B, D)
                 style_tok = diff_model.style_ln(style_tok)  # (B, D)
                 style_tok_u = diff_model.style_scale * style_tok  # (B, D)
@@ -440,13 +292,6 @@ class MFBasedModel(torch.nn.Module):
                 
                 if diff_model.parallel["bias_mapping"] == 'user':
                     style_u = diff_model.user_style_mapper(style_u)            
-                    mapping_loss = F.mse_loss(style_u, diff_model.style_tgt_user[uid, :2])
-                    style_u = style_u.detach()
-                elif diff_model.parallel["bias_mapping"] == 'user_domain':
-                    style_u = style_src[uid][:, :2]
-                    style_u = torch.cat([style_u, diff_model.style_tgt_domain[:2].unsqueeze(0).expand(style_u.size(0), -1)], dim=1)
-                    style_u = diff_model.user_style_mapper(style_u)    
-                    mapping_loss = F.mse_loss(style_u, diff_model.style_tgt_user[uid, :2])
                     style_u = style_u.detach()
 
                 style_tok = diff_model.style_encoder(style_u)  # (B, D)

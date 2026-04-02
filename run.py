@@ -42,7 +42,6 @@ class Run:
 
         self.batchsize_aug = self.batchsize_src
 
-        self.item_cond = config["item_cond"]
         self.epoch = config["epoch"]
         self.emb_dim = config["emb_dim"]
         self.meta_dim = config["meta_dim"]
@@ -95,13 +94,7 @@ class Run:
             "lacdr_rmse": 10,
         }
 
-        if config["set_aggr"] in ["item", "item_i"]: 
-            config["bias_mapping"] = "None"
-            
         self.parallel_setting = {
-            "set_loss": config["set_loss"],
-            "set_init": config["set_init"],
-            "set_proj": config["set_proj"],
             "set_aggr": config["set_aggr"],
             "aggregation": config["aggregation"],
             "bias_mapping": config["bias_mapping"],
@@ -110,7 +103,6 @@ class Run:
         self.rqvae_setting = {
             "codebook_num": config["codebook_num"],
             "codebook_size": config["codebook_size"],
-            "alpha_rq": config["alpha_rq"],
             "RQVAE": config["RQVAE"],
             "start_point": config["start_point"],
             "pretrain_rq": config["pretrain_rq"],
@@ -120,8 +112,6 @@ class Run:
             "cross_cond": config["cross_cond"],
         }
         
-        self.w = config["w"]
-
         self.device = "cuda" if config["use_cuda"] else "cpu"
 
         self.diff_lr = config["diff_lr"]
@@ -255,145 +245,6 @@ class Run:
             "num_edges": user_ids.shape[0],
         }
 
-    def build_shared_train_graph(self, src_path, tgt_path, exclude_users=None):
-        """Build a single graph using both train_src and train_tgt interactions (same CSV schema)."""
-        src_interactions = pd.read_csv(src_path, header=None, usecols=[0, 1])
-        tgt_interactions = pd.read_csv(tgt_path, header=None, usecols=[0, 1])
-        src_interactions.columns = ["uid", "iid"]
-        tgt_interactions.columns = ["uid", "iid"]
-        interactions = pd.concat([src_interactions, tgt_interactions], ignore_index=True)
-
-        # keep item split info for later slicing
-        self.num_src_items = src_interactions["iid"].nunique()
-        self.num_tgt_items = tgt_interactions["iid"].nunique()
-
-        if exclude_users is not None:
-            exclude_users = set(exclude_users)
-            interactions = interactions[~interactions["uid"].isin(exclude_users)]
-
-        if interactions.empty:
-            return None
-
-        user_ids = torch.tensor(interactions["uid"].values, dtype=torch.long)
-        item_ids = torch.tensor(interactions["iid"].values, dtype=torch.long)
-        edge_values = torch.ones(user_ids.shape[0], dtype=torch.float32)
-
-        uv_indices = torch.stack([user_ids, item_ids])
-        uv_adj = torch.sparse_coo_tensor(uv_indices, edge_values, size=(self.uid_all, self.iid_all + 1)).coalesce()
-
-        vu_indices = torch.stack([item_ids, user_ids])
-        vu_adj = torch.sparse_coo_tensor(vu_indices, edge_values, size=(self.iid_all + 1, self.uid_all)).coalesce()
-
-        return {
-            "uv_adj": uv_adj,
-            "vu_adj": vu_adj,
-            "user_ids": torch.unique(user_ids),
-            "item_ids": torch.unique(item_ids),
-            "num_edges": user_ids.shape[0],
-        }
-
-    def compute_item_popularity(self, paths):
-        """Count item frequency from given CSVs (col 1 = iid), clip to >=1, normalize by max."""
-        frames = []  # src train + tgt train
-        for p in paths:
-            df = pd.read_csv(p, header=None, usecols=[1])
-            df.columns = ["iid"]
-            frames.append(df)
-        if not frames:
-            return None
-        counts = pd.concat(frames, ignore_index=True)["iid"].value_counts()  # 각 iid 마다 등장 횟수 카운팅
-        full_counts = counts.reindex(range(self.iid_all + 1), fill_value=0).to_numpy()  # iid 번호 순서대로 정렬
-
-        # TODO 정규화 - src/tgt 따로 or 같이? (현재는 같이 한번에 정규화)
-        max_count = full_counts.max() if full_counts.size > 0 else 0
-        if max_count == 0:
-            return torch.zeros(self.iid_all + 1, dtype=torch.float32)
-        full_counts = np.clip(full_counts, 1, max_count)
-        pop_norm = full_counts / max_count
-        return torch.tensor(pop_norm, dtype=torch.float32)
-
-    def build_shared_test_graph(self, data_path, include_users=None, exclude_users=None):
-        """Build a single graph from test.csv (has pos_seq, but only uid/iid are used for edges)."""
-        interactions = pd.read_csv(data_path, header=None)
-        interactions.columns = ["uid", "iid", "y", "pos_seq"]
-
-        if include_users is not None:
-            include_users = set(include_users)
-            interactions = interactions[interactions["uid"].isin(include_users)]
-        if exclude_users is not None:
-            exclude_users = set(exclude_users)
-            interactions = interactions[~interactions["uid"].isin(exclude_users)]
-
-        if interactions.empty:
-            return None
-
-        user_ids = torch.tensor(interactions["uid"].values, dtype=torch.long)
-        item_ids = torch.tensor(interactions["iid"].values, dtype=torch.long)
-        edge_values = torch.ones(user_ids.shape[0], dtype=torch.float32)
-
-        uv_indices = torch.stack([user_ids, item_ids])
-        uv_adj = torch.sparse_coo_tensor(uv_indices, edge_values, size=(self.uid_all, self.iid_all + 1)).coalesce()
-
-        vu_indices = torch.stack([item_ids, user_ids])
-        vu_adj = torch.sparse_coo_tensor(vu_indices, edge_values, size=(self.iid_all + 1, self.uid_all)).coalesce()
-
-        return {
-            "uv_adj": uv_adj,
-            "vu_adj": vu_adj,
-            "user_ids": torch.unique(user_ids),
-            "item_ids": torch.unique(item_ids),
-            "num_edges": user_ids.shape[0],
-        }
-
-    def build_test_graph_inputs(self, data_path, include_users=None, exclude_users=None):
-        interactions = pd.read_csv(data_path, header=None)
-        interactions.columns = ["uid", "iid", "y", "pos_seq"]
-
-        if include_users is not None:
-            include_users = set(include_users)
-            interactions = interactions[interactions["uid"].isin(include_users)]
-        if exclude_users is not None:
-            exclude_users = set(exclude_users)
-            interactions = interactions[~interactions["uid"].isin(exclude_users)]
-
-        if interactions.empty:
-            return None
-
-        user_list = []
-        item_list = []
-        MAX_POS = 20  # history 길이 제한
-
-        # 🔑 핵심: user 단위로 그룹핑 -> test_user 별로 pos_seq 한번씩만 추가
-        for uid, group in interactions.groupby("uid"):
-            pos_seq = ast.literal_eval(group.iloc[0]["pos_seq"])  # pos_seq는 user별로 모두 동일하므로 첫 row만 사용
-
-            if not pos_seq:
-                continue
-
-            if len(pos_seq) > MAX_POS:
-                pos_seq = pos_seq[-MAX_POS:]
-
-            for iid in pos_seq:
-                user_list.append(uid)
-                item_list.append(iid)
-
-        user_ids = torch.tensor(user_list, dtype=torch.long)
-        item_ids = torch.tensor(item_list, dtype=torch.long)
-        edge_values = torch.ones(len(user_ids), dtype=torch.float32)
-
-        uv_indices = torch.stack([user_ids, item_ids])
-        uv_adj = torch.sparse_coo_tensor(uv_indices, edge_values, size=(self.uid_all, self.iid_all + 1)).coalesce()
-
-        vu_indices = torch.stack([item_ids, user_ids])
-        vu_adj = torch.sparse_coo_tensor(vu_indices, edge_values, size=(self.iid_all + 1, self.uid_all)).coalesce()
-
-        return {
-            "uv_adj": uv_adj,
-            "vu_adj": vu_adj,
-            "user_ids": torch.unique(user_ids),
-            "item_ids": torch.unique(item_ids),
-            "num_edges": user_ids.shape[0],
-        }
 
     def read_ss_data(self, data_path):
         """ """
@@ -528,17 +379,11 @@ class Run:
         test_users_df = pd.read_csv(self.test_path, header=None, usecols=[0])
         test_users = test_users_df[0].tolist()
 
-        # item popularity on train src+tgt (normalized)
-        self.item_popularity = self.compute_item_popularity([self.src_path, self.tgt_path]).cuda()
-
         graph_src_train = self.build_graph_inputs(self.src_path)  # 전체 그래프 생성
         graph_tgt_train = self.build_graph_inputs(self.tgt_path, exclude_users=test_users)
 
         graph_src_test = graph_src_train  # train, test graph 동일
         graph_tgt_test = graph_tgt_train  # tgt_test는 안 쓰임
-
-        graph_shared_train = self.build_shared_train_graph(self.src_path, self.tgt_path, exclude_users=test_users)
-        graph_shared_test = self.build_shared_test_graph(self.test_path)  # pos seq 와 그래프 생성 -> test user가 인터랙션한 source items.
 
         def _print_graph_stats(name, graph):
             if graph is None:
@@ -554,12 +399,10 @@ class Run:
         _print_graph_stats("graph src test", graph_src_test)
         _print_graph_stats("graph tgt train", graph_tgt_train)
         _print_graph_stats("graph tgt test", graph_tgt_test)
-        _print_graph_stats("graph shared train", graph_shared_train)
-        _print_graph_stats("graph shared test", graph_shared_test)
 
         graph_data = {
-            "train": {"src": graph_src_train, "tgt": graph_tgt_train, "shared": graph_shared_train},
-            "test": {"src": graph_src_test, "tgt": graph_tgt_test, "shared": graph_shared_test},
+            "train": {"src": graph_src_train, "tgt": graph_tgt_train, },
+            "test": {"src": graph_src_test, "tgt": graph_tgt_test, },
         }
 
         return data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test, graph_data
@@ -603,36 +446,6 @@ class Run:
             user_emb[zero_mask] = user_feat[zero_mask]
 
         return user_emb, None
-        
-    def compute_item_aggregation_popularity(self, base_model, graph_data, src_item_num):
-        uv_adj = graph_data["uv_adj"].to(self.device)  # [num_users, num_items]
-
-        # MF item embedding
-        src_item_feat = base_model.src_model.iid_embedding.weight.detach().to(self.device)[:src_item_num]  # [num_items, emb_dim]
-        tgt_item_feat = base_model.tgt_model.iid_embedding.weight.detach().to(self.device)[src_item_num:]  # [num_items, emb_dim]
-        item_feat = torch.cat([src_item_feat, tgt_item_feat], dim=0)  # [num_items, emb_dim]
-
-        # item popularity
-        conf_weight = self.item_popularity.to(self.device).unsqueeze(1)  # [num_items, 1]
-        int_weight = torch.ones_like(conf_weight) - conf_weight
-
-        with torch.no_grad():
-            # popularity-weighted item embedding
-            item_feat_conf = item_feat * conf_weight  # [num_items, d]
-            item_feat_int = item_feat * int_weight  # [num_items, d]
-
-            # 1-hop aggregation: user <- items
-            user_agg_conf = torch.sparse.mm(uv_adj, item_feat_conf)  # [num_users, d]
-            user_agg_int = torch.sparse.mm(uv_adj, item_feat_int)  # [num_users, d]
-
-            # normalization term: sum of item popularities per user
-            pop_sum_conf = torch.sparse.mm(uv_adj, conf_weight).clamp(min=1e-8)  # [num_users, 1] # 이웃 item들의 pop sum으로 정규화
-            pop_sum_int = torch.sparse.mm(uv_adj, int_weight).clamp(min=1e-8)  # [num_users, 1] # 이웃 item들의 pop sum으로 정규화
-
-            user_emb_conf = user_agg_conf / pop_sum_conf
-            user_emb_int = user_agg_int / pop_sum_int
-
-        return user_emb_conf, user_emb_int
 
     def get_model(self):
         if self.base_model == "MF":
@@ -696,7 +509,7 @@ class Run:
                 for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                     model[0].eval()
                     model[1].eval()
-                    pred = model[0](X, stage, self.device, diff_model=model[1], item_cond=self.item_cond, style_src=style_src)
+                    pred = model[0](X, stage, self.device, diff_model=model[1], style_src=style_src)
                     y_input = X[-1]
                     targets.extend(y_input.squeeze(1).tolist())
                     predicts.extend(pred.tolist())
@@ -800,8 +613,6 @@ class Run:
             diff_loss = []
             task_loss_ls = []
 
-            # Clear cache at start of epoch (Lazy Update)
-            model[0].clear_graph_cache()
 
             for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                 # 1️⃣ train mode
@@ -815,7 +626,6 @@ class Run:
                     self.device,
                     diff_model=model[1],
                     is_task=False,
-                    item_cond=self.item_cond,
                     style_src=style_src,
                 )
                 optimizer.zero_grad(set_to_none=True)
@@ -829,7 +639,6 @@ class Run:
                     self.device,
                     diff_model=model[1],
                     is_task=True,
-                    item_cond=self.item_cond,
                     style_src=style_src,
                 )
                 optimizer.zero_grad(set_to_none=True)
@@ -1000,17 +809,15 @@ class Run:
             self.update_results(mae, rmse, "diff")
             write(f"DIFF LOSS {loss.item():>10.6f} |  TASK LOSS {task_loss.item():>10.6f} | MAE: {mae:>10.6f} | RMSE: {rmse:>10.6f}")
 
-    def Diff_Parallel(self, model, diff_model, data_diff, data_test, optimizer, graph_train, graph_test, style_src, style_tgt_item, style_tgt_user, style_tgt_domain):
+    def Diff_Parallel(self, model, diff_model, data_diff, data_test, optimizer, graph_train, graph_test, style_src, style_tgt_item, style_tgt_user):
         write(f"{' Diff_Parallel ':=^{30}}")
 
         diff_model.style_tgt_item = style_tgt_item
 
         diff_model.style_tgt_user = style_tgt_user.cuda() 
-        diff_model.style_tgt_domain = style_tgt_domain.cuda()
 
         src_graph = graph_train.get("src")
         tgt_graph = graph_train.get("tgt")
-        shared_graph = graph_train.get("shared")
 
         smooth_user_emb_src, _ = self.compute_user_graph_embeddings(model, diff_model, src_graph, use_target=False)
         smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model, diff_model, tgt_graph, use_target=True)
@@ -1035,20 +842,7 @@ class Run:
                 for p in diff_model.rq_aggr.parameters():
                     p.requires_grad = False
 
-        model.graph_src = graph_train.get("src")
-        model.graph_tgt = graph_train.get("tgt")
-        model.shared_graph = graph_train.get("shared")
-
         for i in range(self.epoch):
-            # [DEBUG] Verify parameter freezing
-            # if hasattr(diff_model, "rq_mf"):
-            #     req_grad = diff_model.rq_mf.codebooks.requires_grad
-            #     val_start = diff_model.rq_mf.codebooks.detach().clone()
-            #     write(f"\n[DEBUG] Epoch {i} START | RQ-VAE Requires Grad: {req_grad}")
-            #     write(f"[DEBUG] Epoch {i} START | Codebook Sample (first 5): {val_start[0, 0, :5].cpu().numpy()}")
-
-            # diff_model.smooth_user_emb_src = smooth_user_emb_src
-            # diff_model.smooth_user_emb_tgt = smooth_user_emb_tgt
 
             loss, task_loss = self.train(
                 data_diff,
@@ -1065,31 +859,6 @@ class Run:
             mae, rmse = self.eval_mae([model, diff_model], data_test, stage="test_diff_parallel", style_src=style_src)
             self.update_results(mae, rmse, "diff_parallel")
             write(f"Epoch {i:<2} :: DIFF LOSS {loss.item():>10.6f} |  TASK LOSS {task_loss.item():>10.6f} | MAE: {mae:>10.6f} | RMSE: {rmse:>10.6f}")
-
-            # [DEBUG] Check gradients and calculate parameter shift
-            # if hasattr(diff_model, "rq_mf"):
-            #     p = diff_model.rq_mf.codebooks
-            #     grad = p.grad if p.grad is not None else torch.zeros_like(p)
-            #     
-            #     # 가중치가 실제로 변한 vector 개수 (L, K, D) 에서 (L, K) 차원별로 체크
-            #     val_end = p.detach()
-            #     diff_vec = (val_end - val_start).abs().sum(dim=-1) # [L, K]
-            #     updated_vecs = (diff_vec > 1e-10).sum().item()
-            #     total_vecs = p.shape[0] * p.shape[1]
-            # 
-            #     # gradient가 흐른 vector 개수
-            #     grad_vec = grad.abs().sum(dim=-1) # [L, K]
-            #     active_grads = (grad_vec > 0).sum().item()
-            #     
-            #     grad_norm = grad.abs().sum().item()
-            #     shift_total = diff_vec.sum().item()
-            #     shift_max = (val_end - val_start).abs().max().item()
-            #     
-            #     write(f"[DEBUG] Epoch {i} END   | Codebook Grad Abs Sum: {grad_norm:.6f}")
-            #     write(f"[DEBUG] Epoch {i} END   | Active Grads (Vectors): {active_grads} / {total_vecs}")
-            #     write(f"[DEBUG] Epoch {i} END   | Actually Updated (Vectors): {updated_vecs} / {total_vecs}")
-            #     write(f"[DEBUG] Epoch {i} END   | Codebook Total Shift: {shift_total:.6f}")
-            #     write(f"[DEBUG] Epoch {i} END   | Codebook Max Shift: {shift_max:.10f}\n")
 
     def save_rqvae(self, diff_model, path):
         save_dir = os.path.dirname(path)
@@ -1234,7 +1003,6 @@ class Run:
                 self.diff_mask_rate,
                 parallel=self.parallel_setting,
                 rqvae=self.rqvae_setting,
-                w=self.w,
             )
             diff_model = diff_model.cuda() if self.use_cuda else diff_model
 
@@ -1299,18 +1067,6 @@ class Run:
                 cache_path=cache_path
             )
         
-        print(f"\n타겟 도메인 전체 레이팅 스타일 정보 추출\n")
-        cache_path = f"{self.stylecache_root}_tgt_domain.pt"
-        if os.path.exists(cache_path):
-            ckpt = torch.load(cache_path, map_location="cpu", weights_only=True)
-            style_tgt_domain = ckpt["style_tgt_domain"]
-            info_tgt_domain = ckpt["info_tgt_domain"]
-        else:
-            style_tgt_domain, info_tgt_domain = build_tgt_domain_rating_style_from_loader(
-                data_tgt=data_tgt, rating_min=1.0, rating_max=5.0, device="cpu",
-                cache_path=cache_path
-            )
-
         criterion = torch.nn.MSELoss()
 
         if exp_part == "None_CDR":
@@ -1320,48 +1076,6 @@ class Run:
             if self.base_model == "CMF":
                 self.DataAug(model, data_aug, data_test, criterion, optimizer_aug)
             self.result_print(["tgt", "aug"])
-            self.model_save(model, path=save_path)
-
-        #################### BPRMF #######################
-        if exp_part == "BPRMF":
-            write("========== BPRMF ==========")
-
-            # SRC domain BPR training
-            write("--- BPRMF on SRC domain ---")
-            for epoch in range(self.epoch):
-                loss = self.BPRMF(data_src, model, optimizer_src, stage="src")  # ✅ 위에서 만든 model  # ✅ 공통 optimizer
-                write(f"[SRC][Epoch {epoch}] BPR Loss: {loss:.4f}")
-
-            # TGT domain BPR training
-            write("--- BPRMF on TGT domain ---")
-            for epoch in range(self.epoch):
-                loss = self.BPRMF(data_tgt, model, optimizer_tgt, stage="tgt")
-                mae, rmse = self.eval_mae(model, data_test, stage="test_tgt")
-                self.update_results(mae, rmse, "tgt")
-                write(f"[TGT][Epoch {epoch}] " f"BPR Loss: {loss:.4f} | MAE {mae:.4f} RMSE {rmse:.4f}")
-
-            self.result_print(["tgt"])
-            self.model_save(model, path=save_path)
-
-        #################### LIGHT GCN #######################
-        if exp_part == "LightGCN":
-            write("========== LightGCN ==========")
-
-            # -------- SRC domain --------
-            write("--- LightGCN on SRC domain ---")
-            for epoch in range(self.epoch):
-                loss = self.LightGCN_BPR(model, graph_data["train"]["src"], optimizer_src, stage="src", num_layers=2)
-                write(f"[SRC][Epoch {epoch}] LightGCN BPR Loss: {loss:.4f}")
-
-            # -------- TGT domain --------
-            write("--- LightGCN on TGT domain ---")
-            for epoch in range(self.epoch):
-                loss = self.LightGCN_BPR(model, graph_data["train"]["tgt"], optimizer_tgt, stage="tgt", num_layers=2)
-                mae, rmse = self.eval_mae(model, data_test, stage="test_tgt")
-                self.update_results(mae, rmse, "tgt")
-                write(f"[TGT][Epoch {epoch}] " f"LightGCN BPR Loss: {loss:.4f} | MAE {mae:.4f} RMSE {rmse:.4f}")
-
-            self.result_print(["tgt"])
             self.model_save(model, path=save_path)
 
         elif exp_part == "CDR":
@@ -1390,11 +1104,9 @@ class Run:
 
         elif exp_part == "diff_parallel":
             self.model_load(model, path=save_path)
-            # model.build_user_prototype_cache(self.device, 0.5, 0.5, user_batch=1024)
             print("None_CDR model loaded")
-            # optimizer_diff: DiffParallel 의 파라미터만 포함, model에 있는 user/item embedding update X
             self.Diff_Parallel(
-                model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"], style_src, style_tgt_item, style_tgt_user, style_tgt_domain
+                model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"], style_src, style_tgt_item, style_tgt_user,
             )
             self.result_print(["diff_parallel"])
 
@@ -1452,104 +1164,6 @@ def mae_summary_by_score(y_true, mae):
         )
     return pd.DataFrame(rows)
 
-
-@torch.no_grad()
-def build_tgt_domain_rating_style_from_loader(
-    data_tgt,
-    rating_min: float = 1.0,
-    rating_max: float = 5.0,
-    device: str = "cpu",
-    cache_path="",
-):
-    """
-    data_tgt yields: (X, y)
-      - X: [B,2]
-      - y: [B,1] rating
-
-    Returns
-    -------
-    style_tgt_domain: FloatTensor [9]
-    info: dict
-    """
-
-    # 누적 통계
-    sum_r = torch.tensor(0.0, dtype=torch.float64)
-    sumsq_r = torch.tensor(0.0, dtype=torch.float64)
-    cnt = torch.tensor(0.0, dtype=torch.float64)
-
-    rmin = torch.tensor(float("inf"), dtype=torch.float64)
-    rmax = torch.tensor(float("-inf"), dtype=torch.float64)
-
-    cnt_min = torch.tensor(0.0, dtype=torch.float64)
-    cnt_max = torch.tensor(0.0, dtype=torch.float64)
-
-    for _, y in data_tgt:
-        r = y.detach().to("cpu").double().view(-1)
-
-        if r.numel() == 0:
-            continue
-
-        sum_r += r.sum()
-        sumsq_r += (r * r).sum()
-        cnt += r.numel()
-
-        rmin = torch.minimum(rmin, r.min())
-        rmax = torch.maximum(rmax, r.max())
-
-        cnt_min += (r <= rating_min + 1e-12).double().sum()
-        cnt_max += (r >= rating_max - 1e-12).double().sum()
-
-    if cnt == 0:
-        raise ValueError("No ratings found in data_tgt.")
-
-    # 통계 계산
-    mean = sum_r / cnt
-    ex2 = sumsq_r / cnt
-    var = torch.clamp(ex2 - mean * mean, min=0.0)
-    std = torch.sqrt(var + 1e-12)
-
-    frac_min = cnt_min / cnt
-    frac_max = cnt_max / cnt
-    frac_extreme = (cnt_min + cnt_max) / cnt
-
-    # [9]
-    style_tgt_domain = torch.tensor(
-        [
-            mean,
-            var,
-            std,
-            rmin,
-            rmax,
-            cnt,
-            frac_min,
-            frac_max,
-            frac_extreme,
-        ],
-        dtype=torch.float32,
-        device=device,
-    )
-
-    info = {
-        "feature_names": [
-            "mean", "var", "std",
-            "min", "max", "cnt",
-            "frac_min", "frac_max", "frac_extreme"
-        ],
-        "rating_min": rating_min,
-        "rating_max": rating_max,
-    }
-
-    if cache_path:
-        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-        torch.save(
-            {
-                "style_tgt_domain": style_tgt_domain.cpu(),
-                "info_tgt_domain": info,
-            },
-            cache_path,
-        )
-
-    return style_tgt_domain, info
 
 
 @torch.no_grad()
@@ -1748,182 +1362,4 @@ def build_tgt_item_rating_style_from_loader(
         cache_path,
     )
 
-    return style_item, info
-
-
-@torch.no_grad()
-def build_src_user_percentile_style_from_loader(
-    data_src,
-    num_users: int,
-    rating_min: float = 1.0,
-    rating_max: float = 5.0,
-    device: str = "cpu",
-    alpha: float = 0.1,  # low/high 구간(예: 하위 10%, 상위 10%)
-):
-    """
-    Percentile-style features per user computed from rating histograms.
-
-    Returns
-    -------
-    style: FloatTensor [num_users, 9]
-      style[u] = [p_mean, p_var, p_std, p_min, p_max, cnt,
-                  frac_low, frac_high, frac_extreme]
-      - p_* are computed on percentile values in [0,1]
-    info: dict
-    """
-    # ---- rating levels: assumes integer levels in [rating_min, rating_max]
-    # (너 데이터가 1~5 정수 평점이라는 전제. half-step이면 levels를 바꿔야 함)
-    levels = torch.arange(int(rating_min), int(rating_max) + 1, dtype=torch.long)  # [K]
-    K = levels.numel()
-
-    # per-user histogram counts: [U, K]
-    hist = torch.zeros((num_users, K), dtype=torch.float64)
-
-    for X, y in data_src:
-        uid = X[:, 0].detach().to("cpu").long().view(-1)  # [B]
-        r = y.detach().to("cpu").view(-1)  # [B]
-
-        if uid.numel() != r.numel():
-            raise ValueError(f"uid/rating mismatch: uid={uid.shape}, r={r.shape}")
-
-        # rating을 레벨 인덱스로 변환 (정수 평점 전제)
-        r_int = r.round().long()  # 혹시 float여도 1~5 근처면 반올림
-        if r_int.numel() > 0:
-            if r_int.min().item() < levels.min().item() or r_int.max().item() > levels.max().item():
-                raise ValueError(f"rating out of level range: min={r_int.min().item()}, max={r_int.max().item()}")
-
-        ridx = (r_int - levels.min()).clamp(0, K - 1)  # [B]
-
-        # scatter-add로 히스토그램 누적
-        # hist[uid, ridx] += 1
-        hist.index_put_((uid, ridx), torch.ones_like(ridx, dtype=torch.float64), accumulate=True)
-
-    # ---- counts per user
-    cnts = hist.sum(dim=1)  # [U]
-    cnt_safe = torch.clamp(cnts, min=1.0)
-
-    # ---- build percentile per level per user (mid-rank)
-    # cum_less: cumulative counts strictly less than level k
-    cum = torch.cumsum(hist, dim=1)  # [U,K] cumulative including self
-    cum_less = cum - hist  # [U,K]
-    p_level = (cum_less + 0.5 * hist) / cnt_safe.unsqueeze(1)  # [U,K] in [0,1]
-
-    # ---- stats on percentile values, weighted by hist
-    # mean_p = sum_k count_k * p_k / N
-    mean_p = (hist * p_level).sum(dim=1) / cnt_safe  # [U]
-    ex2_p = (hist * (p_level**2)).sum(dim=1) / cnt_safe  # [U]
-    var_p = torch.clamp(ex2_p - mean_p * mean_p, min=0.0)  # [U]
-    std_p = torch.sqrt(var_p + 1e-12)  # [U]
-
-    # p_min/p_max: among levels that exist
-    has = hist > 0
-    pmin = torch.where(has, p_level, torch.full_like(p_level, float("inf"))).min(dim=1).values
-    pmax = torch.where(has, p_level, torch.full_like(p_level, float("-inf"))).max(dim=1).values
-    pmin = torch.where(cnts > 0, pmin, torch.zeros_like(pmin))
-    pmax = torch.where(cnts > 0, pmax, torch.zeros_like(pmax))
-
-    # low/high/extreme fractions based on percentile thresholds
-    low_mask = p_level <= alpha
-    high_mask = p_level >= (1.0 - alpha)
-
-    frac_low = (hist * low_mask.double()).sum(dim=1) / cnt_safe
-    frac_high = (hist * high_mask.double()).sum(dim=1) / cnt_safe
-    frac_extreme = frac_low + frac_high
-
-    # [U, 9]
-    style = torch.stack([mean_p, var_p, std_p, pmin, pmax, cnts, frac_low, frac_high, frac_extreme], dim=1).to(torch.float32).to(device)
-
-    info = {
-        "feature_names": ["p_mean", "p_var", "p_std", "p_min", "p_max", "cnt", "frac_low", "frac_high", "frac_extreme"],
-        "alpha": alpha,
-        "rating_min": rating_min,
-        "rating_max": rating_max,
-        "levels": levels.tolist(),
-        "num_users": num_users,
-        "note": "percentile is computed within each user's rating distribution (mid-rank).",
-    }
-    return style, info
-
-
-@torch.no_grad()
-def build_tgt_item_percentile_style_from_loader(
-    data_tgt,
-    num_items_total: int,
-    rating_min: float = 1.0,
-    rating_max: float = 5.0,
-    device: str = "cpu",
-    alpha: float = 0.1,
-):
-    """
-    Percentile-style features per item computed from rating histograms.
-
-    Returns
-    -------
-    style_item: FloatTensor [num_items_total, 9]
-      style_item[i] = [p_mean, p_var, p_std, p_min, p_max, cnt,
-                       frac_low, frac_high, frac_extreme]
-      - percentile is computed within each item's rating distribution (across users)
-    info: dict
-    """
-    levels = torch.arange(int(rating_min), int(rating_max) + 1, dtype=torch.long)  # [K]
-    K = levels.numel()
-
-    hist = torch.zeros((num_items_total, K), dtype=torch.float64)
-
-    for X, y in data_tgt:
-        iid = X[:, 1].detach().to("cpu").long().view(-1)  # [B] global iid
-        r = y.detach().to("cpu").view(-1)  # [B]
-
-        if iid.numel() != r.numel():
-            raise ValueError(f"iid/rating mismatch: iid={iid.shape}, r={r.shape}")
-
-        if iid.numel() > 0:
-            if iid.min().item() < 0 or iid.max().item() >= num_items_total:
-                raise ValueError(f"iid out of range: min={iid.min().item()}, max={iid.max().item()}, num_items_total={num_items_total}")
-
-        r_int = r.round().long()
-        if r_int.numel() > 0:
-            if r_int.min().item() < levels.min().item() or r_int.max().item() > levels.max().item():
-                raise ValueError(f"rating out of level range: min={r_int.min().item()}, max={r_int.max().item()}")
-
-        ridx = (r_int - levels.min()).clamp(0, K - 1)
-
-        hist.index_put_((iid, ridx), torch.ones_like(ridx, dtype=torch.float64), accumulate=True)
-
-    cnts = hist.sum(dim=1)
-    cnt_safe = torch.clamp(cnts, min=1.0)
-
-    cum = torch.cumsum(hist, dim=1)
-    cum_less = cum - hist
-    p_level = (cum_less + 0.5 * hist) / cnt_safe.unsqueeze(1)
-
-    mean_p = (hist * p_level).sum(dim=1) / cnt_safe
-    ex2_p = (hist * (p_level**2)).sum(dim=1) / cnt_safe
-    var_p = torch.clamp(ex2_p - mean_p * mean_p, min=0.0)
-    std_p = torch.sqrt(var_p + 1e-12)
-
-    has = hist > 0
-    pmin = torch.where(has, p_level, torch.full_like(p_level, float("inf"))).min(dim=1).values
-    pmax = torch.where(has, p_level, torch.full_like(p_level, float("-inf"))).max(dim=1).values
-    pmin = torch.where(cnts > 0, pmin, torch.zeros_like(pmin))
-    pmax = torch.where(cnts > 0, pmax, torch.zeros_like(pmax))
-
-    low_mask = p_level <= alpha
-    high_mask = p_level >= (1.0 - alpha)
-
-    frac_low = (hist * low_mask.double()).sum(dim=1) / cnt_safe
-    frac_high = (hist * high_mask.double()).sum(dim=1) / cnt_safe
-    frac_extreme = frac_low + frac_high
-
-    style_item = torch.stack([mean_p, var_p, std_p, pmin, pmax, cnts, frac_low, frac_high, frac_extreme], dim=1).to(torch.float32).to(device)
-
-    info = {
-        "feature_names": ["p_mean", "p_var", "p_std", "p_min", "p_max", "cnt", "frac_low", "frac_high", "frac_extreme"],
-        "alpha": alpha,
-        "rating_min": rating_min,
-        "rating_max": rating_max,
-        "levels": levels.tolist(),
-        "num_items_total": num_items_total,
-        "note": "percentile is computed within each item's rating distribution (mid-rank).",
-    }
     return style_item, info

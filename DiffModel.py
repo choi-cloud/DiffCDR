@@ -155,7 +155,6 @@ class DiffParallel(nn.Module):
         diff_mask_rate=0.1,
         parallel=None,
         rqvae=None,
-        w=0.0,
     ):
         super(DiffParallel, self).__init__()
 
@@ -196,8 +195,6 @@ class DiffParallel(nn.Module):
         # RQVAE setting
         self.rqvae = rqvae
 
-        self.w = w
-
         self.step_mlp = nn.Sequential(
             SinusoidalPositionEmbeddings(self.input_dim),
             nn.Linear(self.input_dim, self.input_dim * 2),
@@ -210,16 +207,12 @@ class DiffParallel(nn.Module):
         self.cond_emb_linear = nn.ModuleList()
 
         if self.aggregation in ["aggregation", "aggregation_ab1"]:
-            # MF path (diff_id=0 always for MF if it exists)
             self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim)]))
             self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
             self.linear_m = nn.Linear(input_dim, input_dim, False)
             self.ln_m = nn.LayerNorm(input_dim)
 
         if self.aggregation in ["aggregation", "aggregation_ab2"]:
-            # Aggr path
-            # if 'aggregation': MF is index 0, Aggr is index 1
-            # if 'aggregation_ab2': Aggr is index 0
             self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim)]))
             self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
             self.linear_g = nn.Linear(input_dim, input_dim, False)
@@ -227,46 +220,13 @@ class DiffParallel(nn.Module):
 
         self.num_layers = 1
 
-        # linear for alm
-        self.al_linear = nn.Linear(input_dim, input_dim, False)
-
         self.ln_iid = nn.LayerNorm(input_dim)
         self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
 
-        if self.parallel["bias_mapping"] == 'user_domain': 
-            self.user_style_mapper = nn.Sequential(nn.Linear(4, 2)) 
-        elif self.parallel["bias_mapping"] == 'user': 
+        if self.parallel["bias_mapping"] == 'user': 
             self.user_style_mapper = nn.Sequential(nn.Linear(2, 2)) 
 
-        if self.parallel["set_aggr"] == "item_diu":
-            self.style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
-            self.style_ln = nn.LayerNorm(input_dim)
-            self.style_scale = nn.Parameter(torch.tensor(0.1))
-
-            self.item_style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
-            self.item_style_ln = nn.LayerNorm(input_dim)
-            self.item_style_scale = nn.Parameter(torch.tensor(0.1))
-
-            self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
-
-        elif self.parallel["set_aggr"] == "item_d":
-            self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
-
-        elif self.parallel["set_aggr"] == "item_di":
-            self.item_style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
-            self.item_style_ln = nn.LayerNorm(input_dim)
-            self.item_style_scale = nn.Parameter(torch.tensor(0.1))
-
-            self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
-
-        elif self.parallel["set_aggr"] == "item_du":
-            self.style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
-            self.style_ln = nn.LayerNorm(input_dim)
-            self.style_scale = nn.Parameter(torch.tensor(0.1))
-
-            self.tgt_global_bias = nn.Parameter(torch.tensor(0.0))
-
-        elif self.parallel["set_aggr"] == "item_i":
+        if self.parallel["set_aggr"] == "item_i":
             self.item_style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
             self.item_style_ln = nn.LayerNorm(input_dim)
             self.item_style_scale = nn.Parameter(torch.tensor(0.1))
@@ -285,19 +245,14 @@ class DiffParallel(nn.Module):
             self.style_ln = nn.LayerNorm(input_dim)
             self.style_scale = nn.Parameter(torch.tensor(0.1))
 
-        else:
-            pass
         if self.rqvae["RQVAE"]:
             self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
-            if self.aggregation != "none":
-                self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
+            self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
 
 
     def forward(self, x, t, cond_emb, cond_mask, diff_id):
 
         for idx in range(self.num_layers):
-            # t_embedding = get_timestep_embedding(t, self.diff_dim)  # sin파 기반의 position embedding 얻고
-            # t_embedding = self.step_emb_linear[idx](t_embedding)  # linear 통과 -> time embedding
             t_embedding = self.step_mlp(t)
 
             cond_embedding = self.cond_emb_linear[diff_id](cond_emb)
@@ -305,14 +260,8 @@ class DiffParallel(nn.Module):
             x = torch.cat([t_embedding, cond_embedding * cond_mask.unsqueeze(-1), x], axis=1)  # * cond_mask.unsqueeze(-1)
 
             x = self.diff_models[diff_id][0](x)  # reverse -- 3 FC를 통해 denosing.
-            # x = self.diff_models[diff_id][1](x)
-            # x = self.diff_models[diff_id][2](x)
 
         return x
-
-    def get_al_emb(self, emb):
-        return self.al_linear(emb)
-
 
 def q_x_fn(model, x_0, t, device):  # forward
     # eq(4)
@@ -400,12 +349,8 @@ def diffusion_loss_fn_parallel(
     mask_rate = model.mask_rate
     if is_task == False:  # DIM loss 먼저
 
-        # ------------------------
-        # sampling
-        # ------------------------
         batch_size = x_0_m.shape[0]
 
-        ### [TRAIN-DIM] 1. sample t, timestep t를 랜덤하게 추출.
         t = torch.randint(0, num_steps, size=(batch_size // 2,), device=device)
         if batch_size % 2 == 0:
             t = torch.cat([t, num_steps - 1 - t], dim=0)
@@ -414,15 +359,10 @@ def diffusion_loss_fn_parallel(
             t = torch.cat([t, num_steps - 1 - t, extra_t], dim=0)
         t = t.unsqueeze(-1)
 
-        ### [TRAIN-DIM] 2. Diff1, Diff2 noised x_0, noise (e) 생성
         if model.aggregation in ["aggregation", "aggregation_ab1"]:
             x_m, e_m = q_x_fn(model, x_0_m, t, device)
         if model.aggregation in ["aggregation", "aggregation_ab2"]:
             x_g, e_g = q_x_fn(model, x_0_g, t, device)
-
-        # ! Condition Crossing
-        if model.rqvae["cross_cond"] == True:
-            cond_emb1, cond_emb2 = cond_emb2, cond_emb1
 
         # random mask
         cond_mask1 = 1 * (torch.rand(cond_emb1.shape[0], device=device) <= mask_rate)
@@ -431,8 +371,6 @@ def diffusion_loss_fn_parallel(
         cond_mask2 = 1 * (torch.rand(cond_emb2.shape[0], device=device) <= mask_rate)
         cond_mask2 = 1 - cond_mask2.int()
 
-        # [TRAIN-DIM] 3. Diff1, Diff2 -> noise 예측
-        # [NEW] Apply hierarchical RQ conditioning during training for consistency
         if model.rqvae["RQVAE"] == True and q_embs1 is not None:
              ns = NoiseScheduleVP(schedule="linear")
              t_cont = t.squeeze(-1).float() / model.num_steps
@@ -441,26 +379,18 @@ def diffusion_loss_fn_parallel(
         else:
              c1, c2 = cond_emb1, cond_emb2
 
-                # ! Condition Crossing
-        if model.rqvae["cross_cond"] == True:
-            c1, c2 = c2, c1
-
         if model.aggregation == "aggregation":
-            # [OLD] output1 = model(x_m, t.squeeze(-1), cond_emb1, cond_mask1, diff_id=0)  # MF path
-            # [OLD] output2 = model(x_g, t.squeeze(-1), cond_emb2, cond_mask2, diff_id=1)  # Aggr path
-            output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)  # [NEW] MF path
-            output2 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=1)  # [NEW] Aggr path
-            return F.mse_loss(x_0_m, output1) + F.mse_loss(x_0_g, output2)
+            output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)  
+            output2 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=1)  
+            return F.mse_loss(e_m, output1) + F.mse_loss(e_g, output2)
         elif model.aggregation == "aggregation_ab1":
-            # [OLD] output1 = model(x_m, t.squeeze(-1), cond_emb1, cond_mask1, diff_id=0)  # MF path
-            output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)  # [NEW] MF path
-            return F.mse_loss(x_0_m, output1)
+            output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)  
+            return F.mse_loss(e_m, output1)
         elif model.aggregation == "aggregation_ab2":
-            # [OLD] output1 = model(x_g, t.squeeze(-1), cond_emb2, cond_mask2, diff_id=0)
-            output1 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=0)  # [NEW] Aggr path
-            return F.mse_loss(x_0_g, output1)
+            output1 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=0)  
+            return F.mse_loss(e_g, output1)
 
-    elif is_task:  # task loss ALM 수행
+    elif is_task:  
         if model.rqvae["start_point"] == "src_u":
             start1, start2 = cond_emb1, cond_emb2 
         elif model.rqvae["start_point"] == "quant_u":
@@ -470,7 +400,7 @@ def diffusion_loss_fn_parallel(
 
         if model.rqvae["RQVAE"] == True:
             cond1, cond2 = q_embs1, q_embs2
-            p_sample = p_sample_loop_parallel # 코드북으로 컨디션 추상화 
+            p_sample = p_sample_loop_parallel 
         else: 
             cond1, cond2 = cond_emb1, cond_emb2 
             p_sample = p_sample_loop 
@@ -480,18 +410,22 @@ def diffusion_loss_fn_parallel(
         if model.aggregation == "aggregation":
             final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0)
             final_output_g, iid_emb = p_sample(model, start2, cond2, iid_emb, device, diff_id=1)
-            final_output_m = model.ln_m(model.linear_m(final_output_m))
-            final_output_g = model.ln_g(model.linear_g(final_output_g))
+            final_output_m_proj = model.linear_m(final_output_m)
+            final_output_g_proj = model.linear_g(final_output_g)
+            final_output_m = model.ln_m(final_output_m_proj)
+            final_output_g = model.ln_g(final_output_g_proj)
             base_tokens = torch.stack([final_output_m, final_output_g], dim=1)
 
         elif model.aggregation == "aggregation_ab1":
             final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0)
-            final_output_m = model.ln_m(model.linear_m(final_output_m))
+            final_output_m_proj = model.linear_m(final_output_m)
+            final_output_m = model.ln_m(final_output_m_proj)
             base_tokens = torch.stack([final_output_m], dim=1)
 
         elif model.aggregation == "aggregation_ab2":
             final_output_g, iid_emb = p_sample(model, start2, cond2, iid_emb, device, diff_id=0)
-            final_output_g = model.ln_g(model.linear_g(final_output_g))
+            final_output_g_proj = model.linear_g(final_output_g)
+            final_output_g = model.ln_g(final_output_g_proj)
             base_tokens = torch.stack([final_output_g], dim=1)
 
         if model.parallel["set_aggr"] == "item": 
@@ -519,12 +453,6 @@ def diffusion_loss_fn_parallel(
                 style_u = model.user_style_mapper(style_u)            
                 mapping_loss = F.mse_loss(style_u, model.style_tgt_user[uid, :2])
                 style_u = style_u.detach()
-            elif model.parallel["bias_mapping"] == 'user_domain':
-                style_u = style_src[uid][:, :2]
-                style_u = torch.cat([style_u, model.style_tgt_domain[:2].unsqueeze(0).expand(style_u.size(0), -1)], dim=1)
-                style_u = model.user_style_mapper(style_u)    
-                mapping_loss = F.mse_loss(style_u, model.style_tgt_user[uid, :2])
-                style_u = style_u.detach()
 
             style_tok = model.style_encoder(style_u)  # (B, D)
             style_tok = model.style_ln(style_tok)  # (B, D)
@@ -548,12 +476,6 @@ def diffusion_loss_fn_parallel(
                 style_u = model.user_style_mapper(style_u)            
                 mapping_loss = F.mse_loss(style_u, model.style_tgt_user[uid, :2])
                 style_u = style_u.detach()
-            elif model.parallel["bias_mapping"] == 'user_domain':
-                style_u = style_src[uid][:, :2]
-                style_u = torch.cat([style_u, model.style_tgt_domain[:2].unsqueeze(0).expand(style_u.size(0), -1)], dim=1)
-                style_u = model.user_style_mapper(style_u)    
-                mapping_loss = F.mse_loss(style_u, model.style_tgt_user[uid, :2])
-                style_u = style_u.detach()
 
             style_tok = model.style_encoder(style_u)  # (B, D)
             style_tok = model.style_ln(style_tok)  # (B, D)
@@ -568,19 +490,15 @@ def diffusion_loss_fn_parallel(
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
 
-        # RMSE
-        # task_loss =   (y_pred - y_input.squeeze().float()).square().sum().sqrt() / y_pred.shape[0]
-
-        if model.parallel["bias_mapping"] in ["user", "user_domain"]:
+        if model.parallel["bias_mapping"] == "user":
             task_loss += (10 * mapping_loss)
 
-        if model.parallel["set_loss"] == 0:
-            if model.aggregation == "aggregation":
-                return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
-            elif model.aggregation == "aggregation_ab1":
-                return F.mse_loss(x_0_m, final_output_m) + model.task_lambda * task_loss
-            elif model.aggregation == "aggregation_ab2":
-                return F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
+        if model.aggregation == "aggregation":
+            return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
+        elif model.aggregation == "aggregation_ab1":
+            return F.mse_loss(x_0_m, final_output_m) + model.task_lambda * task_loss
+        elif model.aggregation == "aggregation_ab2":
+            return F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
 
 # generation fun
 def p_sample(model, cond_emb, x, iid_emb, device, diff_id):  # ALM + task loss
@@ -615,47 +533,29 @@ def p_sample(model, cond_emb, x, iid_emb, device, diff_id):  # ALM + task loss
         fast_version=True,
     )
 
-    return model.get_al_emb(sample).to(device), iid_emb  # FC(x_t-1), item emb
+    return sample, iid_emb
 
 
 def p_sample_loop(model, start_emb, cond_emb, iid_input, device, diff_id):
-    # source emb input
-    # cur_x = cond_emb
-    # noise input
-    # cur_x = torch.normal(0,1,size = cond_emb.size() ,device=device)
-
-    # reversing
     cur_x, iid_emb_out = p_sample(model, cond_emb, start_emb, iid_input, device, diff_id)  # denoised embedding, item emb
 
     return cur_x, iid_emb_out
 
 
-def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):  # ALM + task loss
-    """
-    Docstring for p_sample_parallel
-
-    :param model: DiffParallel
-    :param cond_emb: condition
-    :param x: Noised emb(x0) <- start emb
-    :param iid_emb: Description
-    :param device: Description
-    :param diff_id: MF(0), Aggr(1)
-    """
-    # wrap for dpm_solver
+def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):  
     classifier_scale_para = model.c_scale
     dmp_sample_steps = model.sample_steps
     num_steps = model.num_steps
 
     B = cond_emb.shape[1]
-    cond_mask = torch.zeros(B, device=device).int()  # uncond mask
+    cond_mask = torch.zeros(B, device=device).int()  
 
     model_kwargs = {
         "cond_emb": cond_emb.to(device),
         "cond_mask": cond_mask,
-        "diff_id": diff_id,  # DiffParallel.forword 처리 위해 diff id 인자 추가
+        "diff_id": diff_id,  
     }
 
-    # ! 양자화된 조건 임베딩을 역 디퓨전 과정에서 시간축에 따라 분할해서 사용하기 위한 별도의 model_wrapper 사용
     model_fn = model_wrapper_hierarchical_cond(
         model,
         noise_schedule,
@@ -666,9 +566,9 @@ def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):  # ALM + ta
         model_kwargs=model_kwargs,
     )
 
-    dpm_solver = DPM_Solver(model_fn, noise_schedule)  # 노이즈, 노이즈 임베딩으로부터 denoised feat 예측 모델. 내부에서 forward 호출
+    dpm_solver = DPM_Solver(model_fn, noise_schedule)  
 
-    sample = dpm_solver.sample(  #  x_t-1 예측
+    sample = dpm_solver.sample(  
         x,
         steps=dmp_sample_steps,
         eps=1e-4,
@@ -676,22 +576,9 @@ def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):  # ALM + ta
         fast_version=True,
     )
 
-    if model.parallel["set_proj"] == 0:
-        return model.get_al_emb(sample).to(device), iid_emb  # FC(x_t-1), item emb
-    else:
-        return sample, iid_emb
+    return sample, iid_emb
 
 
 def p_sample_loop_parallel(model, start_emb, cond_emb, iid_input, device, diff_id):
-    """
-    Docstring for p_sample_loop_parallel
-
-    :param model: DiffParallel
-    :param start_emb: 소스 유저 임베딩(MF or Aggr) [B, D]
-    :param cond_emb: L개 코드북 맵핑 결과 [L, B, D]
-    :param iid_input: 타겟 아이템(안쓰임)
-    :param device: device
-    :param diff_id: MF(0), Aggr(1)
-    """
     cur_x, iid_emb_out = p_sample_parallel(model=model, cond_emb=cond_emb, x=start_emb, iid_emb=iid_input, device=device, diff_id=diff_id)
     return cur_x, iid_emb_out
