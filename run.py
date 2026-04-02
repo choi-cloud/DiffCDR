@@ -98,6 +98,7 @@ class Run:
             "set_aggr": config["set_aggr"],
             "aggregation": config["aggregation"],
             "bias_mapping": config["bias_mapping"],
+            "mapping_lambda": config["mapping_lambda"]
         }
         
         self.rqvae_setting = {

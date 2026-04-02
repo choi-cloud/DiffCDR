@@ -61,6 +61,7 @@ def prepare_1():
     parser.add_argument("--diff_mask_rate", type=float, default=0.1, help="Diffusion condition mask rate")
     parser.add_argument("--emb_dim", type=int, default=10, help="MF emb dim")
     parser.add_argument("--bias_mapping", type=str, default='user', help="[None, user, user_domain] mapper input")
+    parser.add_argument("--mapping_lambda", type=float, default=10, help="mapping loss 가중치")
 
 
     args = parser.parse_args()
@@ -98,6 +99,7 @@ def prepare_2(args, config_path):
         config["diff_task_lambda"] = args.diff_task_lambda
         config["diff_scale"] = args.diff_scale
         config["diff_mask_rate"] = args.diff_mask_rate
+        config["mapping_lambda"] = args.mapping_lambda
 
     return config
 

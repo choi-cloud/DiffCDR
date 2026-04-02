@@ -491,7 +491,7 @@ def diffusion_loss_fn_parallel(
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
 
         if model.parallel["bias_mapping"] == "user":
-            task_loss += (10 * mapping_loss)
+            task_loss += (model.parallel["mapping_lambda"] * mapping_loss)
 
         if model.aggregation == "aggregation":
             return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
