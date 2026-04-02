@@ -10,15 +10,17 @@ from run import Run
 import utils
 from utils import write
 
+
 def str2bool(v):
     if isinstance(v, bool):
         return v
-    if v.lower() in ('true', '1', 'yes'):
+    if v.lower() in ("true", "1", "yes"):
         return True
-    elif v.lower() in ('false', '0', 'no'):
+    elif v.lower() in ("false", "0", "no"):
         return False
     else:
-        raise argparse.ArgumentTypeError('Boolean value expected.')
+        raise argparse.ArgumentTypeError("Boolean value expected.")
+
 
 def prepare_1():
     parser = argparse.ArgumentParser()
@@ -60,9 +62,8 @@ def prepare_1():
     parser.add_argument("--diff_scale", type=float, default=0.5, help="Classifier-free guidance scale")
     parser.add_argument("--diff_mask_rate", type=float, default=0.1, help="Diffusion condition mask rate")
     parser.add_argument("--emb_dim", type=int, default=10, help="MF emb dim")
-    parser.add_argument("--bias_mapping", type=str, default='user', help="[None, user, user_domain] mapper input")
+    parser.add_argument("--bias_mapping", type=str, default="user", help="[None, user, user_domain] mapper input")
     parser.add_argument("--mapping_lambda", type=float, default=10, help="mapping loss 가중치")
-
 
     args = parser.parse_args()
 
@@ -133,7 +134,6 @@ if __name__ == "__main__":
             config["diff_steps"], config["diff_sample_steps"], config["diff_scale"], config["diff_dim"], config["diff_task_lambda"]
         )
     )
-
 
     logfile = utils.make_dir(f"{args.experiment}")
     logging.basicConfig(

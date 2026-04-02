@@ -71,8 +71,23 @@ class Run:
 
         aggretaion_name = str(True)
         self.rqvae_ckpt_root = (
-            self.root + "rqvae_ckpt/" + self.src + "_" + str(int(self.ratio[0] * 10)) + "_" + str(int(self.ratio[1] * 10)) 
-            + "/" + str(config["codebook_num"]) + "_" + str(config["codebook_size"]) + "_" + str(config["pretrain_epochs"]) + "ep_" + str(config["rqvae_lr"]) + "lr_" + aggretaion_name
+            self.root
+            + "rqvae_ckpt/"
+            + self.src
+            + "_"
+            + str(int(self.ratio[0] * 10))
+            + "_"
+            + str(int(self.ratio[1] * 10))
+            + "/"
+            + str(config["codebook_num"])
+            + "_"
+            + str(config["codebook_size"])
+            + "_"
+            + str(config["pretrain_epochs"])
+            + "ep_"
+            + str(config["rqvae_lr"])
+            + "lr_"
+            + aggretaion_name
         )
 
         self.results = {
@@ -98,9 +113,9 @@ class Run:
             "set_aggr": config["set_aggr"],
             "aggregation": config["aggregation"],
             "bias_mapping": config["bias_mapping"],
-            "mapping_lambda": config["mapping_lambda"]
+            "mapping_lambda": config["mapping_lambda"],
         }
-        
+
         self.rqvae_setting = {
             "codebook_num": config["codebook_num"],
             "codebook_size": config["codebook_size"],
@@ -112,7 +127,7 @@ class Run:
             "rqvae_lr": config["rqvae_lr"],
             "cross_cond": config["cross_cond"],
         }
-        
+
         self.device = "cuda" if config["use_cuda"] else "cpu"
 
         self.diff_lr = config["diff_lr"]
@@ -245,7 +260,6 @@ class Run:
             "item_ids": torch.unique(item_ids),
             "num_edges": user_ids.shape[0],
         }
-
 
     def read_ss_data(self, data_path):
         """ """
@@ -402,8 +416,14 @@ class Run:
         _print_graph_stats("graph tgt test", graph_tgt_test)
 
         graph_data = {
-            "train": {"src": graph_src_train, "tgt": graph_tgt_train, },
-            "test": {"src": graph_src_test, "tgt": graph_tgt_test, },
+            "train": {
+                "src": graph_src_train,
+                "tgt": graph_tgt_train,
+            },
+            "test": {
+                "src": graph_src_test,
+                "tgt": graph_tgt_test,
+            },
         }
 
         return data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test, graph_data
@@ -479,10 +499,7 @@ class Run:
             return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_diff, optimizer_map
 
         elif diff_model is not None and isinstance(diff_model, Diff.DiffParallel):
-            optimizer_diff = torch.optim.Adam(
-                list(diff_model.parameters()),
-                lr = self.diff_lr
-            )
+            optimizer_diff = torch.optim.Adam(list(diff_model.parameters()), lr=self.diff_lr)
             return optimizer_src, optimizer_tgt, optimizer_meta, optimizer_aug, optimizer_diff, optimizer_map
 
     def eval_mae(self, model, data_loader, stage, style_src=None):
@@ -614,10 +631,9 @@ class Run:
             diff_loss = []
             task_loss_ls = []
 
-
             for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                 # 1️⃣ train mode
-                model[1].train()   # diff_model
+                model[1].train()  # diff_model
                 # 2️⃣ optimizer 기준으로 grad 초기화
 
                 # 3️⃣ forward
@@ -815,7 +831,7 @@ class Run:
 
         diff_model.style_tgt_item = style_tgt_item
 
-        diff_model.style_tgt_user = style_tgt_user.cuda() 
+        diff_model.style_tgt_user = style_tgt_user.cuda()
 
         src_graph = graph_train.get("src")
         tgt_graph = graph_train.get("tgt")
@@ -829,7 +845,7 @@ class Run:
         if self.rqvae_setting.get("pretrain_rq", False):
             if os.path.exists(self.rqvae_ckpt_root):
                 self.load_rqvae(diff_model, self.rqvae_ckpt_root)
-            else: 
+            else:
                 self.pretrain_rqvae(model, diff_model, data_diff)
                 self.save_rqvae(diff_model, self.rqvae_ckpt_root)
 
@@ -865,7 +881,7 @@ class Run:
         save_dir = os.path.dirname(path)
         if save_dir:
             os.makedirs(save_dir, exist_ok=True)
-            
+
         state = {}
 
         if hasattr(diff_model, "rq_mf"):
@@ -876,7 +892,7 @@ class Run:
 
         torch.save(state, path)
         write(f"Saved RQ-VAE checkpoint to {path}")
-    
+
     def load_rqvae(self, diff_model, path):
         write(f"Loading pretrained RQ-VAE.")
         ckpt = torch.load(path, map_location=self.device, weights_only=True)
@@ -886,47 +902,47 @@ class Run:
 
         if "rq_aggr" in ckpt and hasattr(diff_model, "rq_aggr"):
             diff_model.rq_aggr.load_state_dict(ckpt["rq_aggr"])
-        
+
     def pretrain_rqvae(self, model, diff_model, data_diff):
         write(f"{' RQ-VAE Pretraining ':=^{30}}")
         pretrain_epochs = self.rqvae_setting.get("pretrain_epochs", 50)
-        
+
         params = []
         if hasattr(diff_model, "rq_mf"):
             params += list(diff_model.rq_mf.parameters())
         if self.parallel_setting.get("aggregation", "aggregation") != "none" and hasattr(diff_model, "rq_aggr"):
             params += list(diff_model.rq_aggr.parameters())
-            
+
         if not params:
             write("No RQ-VAE parameters found to pretrain.")
             return
 
         optimizer = torch.optim.Adam(params, lr=self.rqvae_setting["rqvae_lr"])
-        
+
         diff_model.train()
         for epoch in range(pretrain_epochs):
             total_loss = 0
             for batch in data_diff:
                 tgt_uid, iid_input, y_input = [b.to(self.device) for b in batch]
-                
+
                 # Fetch MF embeddings (Condition)
                 src_uid_emb1 = model.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
-                
+
                 # MF path loss
                 _, _, loss1 = diff_model.rq_mf(src_uid_emb1)
                 loss = loss1
-                
+
                 # Aggr path loss if applicable
                 if self.parallel_setting.get("aggregation", "aggregation") != "none" and hasattr(diff_model, "rq_aggr"):
                     src_uid_emb2 = model._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
                     _, _, loss2 = diff_model.rq_aggr(src_uid_emb2)
                     loss += loss2
-                
+
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item()
-            
+
             if (epoch + 1) % 10 == 0 or epoch == 0:
                 write(f"Pretrain RQ Epoch {epoch+1}/{pretrain_epochs} | Loss: {total_loss/len(data_diff):.6f}")
 
@@ -975,7 +991,7 @@ class Run:
     def result_print(self, phase):
         print_str = ""
         for p in phase:
-            write(f'⬇️ Eval {p}: MAE & RMSE ')
+            write(f"⬇️ Eval {p}: MAE & RMSE ")
             for m in ["_mae", "_rmse"]:
                 metric_name = p + m
                 print_str += metric_name + ": {:.6f} ".format(self.results[metric_name])
@@ -1037,10 +1053,9 @@ class Run:
             ckpt = torch.load(cache_path, map_location="cpu", weights_only=True)
             style_src = ckpt["style"]
             info = ckpt["info"]
-        else: 
+        else:
             style_src, info = build_src_user_rating_style_from_loader(
-                data_src=data_src, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, device="cpu",
-                cache_path=cache_path
+                data_src=data_src, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, device="cpu", cache_path=cache_path
             )
 
         print(f"\n타겟 도메인 내 아이템의 레이팅 스타일 정보 추출\n")
@@ -1051,10 +1066,8 @@ class Run:
             info_tgt = ckpt["info_tgt"]
         else:
             style_tgt_item, info_tgt = build_tgt_item_rating_style_from_loader(
-                data_tgt=data_tgt, num_items_total=self.iid_all + 1, rating_min=1.0, rating_max=5.0, device="cpu",
-                cache_path=cache_path
+                data_tgt=data_tgt, num_items_total=self.iid_all + 1, rating_min=1.0, rating_max=5.0, device="cpu", cache_path=cache_path
             )
-
 
         print(f"\n타겟 도메인 내 유저의 레이팅 스타일 정보 추출\n")
         cache_path = f"{self.stylecache_root}_tgt_user.pt"
@@ -1062,12 +1075,11 @@ class Run:
             ckpt = torch.load(cache_path, map_location="cpu", weights_only=True)
             style_tgt_user = ckpt["style"]
             info = ckpt["info"]
-        else: 
+        else:
             style_tgt_user, info = build_src_user_rating_style_from_loader(
-                data_src=data_tgt, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, device="cpu",
-                cache_path=cache_path
+                data_src=data_tgt, num_users=self.uid_all, rating_min=1.0, rating_max=5.0, device="cpu", cache_path=cache_path
             )
-        
+
         criterion = torch.nn.MSELoss()
 
         if exp_part == "None_CDR":
@@ -1107,7 +1119,16 @@ class Run:
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
             self.Diff_Parallel(
-                model, diff_model, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"], style_src, style_tgt_item, style_tgt_user,
+                model,
+                diff_model,
+                data_diff,
+                data_diff_test,
+                optimizer_diff,
+                graph_data["train"],
+                graph_data["test"],
+                style_src,
+                style_tgt_item,
+                style_tgt_user,
             )
             self.result_print(["diff_parallel"])
 
@@ -1166,15 +1187,9 @@ def mae_summary_by_score(y_true, mae):
     return pd.DataFrame(rows)
 
 
-
 @torch.no_grad()
 def build_src_user_rating_style_from_loader(
-    data_src,
-    num_users: int,
-    rating_min: float = 1.0,
-    rating_max: float = 5.0,
-    device: str = "cpu",
-    cache_path = ""
+    data_src, num_users: int, rating_min: float = 1.0, rating_max: float = 5.0, device: str = "cpu", cache_path=""
 ):
     """
     data_src yields: (X, y)
@@ -1254,7 +1269,7 @@ def build_src_user_rating_style_from_loader(
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     torch.save(
         {
-            "style": style.cpu(),   # 저장은 CPU 권장
+            "style": style.cpu(),  # 저장은 CPU 권장
             "info": info,
         },
         cache_path,
@@ -1353,11 +1368,10 @@ def build_tgt_item_rating_style_from_loader(
         "num_items_total": num_items_total,
     }
 
-    
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     torch.save(
         {
-            "style_tgt_item": style_item.cpu(),   # 저장은 CPU 권장
+            "style_tgt_item": style_item.cpu(),  # 저장은 CPU 권장
             "info_tgt": info,
         },
         cache_path,

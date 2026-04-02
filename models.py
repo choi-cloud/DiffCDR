@@ -8,6 +8,7 @@ import lacdr_model as LACDR
 from rqvae import ResidualQuantizer
 from utils import AttentionLayer
 
+
 class LookupEmbedding(torch.nn.Module):
 
     def __init__(self, uid_all, iid_all, emb_dim):
@@ -20,6 +21,7 @@ class LookupEmbedding(torch.nn.Module):
         iid_emb = self.iid_embedding(x[:, 1].unsqueeze(1))
         emb = torch.cat([uid_emb, iid_emb], dim=1)
         return emb
+
 
 class MetaNet(torch.nn.Module):
     def __init__(self, emb_dim, meta_dim):
@@ -49,11 +51,10 @@ class MFBasedModel(torch.nn.Module):
         self.meta_net = MetaNet(emb_dim, meta_dim_0)
         self.mapping = torch.nn.Linear(emb_dim, emb_dim, False)
 
-        self.graph_emb_cache = {} # 🔥 Cache for graph embeddings
+        self.graph_emb_cache = {}  # 🔥 Cache for graph embeddings
 
     def clear_graph_cache(self):
         self.graph_emb_cache = {}
-
 
     def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False, item_cond=False, style_src=None):
         if stage == "train_src":
@@ -162,7 +163,7 @@ class MFBasedModel(torch.nn.Module):
 
             tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)  # Aggr
             src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
-            
+
             cond_emb1 = src_uid_emb1
             cond_emb2 = src_uid_emb2
 
@@ -172,19 +173,18 @@ class MFBasedModel(torch.nn.Module):
             if diff_model.rqvae["RQVAE"] == True:
                 quantized1, all_level_vectors1, rq_loss1 = diff_model.rq_mf(cond_emb1)  # [L, B, D]
                 quantized2, all_level_vectors2, rq_loss2 = diff_model.rq_aggr(cond_emb2)
-                
+
             else:
                 all_level_vectors1 = cond_emb1
                 all_level_vectors2 = cond_emb2
                 quantized1, quantized2 = None, None
-
 
             # is_task=False: 노이즈 예측 , is_task=True: ALS + task 로스
             loss = Diff.diffusion_loss_fn_parallel(
                 diff_model,
                 tgt_emb1,
                 tgt_emb2,
-                src_uid_emb1,   
+                src_uid_emb1,
                 src_uid_emb2,
                 iid_emb,
                 y_input,
@@ -196,7 +196,7 @@ class MFBasedModel(torch.nn.Module):
                 uid=tgt_uid,
                 iid=iid_input,
                 Q_emb1=quantized1,
-                Q_emb2=quantized2,                
+                Q_emb2=quantized2,
             )
 
             return loss
@@ -206,7 +206,7 @@ class MFBasedModel(torch.nn.Module):
             tgt_uid, iid_input, _ = x
 
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
-            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False) 
+            src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
 
             cond_emb1 = src_uid_emb1
             cond_emb2 = src_uid_emb2
@@ -214,17 +214,17 @@ class MFBasedModel(torch.nn.Module):
 
             if diff_model.rqvae["RQVAE"] == True:
                 quantized1, all_level_vectors1, _ = diff_model.rq_mf(cond_emb1)  # [L, B, D]
-                quantized2, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2) 
-   
+                quantized2, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2)
+
                 cond1, cond2 = all_level_vectors1, all_level_vectors2
                 p_sample = Diff.p_sample_loop_parallel
 
-            else: 
+            else:
                 cond1, cond2 = src_uid_emb1, src_uid_emb2
                 p_sample = Diff.p_sample_loop
 
             if diff_model.rqvae["start_point"] == "src_u":
-                start1, start2 = src_uid_emb1, src_uid_emb2 
+                start1, start2 = src_uid_emb1, src_uid_emb2
             elif diff_model.rqvae["start_point"] == "quant_u":
                 start1, start2 = quantized1, quantized2
             elif diff_model.rqvae["start_point"] == "noise":
@@ -238,7 +238,7 @@ class MFBasedModel(torch.nn.Module):
                 final_output_m = diff_model.ln_m(diff_model.linear_m(final_output_m))
                 final_output_g = diff_model.ln_g(diff_model.linear_g(final_output_g))
                 base_tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
-                
+
             elif diff_model.aggregation == "aggregation_ab1":
                 final_output_m, iid_emb = p_sample(diff_model, start1, cond1, iid_emb, device, diff_id=0)
                 final_output_m = diff_model.ln_m(diff_model.linear_m(final_output_m))
@@ -261,17 +261,17 @@ class MFBasedModel(torch.nn.Module):
                 item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
 
                 tokens = torch.cat([base_tokens, item_style_tok.unsqueeze(1)], dim=1)
-                
+
             elif diff_model.parallel["set_aggr"] == "item_iu":
                 uid = tgt_uid.long()  # (B,)
                 iid = iid_input.squeeze(1)
                 style_src = style_src.to(start1.device)
                 style_u = style_src[uid][:, :2]  # (B, F)
 
-                if diff_model.parallel["bias_mapping"] == 'user':
-                    style_u = diff_model.user_style_mapper(style_u)            
+                if diff_model.parallel["bias_mapping"] == "user":
+                    style_u = diff_model.user_style_mapper(style_u)
                     style_u = style_u.detach()
-               
+
                 style_tok = diff_model.style_encoder(style_u)  # (B, D)
                 style_tok = diff_model.style_ln(style_tok)  # (B, D)
                 style_tok_u = diff_model.style_scale * style_tok  # (B, D)
@@ -281,17 +281,16 @@ class MFBasedModel(torch.nn.Module):
                 item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
                 item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
                 item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
-                
-                tokens = torch.cat([base_tokens, style_tok_u.unsqueeze(1), item_style_tok.unsqueeze(1)], dim=1)
 
+                tokens = torch.cat([base_tokens, style_tok_u.unsqueeze(1), item_style_tok.unsqueeze(1)], dim=1)
 
             elif diff_model.parallel["set_aggr"] == "item_u":
                 uid = tgt_uid.long()  # (B,)
                 style_src = style_src.to(start1.device)
                 style_u = style_src[uid][:, :2]  # (B, F)
-                
-                if diff_model.parallel["bias_mapping"] == 'user':
-                    style_u = diff_model.user_style_mapper(style_u)            
+
+                if diff_model.parallel["bias_mapping"] == "user":
+                    style_u = diff_model.user_style_mapper(style_u)
                     style_u = style_u.detach()
 
                 style_tok = diff_model.style_encoder(style_u)  # (B, D)
@@ -299,7 +298,7 @@ class MFBasedModel(torch.nn.Module):
                 style_tok_u = diff_model.style_scale * style_tok  # (B, D)
 
                 tokens = torch.cat([base_tokens, style_tok_u.unsqueeze(1)], dim=1)
-            
+
             out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
             final_output = out[:, 0, :]  # (B, D)
             y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
