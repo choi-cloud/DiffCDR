@@ -168,6 +168,7 @@ class DiffParallel(nn.Module):
         # define params
         self.num_steps = num_steps
         self.betas = torch.linspace(1e-4, 0.02, num_steps)
+        self.global_step = 0
 
         self.alphas = 1 - self.betas
         self.alphas_prod = torch.cumprod(self.alphas, 0)
@@ -427,16 +428,40 @@ def diffusion_loss_fn_parallel(
             cond1, cond2 = cond_emb1, cond_emb2
             p_sample = p_sample_loop
 
+        log_embedding_stats("item_raw", iid_emb, model.global_step)
         iid_emb = model.ln_iid(iid_emb)
+        log_embedding_stats("item_norm", iid_emb, model.global_step)
 
         if model.aggregation == "aggregation":
             final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0)
             final_output_g, iid_emb = p_sample(model, start2, cond2, iid_emb, device, diff_id=1)
+            # -------------------------
+            # Raw
+            # -------------------------
+            log_embedding_stats("user_m_raw", final_output_m, model.global_step)
+            log_embedding_stats("user_g_raw", final_output_g, model.global_step)
+
             final_output_m_proj = model.linear_m(final_output_m)
             final_output_g_proj = model.linear_g(final_output_g)
+            # -------------------------
+            # Proj
+            # -------------------------
+            log_embedding_stats("user_m_proj", final_output_m_proj, model.global_step)
+            log_embedding_stats("user_g_proj", final_output_g_proj, model.global_step)
+
             final_output_m = model.ln_m(final_output_m_proj)
             final_output_g = model.ln_g(final_output_g_proj)
+            # -------------------------
+            # Norm
+            # -------------------------
+            log_embedding_stats("user_m_norm", final_output_m, model.global_step)
+            log_embedding_stats("user_g_norm", final_output_g, model.global_step)
+
             base_tokens = torch.stack([final_output_m, final_output_g], dim=1)
+
+            uni_loss_m = uniformity_loss(final_output_m, t=2.0)
+            uni_loss_g = uniformity_loss(final_output_g, t=2.0)
+            uni_loss = 0.1 * (uni_loss_m + uni_loss_g)
 
         elif model.aggregation == "aggregation_ab1":
             final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0)
@@ -509,6 +534,8 @@ def diffusion_loss_fn_parallel(
         final_output = out[:, 0, :]  # (B, D)
         y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
 
+        model.global_step += 1
+
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
 
@@ -516,7 +543,7 @@ def diffusion_loss_fn_parallel(
             task_loss += model.parallel["mapping_lambda"] * mapping_loss
 
         if model.aggregation == "aggregation":
-            return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
+            return F.mse_loss(x_0_m, final_output_m) + F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss + uni_loss
         elif model.aggregation == "aggregation_ab1":
             return F.mse_loss(x_0_m, final_output_m) + model.task_lambda * task_loss
         elif model.aggregation == "aggregation_ab2":
@@ -605,3 +632,75 @@ def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):
 def p_sample_loop_parallel(model, start_emb, cond_emb, iid_input, device, diff_id):
     cur_x, iid_emb_out = p_sample_parallel(model=model, cond_emb=cond_emb, x=start_emb, iid_emb=iid_input, device=device, diff_id=diff_id)
     return cur_x, iid_emb_out
+
+
+import torch
+import torch.nn.functional as F
+
+
+def log_prediction_stats(name, pred, global_step, log_every=200):
+    if global_step % log_every != 0:
+        return
+
+    with torch.no_grad():
+        print(f"[{name}] pred")
+        print(f" mean={pred.mean().item():.4f}, std={pred.std().item():.4f}, " f"min={pred.min().item():.4f}, max={pred.max().item():.4f}")
+        print("")
+
+
+def log_embedding_stats(name, emb, global_step, log_every=200):
+    if global_step % log_every != 0:
+        return
+
+    with torch.no_grad():
+        B, D = emb.shape
+
+        # -----------------------------
+        # norm stats
+        # -----------------------------
+        norm = emb.norm(dim=1)  # [B]
+        norm_mean = norm.mean().item()
+        norm_std = norm.std().item()
+        norm_min = norm.min().item()
+        norm_max = norm.max().item()
+
+        # -----------------------------
+        # per-sample mean/std (중요!!)
+        # -----------------------------
+        mean = emb.mean(dim=1)
+        std = emb.std(dim=1)
+
+        mean_mean = mean.mean().item()
+        mean_std = mean.std().item()
+
+        std_mean = std.mean().item()
+        std_std = std.std().item()
+
+        # -----------------------------
+        # cosine similarity (batch 내)
+        # -----------------------------
+        emb_unit = F.normalize(emb, p=2, dim=1)
+        sim_matrix = torch.matmul(emb_unit, emb_unit.t())  # [B, B]
+
+        offdiag = sim_matrix[~torch.eye(B, dtype=bool, device=emb.device)]
+        sim_mean = offdiag.mean().item()
+        sim_std = offdiag.std().item()
+        sim_min = offdiag.min().item()
+        sim_max = offdiag.max().item()
+
+        print(f"[{name}]")
+        print(f" norm     | mean={norm_mean:.4f}, std={norm_std:.4f}, min={norm_min:.4f}, max={norm_max:.4f}")
+        print(f" mean     | mean={mean_mean:.4f}, std={mean_std:.4f}")
+        print(f" std      | mean={std_mean:.4f}, std={std_std:.4f}")
+        print(f" cosine   | mean={sim_mean:.4f}, std={sim_std:.4f}, min={sim_min:.4f}, max={sim_max:.4f}")
+        print("")
+
+
+import torch
+import torch.nn.functional as F
+
+
+def uniformity_loss(z, t=2.0):
+    z = F.normalize(z, dim=1)
+    sq_pdist = torch.pdist(z, p=2).pow(2)
+    return torch.log(torch.exp(-t * sq_pdist).mean() + 1e-8)
