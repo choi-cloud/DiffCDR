@@ -1,22 +1,50 @@
 import torch
 import torch.nn.functional as F
+import torch.nn as nn
 
 import DiffModel as Diff
 import sscdr_model as SSCDR
 import lacdr_model as LACDR
 
+from utils import log_batch_similarity_stats
 
-class LookupEmbedding(torch.nn.Module):
 
-    def __init__(self, uid_all, iid_all, emb_dim):
+class LookupEmbedding(nn.Module):
+
+    def __init__(self, uid_all, iid_all, emb_dim, hidden_dim=64, out_dim=10, uni_lambda=0.1):
         super().__init__()
-        self.uid_embedding = torch.nn.Embedding(uid_all, emb_dim)
-        self.iid_embedding = torch.nn.Embedding(iid_all + 1, emb_dim)
+        self.uid_embedding = nn.Embedding(uid_all, emb_dim)
+        self.iid_embedding = nn.Embedding(iid_all + 1, emb_dim)
 
-    def forward(self, x):
-        uid_emb = self.uid_embedding(x[:, 0].unsqueeze(1))
-        iid_emb = self.iid_embedding(x[:, 1].unsqueeze(1))
-        emb = torch.cat([uid_emb, iid_emb], dim=1)
+        # user mlp
+        self.user_mlp = nn.Sequential(nn.Linear(emb_dim, hidden_dim), nn.ReLU(inplace=True), nn.Linear(hidden_dim, out_dim))
+
+        # item mlp
+        self.item_mlp = nn.Sequential(nn.Linear(emb_dim, hidden_dim), nn.ReLU(inplace=True), nn.Linear(hidden_dim, out_dim))
+
+        self.uni_lambda = uni_lambda
+
+    def uniformity_loss(self, z, t=2.0):
+        z = F.normalize(z, dim=1)
+        sq_pdist = torch.pdist(z, p=2).pow(2)
+        return torch.log(torch.exp(-t * sq_pdist).mean() + 1e-8)
+
+    def forward(self, x, return_loss=False):
+        uid_emb = self.uid_embedding(x[:, 0])  # [B, D]
+        iid_emb = self.iid_embedding(x[:, 1])  # [B, D]
+
+        user_vec = self.user_mlp(uid_emb)  # [B, d]
+        item_vec = self.item_mlp(iid_emb)  # [B, d]
+
+        emb = torch.stack([user_vec, item_vec], dim=1)  # [B, 2, d]
+
+        if return_loss:
+            user_uni = self.uniformity_loss(user_vec)
+            item_uni = self.uniformity_loss(item_vec)
+
+            uni_loss = self.uni_lambda * (user_uni + item_uni)
+            return emb, uni_loss
+
         return emb
 
 
@@ -47,20 +75,43 @@ class MFBasedModel(torch.nn.Module):
 
         self.meta_net = MetaNet(emb_dim, meta_dim_0)
         self.mapping = torch.nn.Linear(emb_dim, emb_dim, False)
+        self.global_step = 0
 
     def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False):
+        # self.global_step += 1
+
         if stage == "train_src":
-            emb = self.src_model.forward(x)
-            x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
-            return x
-        elif stage in ["train_tgt", "test_tgt"]:
+            emb, uni_loss = self.src_model.forward(x, return_loss=True)  # [B, 2, d]
+
+            user_emb = emb[:, 0, :]  # [B, d]
+            item_emb = emb[:, 1, :]  # [B, d]
+
+            log_batch_similarity_stats(user_emb, global_step=self.global_step, log_every=600, prefix="train_src")
+
+            x = torch.sum(user_emb * item_emb, dim=1)
+            return x, uni_loss
+
+        elif stage == "train_tgt":
+            emb, uni_loss = self.tgt_model.forward(x, return_loss=True)
+
+            user_emb = emb[:, 0, :]  # [B, d]
+            item_emb = emb[:, 1, :]  # [B, d]
+
+            log_batch_similarity_stats(user_emb, global_step=self.global_step, log_every=600, prefix="train_tgt")
+
+            x = torch.sum(user_emb * item_emb, dim=1)
+            return x, uni_loss
+
+        elif stage == "test_tgt":
             emb = self.tgt_model.forward(x)
             x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
             return x
+
         elif stage in ["train_aug", "test_aug"]:
             emb = self.aug_model.forward(x)
             x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
             return x
+
         elif stage in ["train_meta", "test_meta"]:
             iid_emb = self.tgt_model.iid_embedding(x[:, 1].unsqueeze(1))
             uid_emb_src = self.src_model.uid_embedding(x[:, 0].unsqueeze(1))
@@ -70,11 +121,13 @@ class MFBasedModel(torch.nn.Module):
             emb = torch.cat([uid_emb, iid_emb], 1)
             output = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
             return output
+
         elif stage == "train_map":
             src_emb = self.src_model.uid_embedding(x.unsqueeze(1)).squeeze()
             src_emb = self.mapping.forward(src_emb)
             tgt_emb = self.tgt_model.uid_embedding(x.unsqueeze(1)).squeeze()
             return src_emb, tgt_emb
+
         elif stage == "test_map":
             uid_emb = self.mapping.forward(self.src_model.uid_embedding(x[:, 0].unsqueeze(1)).squeeze())
             emb = self.tgt_model.forward(x)
@@ -87,9 +140,13 @@ class MFBasedModel(torch.nn.Module):
             tgt_uid, iid_input, y_input = x
 
             tgt_emb = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
+            tgt_emb = self.tgt_model.user_mlp(tgt_emb)
+
             cond_emb = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
+            cond_emb = self.src_model.user_mlp(cond_emb)
 
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
+            iid_emb = self.tgt_model.item_mlp(iid_emb)
 
             loss = Diff.diffusion_loss_fn(diff_model, tgt_emb, cond_emb, iid_emb, y_input, device, is_task)
             return loss
@@ -99,11 +156,17 @@ class MFBasedModel(torch.nn.Module):
             tgt_uid, iid_input, _ = x
 
             cond_emb = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
+            cond_emb = self.src_model.user_mlp(cond_emb)
+
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
+            iid_emb = self.tgt_model.item_mlp(iid_emb)
 
-            trans_emb, iid_emb_out = Diff.p_sample_loop(diff_model, cond_emb, iid_emb, device)
+            final_output_raw, iid_emb_out = Diff.p_sample_loop(diff_model, cond_emb, iid_emb, device)
 
-            x = torch.sum(trans_emb * iid_emb_out, dim=1)
+            final_output_proj = diff_model.al_linear(final_output_raw)
+
+            x = torch.sum(final_output_proj * iid_emb_out, dim=1)
+
             return x
 
         elif stage == "train_ss":

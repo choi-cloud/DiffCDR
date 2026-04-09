@@ -5,6 +5,8 @@ import math
 
 from dpm_solver_pytorch import NoiseScheduleVP, model_wrapper, DPM_Solver
 
+from utils import log_batch_similarity_stats
+
 noise_schedule = NoiseScheduleVP(schedule="linear")
 
 
@@ -65,6 +67,7 @@ class DiffCDR(nn.Module):
         self.sample_steps = diff_sample_steps
         self.c_scale = c_scale
         self.mask_rate = diff_mask_rate
+        self.global_step = 0
         # -----------------------------------------------
 
         self.linears = nn.ModuleList([nn.Linear(input_dim, diff_dim), nn.Linear(diff_dim, diff_dim), nn.Linear(diff_dim, input_dim)])
@@ -148,15 +151,139 @@ def diffusion_loss_fn(model, x_0, cond_emb, iid_emb, y_input, device, is_task):
         return F.smooth_l1_loss(e, output)
 
     elif is_task:
-        final_output, iid_emb = p_sample_loop(model, cond_emb, iid_emb, device)
-        y_pred = torch.sum(final_output * iid_emb, dim=1)
+        final_output_raw, iid_emb = p_sample_loop(model, cond_emb, iid_emb, device)
+
+        # log_batch_similarity_stats(final_output_raw, global_step=model.global_step, log_every=200, prefix="final_output_raw")
+
+        final_output_proj = model.al_linear(final_output_raw)
+
+        # log_batch_similarity_stats(final_output_proj, global_step=model.global_step, log_every=200, prefix="final_output_proj")
+
+        # -------------------------------------------------
+        # debug log
+        # -------------------------------------------------
+        if model.global_step % 200 == 0:
+            with torch.no_grad():
+                target = y_input.squeeze().float()
+
+                # -------------------------
+                # norm stats
+                # -------------------------
+                x0_norm = x_0.norm(dim=1)
+                raw_norm = final_output_raw.norm(dim=1)
+                proj_norm = final_output_proj.norm(dim=1)
+                iid_norm = iid_emb.norm(dim=1)
+
+                print(f"\n[step {model.global_step}] ================= DEBUG =================")
+                print(
+                    f"x_0 norm           | mean={x0_norm.mean().item():.4f}, "
+                    f"std={x0_norm.std().item():.4f}, "
+                    f"min={x0_norm.min().item():.4f}, "
+                    f"max={x0_norm.max().item():.4f}"
+                )
+                print(
+                    f"final_output_raw   | mean={raw_norm.mean().item():.4f}, "
+                    f"std={raw_norm.std().item():.4f}, "
+                    f"min={raw_norm.min().item():.4f}, "
+                    f"max={raw_norm.max().item():.4f}"
+                )
+                print(
+                    f"final_output_proj  | mean={proj_norm.mean().item():.4f}, "
+                    f"std={proj_norm.std().item():.4f}, "
+                    f"min={proj_norm.min().item():.4f}, "
+                    f"max={proj_norm.max().item():.4f}"
+                )
+                print(
+                    f"iid_emb norm       | mean={iid_norm.mean().item():.4f}, "
+                    f"std={iid_norm.std().item():.4f}, "
+                    f"min={iid_norm.min().item():.4f}, "
+                    f"max={iid_norm.max().item():.4f}"
+                )
+
+                # -------------------------
+                # cosine similarity
+                # -------------------------
+                cos_x0_raw = F.cosine_similarity(x_0, final_output_raw, dim=1)
+                cos_x0_proj = F.cosine_similarity(x_0, final_output_proj, dim=1)
+
+                print(
+                    f"x0 vs raw cosine   | mean={cos_x0_raw.mean().item():.4f}, "
+                    f"std={cos_x0_raw.std().item():.4f}, "
+                    f"min={cos_x0_raw.min().item():.4f}, "
+                    f"max={cos_x0_raw.max().item():.4f}"
+                )
+                print(
+                    f"x0 vs proj cosine  | mean={cos_x0_proj.mean().item():.4f}, "
+                    f"std={cos_x0_proj.std().item():.4f}, "
+                    f"min={cos_x0_proj.min().item():.4f}, "
+                    f"max={cos_x0_proj.max().item():.4f}"
+                )
+
+                # -------------------------
+                # prediction stats
+                # -------------------------
+                y_pred_x0 = torch.sum(x_0 * iid_emb, dim=1)
+                y_pred_raw = torch.sum(final_output_raw * iid_emb, dim=1)
+                y_pred_proj = torch.sum(final_output_proj * iid_emb, dim=1)
+
+                print(
+                    f"target             | mean={target.mean().item():.4f}, "
+                    f"std={target.std().item():.4f}, "
+                    f"min={target.min().item():.4f}, "
+                    f"max={target.max().item():.4f}"
+                )
+
+                print(
+                    f"pred(x0, iid)      | mean={y_pred_x0.mean().item():.4f}, "
+                    f"std={y_pred_x0.std().item():.4f}, "
+                    f"min={y_pred_x0.min().item():.4f}, "
+                    f"max={y_pred_x0.max().item():.4f}"
+                )
+                print(
+                    f"pred(raw, iid)     | mean={y_pred_raw.mean().item():.4f}, "
+                    f"std={y_pred_raw.std().item():.4f}, "
+                    f"min={y_pred_raw.min().item():.4f}, "
+                    f"max={y_pred_raw.max().item():.4f}"
+                )
+                print(
+                    f"pred(proj, iid)    | mean={y_pred_proj.mean().item():.4f}, "
+                    f"std={y_pred_proj.std().item():.4f}, "
+                    f"min={y_pred_proj.min().item():.4f}, "
+                    f"max={y_pred_proj.max().item():.4f}"
+                )
+
+                # -------------------------
+                # loss stats
+                # -------------------------
+                recon_raw = F.smooth_l1_loss(x_0, final_output_raw)
+                recon_proj = F.smooth_l1_loss(x_0, final_output_proj)
+
+                task_loss_x0 = (y_pred_x0 - target).square().mean()
+                task_loss_raw = (y_pred_raw - target).square().mean()
+                task_loss_proj = (y_pred_proj - target).square().mean()
+
+                mae_x0 = torch.abs(y_pred_x0 - target).mean()
+                mae_raw = torch.abs(y_pred_raw - target).mean()
+                mae_proj = torch.abs(y_pred_proj - target).mean()
+
+                print(f"recon raw loss     | {recon_raw.item():.6f}")
+                print(f"recon proj loss    | {recon_proj.item():.6f}")
+                print(f"task mse x0        | {task_loss_x0.item():.6f}")
+                print(f"task mse raw       | {task_loss_raw.item():.6f}")
+                print(f"task mse proj      | {task_loss_proj.item():.6f}")
+                print(f"task mae x0        | {mae_x0.item():.6f}")
+                print(f"task mae raw       | {mae_raw.item():.6f}")
+                print(f"task mae proj      | {mae_proj.item():.6f}")
+                print("===================================================\n")
+
+        model.global_step += 1
+
+        y_pred = torch.sum(final_output_proj * iid_emb, dim=1)
 
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
-        # RMSE
-        # task_loss =   (y_pred - y_input.squeeze().float()).square().sum().sqrt() / y_pred.shape[0]
 
-        return F.smooth_l1_loss(x_0, final_output) + model.task_lambda * task_loss
+        return F.smooth_l1_loss(x_0, final_output_proj) + model.task_lambda * task_loss
 
 
 # generation fun
@@ -182,16 +309,111 @@ def p_sample(model, cond_emb, x, iid_emb, device):
 
     sample = dpm_solver.sample(x, steps=dmp_sample_steps, eps=1e-4, adaptive_step_size=False, fast_version=True)
 
-    return model.get_al_emb(sample).to(device), iid_emb
+    # return model.get_al_emb(sample).to(device), iid_emb
+    return sample.to(device), iid_emb
 
 
 def p_sample_loop(model, cond_emb, iid_input, device):
     # source emb input
-    cur_x = cond_emb
+    # cur_x = cond_emb
+
     # noise input
-    # cur_x = torch.normal(0,1,size = cond_emb.size() ,device=device)
+    cur_x = torch.normal(0, 1, size=cond_emb.size(), device=device)
 
     # reversing
     cur_x, iid_emb_out = p_sample(model, cond_emb, cur_x, iid_input, device)
 
     return cur_x, iid_emb_out
+
+
+import torch
+import torch.nn.functional as F
+
+
+@torch.no_grad()
+def p_sample_naive_step(model, x_t, t, cond_emb, device):
+    """
+    x_t:      [B, D]
+    t:        int
+    cond_emb: [B, D]
+    return:   x_{t-1}
+    """
+
+    bsz = x_t.size(0)
+
+    # ----------------------------------
+    # coefficients
+    # ----------------------------------
+    beta_t = model.betas[t].to(device)  # scalar
+    alpha_t = model.alphas[t].to(device)  # scalar
+    alpha_bar_t = model.alphas_prod[t].to(device)  # scalar
+    alpha_bar_prev = model.alphas_prod_p[t].to(device)  # scalar
+
+    sqrt_one_minus_alpha_bar_t = torch.sqrt(1.0 - alpha_bar_t)
+    sqrt_recip_alpha_t = torch.sqrt(1.0 / alpha_t)
+
+    # posterior variance
+    posterior_var_t = beta_t * (1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t)
+    posterior_var_t = torch.clamp(posterior_var_t, min=1e-20)
+
+    # ----------------------------------
+    # predict epsilon
+    # ----------------------------------
+    t_batch = torch.full((bsz,), t, device=device, dtype=torch.long)
+    cond_mask = torch.zeros(bsz, device=device)
+
+    eps_theta = model(x_t, t_batch, cond_emb, cond_mask)
+
+    # ----------------------------------
+    # DDPM reverse mean
+    # mu_theta(x_t, t)
+    # = 1/sqrt(alpha_t) * (x_t - beta_t/sqrt(1-alpha_bar_t) * eps_theta)
+    # ----------------------------------
+    model_mean = sqrt_recip_alpha_t * (x_t - (beta_t / sqrt_one_minus_alpha_bar_t) * eps_theta)
+
+    # ----------------------------------
+    # sample x_{t-1}
+    # ----------------------------------
+    if t > 0:
+        noise = torch.randn_like(x_t)
+        x_prev = model_mean + torch.sqrt(posterior_var_t) * noise
+    else:
+        x_prev = model_mean
+
+    return x_prev
+
+
+@torch.no_grad()
+def p_sample_loop_naive(model, cond_emb, iid_input, device, start_mode="noise", x0_ref=None):
+    """
+    naive reverse sampling
+
+    start_mode:
+        - "noise"         : x_T ~ N(0, I)
+        - "cond_noise"    : cond_emb + small noise
+        - "x0_forward"    : q(x_T | x0_ref) 에서 시작 (x0_ref 필요)
+    """
+
+    if start_mode == "noise":
+        cur_x = torch.randn_like(cond_emb)
+
+    elif start_mode == "cond_noise":
+        cur_x = cond_emb + 0.1 * torch.randn_like(cond_emb)
+
+    elif start_mode == "x0_forward":
+        if x0_ref is None:
+            raise ValueError("start_mode='x0_forward' requires x0_ref")
+
+        t_full = torch.full((x0_ref.size(0), 1), fill_value=model.num_steps - 1, device=device, dtype=torch.long)
+        cur_x, _ = q_x_fn(model, x0_ref, t_full, device)
+
+    else:
+        raise ValueError(f"Unknown start_mode: {start_mode}")
+
+    # ----------------------------------
+    # reverse loop: T-1 -> 0
+    # ----------------------------------
+    for t in reversed(range(model.num_steps)):
+        cur_x = p_sample_naive_step(model, cur_x, t, cond_emb, device)
+
+    return cur_x, iid_input

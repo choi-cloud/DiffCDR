@@ -378,6 +378,12 @@ class Run:
         sum_abs_err = 0.0
         sum_sq_err = 0.0
         total_count = 0
+
+        mse_loss_sum = 0.0
+        uni_loss_sum = 0.0
+        total_loss_sum = 0.0
+        num_batches = 0
+
         if diff == False and ss == False and la == False:
             for X, y in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                 if mapping:
@@ -393,14 +399,23 @@ class Run:
                 else:
                     model.train()
 
-                    pred = model(X, stage, self.device)
-                    loss = criterion(pred, y.squeeze().float())
+                    pred, uni_loss = model(X, stage, self.device)
+                    mse_loss = criterion(pred, y.squeeze().float())
+                    total_loss = mse_loss + uni_loss
 
                     model.zero_grad()
-                    loss.backward()
+                    total_loss.backward()
                     optimizer.step()
 
-                loss_ls.append(loss.item())
+                    # -----------------------------
+                    # accumulate
+                    # -----------------------------
+                    mse_loss_sum += mse_loss.item()
+                    uni_loss_sum += uni_loss.item()
+                    total_loss_sum += total_loss.item()
+                    num_batches += 1
+
+                loss_ls.append(total_loss.item())
 
                 # ====== MAE / RMSE 계산 ======
                 with torch.no_grad():
@@ -416,7 +431,16 @@ class Run:
             mae = sum_abs_err / total_count
             rmse = (sum_sq_err / total_count) ** 0.5
 
-            print(f"Epoch {epoch+1} | MAE: {mae:.6f} | RMSE: {rmse:.6f}")
+            # =====================================
+            # epoch logging
+            # =====================================
+            mse_avg = mse_loss_sum / num_batches
+            uni_avg = uni_loss_sum / num_batches
+            total_avg = total_loss_sum / num_batches
+
+            print(f"[Epoch {epoch+1}] total: {total_avg:.4f} | mse: {mse_avg:.4f} | uni: {uni_avg:.4f}")
+
+            print(f"[Epoch {epoch+1}] | MAE: {mae:.6f} | RMSE: {rmse:.6f}")
 
             return torch.tensor(loss_ls).mean()
 

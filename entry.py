@@ -24,7 +24,7 @@ def prepare_1():
 
     parser.add_argument("--root", default="./")
     parser.add_argument("--exp_part", default="None_CDR")
-    parser.add_argument("--save_path", default="./model_save_default/model_1_[0.2, 0.8].pth")
+    parser.add_argument("--save_path", default="./model_save_default/model_mlp_1_[0.2, 0.8].pth")
     parser.add_argument("--use_cuda", default=1)
 
     args = parser.parse_args()
