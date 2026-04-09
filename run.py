@@ -469,28 +469,50 @@ class Run:
             return torch.tensor(loss_ls).mean()
 
         elif diff == True:
+            total_loss_ls = []
+
+            align_loss_ls = []
             task_loss_ls = []
+            uni_loss_ls = []
+
             for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                 model[1].train()
 
-                # diff first, then task
                 # diff
                 loss = model[0](X, stage, self.device, diff_model=model[1], is_task=False)
                 model[1].zero_grad()
                 loss.backward()
                 _ = torch.nn.utils.clip_grad_norm_(model[1].parameters(), 1.0)
                 optimizer.step()
+
                 # task
-                task_loss = model[0](X, stage, self.device, diff_model=model[1], is_task=True)
+                align_loss, task_loss, uni_loss = model[0](X, stage, self.device, diff_model=model[1], is_task=True)
+                total_loss = align_loss + task_loss + uni_loss
                 model[1].zero_grad()
-                task_loss.backward()
+                total_loss.backward()
                 _ = torch.nn.utils.clip_grad_norm_(model[1].parameters(), 1.0)
                 optimizer.step()
 
+                # -------------------------
+                # logging
+                # -------------------------
                 loss_ls.append(loss.item())
+                total_loss_ls.append(total_loss.item())
+
+                align_loss_ls.append(align_loss.item())
                 task_loss_ls.append(task_loss.item())
-            # return torch.tensor(loss_ls).mean()
-            return torch.tensor(loss_ls).mean(), torch.tensor(task_loss_ls).mean()
+                uni_loss_ls.append(uni_loss.item())
+
+            # -------------------------
+            # epoch stats
+            # -------------------------
+            align_loss_mean = torch.tensor(align_loss_ls).mean()
+            task_loss_mean = torch.tensor(task_loss_ls).mean()
+            uni_loss_mean = torch.tensor(uni_loss_ls).mean()
+
+            print(f"align={align_loss_mean:.4f} | " f"task={task_loss_mean:.4f} | " f"uni={uni_loss_mean:.4f}")
+
+            return torch.tensor(loss_ls).mean(), torch.tensor(total_loss_ls).mean()
 
     def update_results(self, mae, rmse, phase):
 

@@ -148,24 +148,38 @@ class MFBasedModel(torch.nn.Module):
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
             iid_emb = self.tgt_model.item_mlp(iid_emb)
 
-            loss = Diff.diffusion_loss_fn(diff_model, tgt_emb, cond_emb, iid_emb, y_input, device, is_task)
-            return loss
+            if is_task == False:
+                loss = Diff.diffusion_loss_fn(diff_model, tgt_emb, cond_emb, iid_emb, y_input, device, is_task)
+                return loss
+            else:
+                align_loss, task_loss, uni_loss = Diff.diffusion_loss_fn(diff_model, tgt_emb, cond_emb, iid_emb, y_input, device, is_task)
+                return align_loss, task_loss, uni_loss
 
         elif stage == "test_diff":
 
             tgt_uid, iid_input, _ = x
 
+            tgt_emb = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
+            tgt_emb = self.tgt_model.user_mlp(tgt_emb)
+
             cond_emb = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
             cond_emb = self.src_model.user_mlp(cond_emb)
+
+            # mu = cond_emb.mean(dim=0, keepdim=True)  # [1, D]
+            # std = cond_emb.std(dim=0, keepdim=True)  # [1, D]
+            # cond_emb = torch.randn_like(cond_emb) * std + mu
 
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
             iid_emb = self.tgt_model.item_mlp(iid_emb)
 
-            final_output_raw, iid_emb_out = Diff.p_sample_loop(diff_model, cond_emb, iid_emb, device)
+            # final_output_raw, iid_emb_out = Diff.p_sample_loop(diff_model, cond_emb, iid_emb, device)
+            # final_output_raw, iid_emb = Diff.p_sample_loop_naive(diff_model, cond_emb, iid_emb, device, start_mode="x0_forward", x0_ref=tgt_emb)
+            final_output_raw, iid_emb = Diff.p_sample_loop_naive(diff_model, cond_emb, iid_emb, device, start_mode="cond")
+            # final_output_raw, iid_emb = Diff.p_sample_loop_naive(diff_model, cond_emb, iid_emb, device, start_mode="noise")
 
             final_output_proj = diff_model.al_linear(final_output_raw)
 
-            x = torch.sum(final_output_proj * iid_emb_out, dim=1)
+            x = torch.sum(final_output_proj * iid_emb, dim=1)
 
             return x
 

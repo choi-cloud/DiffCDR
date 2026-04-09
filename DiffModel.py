@@ -68,6 +68,7 @@ class DiffCDR(nn.Module):
         self.c_scale = c_scale
         self.mask_rate = diff_mask_rate
         self.global_step = 0
+        self.uni_lambda = 0.1
         # -----------------------------------------------
 
         self.linears = nn.ModuleList([nn.Linear(input_dim, diff_dim), nn.Linear(diff_dim, diff_dim), nn.Linear(diff_dim, input_dim)])
@@ -151,13 +152,13 @@ def diffusion_loss_fn(model, x_0, cond_emb, iid_emb, y_input, device, is_task):
         return F.smooth_l1_loss(e, output)
 
     elif is_task:
-        final_output_raw, iid_emb = p_sample_loop(model, cond_emb, iid_emb, device)
+        # final_output_raw, iid_emb = p_sample_loop(model, cond_emb, iid_emb, device)
 
-        # log_batch_similarity_stats(final_output_raw, global_step=model.global_step, log_every=200, prefix="final_output_raw")
+        final_output_raw, iid_emb = p_sample_loop_naive(model, cond_emb, iid_emb, device, start_mode="cond")
+        log_batch_similarity_stats(final_output_raw, global_step=model.global_step, log_every=200, prefix="final_output_raw")
 
         final_output_proj = model.al_linear(final_output_raw)
-
-        # log_batch_similarity_stats(final_output_proj, global_step=model.global_step, log_every=200, prefix="final_output_proj")
+        log_batch_similarity_stats(final_output_proj, global_step=model.global_step, log_every=200, prefix="final_output_proj")
 
         # -------------------------------------------------
         # debug log
@@ -278,12 +279,14 @@ def diffusion_loss_fn(model, x_0, cond_emb, iid_emb, y_input, device, is_task):
 
         model.global_step += 1
 
+        uni_loss_proj = uniformity_loss(final_output_proj)
+
         y_pred = torch.sum(final_output_proj * iid_emb, dim=1)
 
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
 
-        return F.smooth_l1_loss(x_0, final_output_proj) + model.task_lambda * task_loss
+        return F.smooth_l1_loss(x_0, final_output_proj), model.task_lambda * task_loss, model.uni_lambda * uni_loss_proj
 
 
 # generation fun
@@ -384,21 +387,14 @@ def p_sample_naive_step(model, x_t, t, cond_emb, device):
 
 
 @torch.no_grad()
-def p_sample_loop_naive(model, cond_emb, iid_input, device, start_mode="noise", x0_ref=None):
-    """
-    naive reverse sampling
-
-    start_mode:
-        - "noise"         : x_T ~ N(0, I)
-        - "cond_noise"    : cond_emb + small noise
-        - "x0_forward"    : q(x_T | x0_ref) 에서 시작 (x0_ref 필요)
-    """
+def p_sample_loop_naive(model, cond_emb, iid_input, device, start_mode="noise", x0_ref=None, log_every=0):
 
     if start_mode == "noise":
         cur_x = torch.randn_like(cond_emb)
 
-    elif start_mode == "cond_noise":
-        cur_x = cond_emb + 0.1 * torch.randn_like(cond_emb)
+    elif start_mode == "cond":  # "cond_noise"
+        # cur_x = cond_emb + 0.1 * torch.randn_like(cond_emb)
+        cur_x = cond_emb
 
     elif start_mode == "x0_forward":
         if x0_ref is None:
@@ -410,10 +406,23 @@ def p_sample_loop_naive(model, cond_emb, iid_input, device, start_mode="noise", 
     else:
         raise ValueError(f"Unknown start_mode: {start_mode}")
 
-    # ----------------------------------
-    # reverse loop: T-1 -> 0
-    # ----------------------------------
     for t in reversed(range(model.num_steps)):
         cur_x = p_sample_naive_step(model, cur_x, t, cond_emb, device)
 
+        if log_every > 0 and (t % log_every == 0 or t == model.num_steps - 1 or t == 0):
+            norm = cur_x.norm(dim=1)
+            # print(
+            #     f"[naive reverse] t={t:03d} | "
+            #     f"norm mean={norm.mean().item():.4f}, "
+            #     f"std={norm.std().item():.4f}, "
+            #     f"min={norm.min().item():.4f}, "
+            #     f"max={norm.max().item():.4f}"
+            # )
+
     return cur_x, iid_input
+
+
+def uniformity_loss(z, t=2.0):
+    z = F.normalize(z, dim=1)
+    sq_pdist = torch.pdist(z, p=2).pow(2)
+    return torch.log(torch.exp(-t * sq_pdist).mean() + 1e-8)
