@@ -35,6 +35,20 @@ def get_timestep_embedding(timesteps, embedding_dim: int):
     return emb
 
 
+import torch
+import torch.nn.functional as F
+
+
+def extract(a, t, x_shape):
+    """
+    a: [T]
+    t: [B]
+    return: [B, 1, ..., 1]
+    """
+    out = a.gather(0, t)
+    return out.view(t.shape[0], *([1] * (len(x_shape) - 1)))
+
+
 class DiffCDR(nn.Module):
     def __init__(self, num_steps=200, diff_dim=32, input_dim=32, c_scale=0.1, diff_sample_steps=30, diff_task_lambda=0.1, diff_mask_rate=0.1):
         super(DiffCDR, self).__init__()
@@ -110,14 +124,31 @@ class DiffCDR(nn.Module):
 import torch.nn.functional as F
 
 
+# def q_x_fn(model, x_0, t, device):
+#     # eq(4)
+#     noise = torch.normal(0, 1, size=x_0.size(), device=device)
+
+#     alphas_t = model.alphas_bar_sqrt.to(device)[t]
+#     alphas_1_m_t = model.one_minus_alphas_bar_sqrt.to(device)[t]
+
+#     return (alphas_t * x_0 + alphas_1_m_t * noise), noise
+
+
 def q_x_fn(model, x_0, t, device):
-    # eq(4)
-    noise = torch.normal(0, 1, size=x_0.size(), device=device)
+    """
+    x_0: [B, D]
+    t:   [B, 1] or [B]
+    """
+    if t.dim() > 1:
+        t = t.squeeze(-1)
 
-    alphas_t = model.alphas_bar_sqrt.to(device)[t]
-    alphas_1_m_t = model.one_minus_alphas_bar_sqrt.to(device)[t]
+    noise = torch.randn_like(x_0).to(device)
 
-    return (alphas_t * x_0 + alphas_1_m_t * noise), noise
+    a_bar_sqrt_t = extract(model.alphas_bar_sqrt.to(device), t, x_0.shape)
+    one_minus_a_bar_sqrt_t = extract(model.one_minus_alphas_bar_sqrt.to(device), t, x_0.shape)
+
+    x_t = a_bar_sqrt_t * x_0 + one_minus_a_bar_sqrt_t * noise
+    return x_t, noise
 
 
 def diffusion_loss_fn(model, x_0, cond_emb, iid_emb, y_input, device, is_task):
@@ -128,36 +159,45 @@ def diffusion_loss_fn(model, x_0, cond_emb, iid_emb, y_input, device, is_task):
     if is_task == False:
 
         # ------------------------
-        # sampling
+        # sampling t
         # ------------------------
         batch_size = x_0.shape[0]
-        # sample t
+
         t = torch.randint(0, num_steps, size=(batch_size // 2,), device=device)
         if batch_size % 2 == 0:
             t = torch.cat([t, num_steps - 1 - t], dim=0)
         else:
             extra_t = torch.randint(0, num_steps, size=(1,), device=device)
             t = torch.cat([t, num_steps - 1 - t, extra_t], dim=0)
-        t = t.unsqueeze(-1)
 
-        x, e = q_x_fn(model, x_0, t, device)
+        # ------------------------
+        # forward diffusion
+        # ------------------------
+        x_t, e = q_x_fn(model, x_0, t, device)
 
+        # ------------------------
         # random mask
+        # ------------------------
         cond_mask = 1 * (torch.rand(cond_emb.shape[0], device=device) <= mask_rate)
         cond_mask = 1 - cond_mask.int()
 
-        # pred noise
-        output = model(x, t.squeeze(-1), cond_emb, cond_mask)
+        # ------------------------
+        # predict x0 directly
+        # ------------------------
+        x0_pred = model(x_t, t, cond_emb, cond_mask)
 
-        return F.smooth_l1_loss(e, output)
+        # clamp는 선택
+        # x0_pred = torch.clamp(x0_pred, -5.0, 5.0)
+
+        return F.smooth_l1_loss(x_0, x0_pred)
 
     elif is_task:
-        # final_output_raw, iid_emb = p_sample_loop(model, cond_emb, iid_emb, device)
+        final_output_raw, iid_emb = p_sample_loop_x0(model, cond_emb, iid_emb, device, start_mode="cond")
 
-        final_output_raw, iid_emb = p_sample_loop_naive(model, cond_emb, iid_emb, device, start_mode="cond")
         log_batch_similarity_stats(final_output_raw, global_step=model.global_step, log_every=200, prefix="final_output_raw")
 
         final_output_proj = model.al_linear(final_output_raw)
+
         log_batch_similarity_stats(final_output_proj, global_step=model.global_step, log_every=200, prefix="final_output_proj")
 
         # -------------------------------------------------
@@ -426,3 +466,72 @@ def uniformity_loss(z, t=2.0):
     z = F.normalize(z, dim=1)
     sq_pdist = torch.pdist(z, p=2).pow(2)
     return torch.log(torch.exp(-t * sq_pdist).mean() + 1e-8)
+
+
+def p_sample_x0(model, x_t, t, cond_emb, device, cond_mask=None):
+    """
+    model output: x0_pred
+    x_t: [B, D]
+    t:   [B]
+    """
+    if cond_mask is None:
+        cond_mask = torch.ones(x_t.shape[0], device=device, dtype=torch.int)
+
+    betas_t = extract(model.betas.to(device), t, x_t.shape)
+    alphas_t = extract(model.alphas.to(device), t, x_t.shape)
+    alphas_bar_t = extract(model.alphas_prod.to(device), t, x_t.shape)
+    alphas_bar_prev_t = extract(model.alphas_prod_p.to(device), t, x_t.shape)
+
+    # ------------------------
+    # predict x0
+    # ------------------------
+    x0_pred = model(x_t, t, cond_emb, cond_mask)
+
+    # optional clamp
+    # x0_pred = torch.clamp(x0_pred, -5.0, 5.0)
+
+    # ------------------------
+    # posterior mean
+    # mu = c1 * x0_pred + c2 * x_t
+    # ------------------------
+    coef1 = betas_t * torch.sqrt(alphas_bar_prev_t) / (1.0 - alphas_bar_t)
+    coef2 = torch.sqrt(alphas_t) * (1.0 - alphas_bar_prev_t) / (1.0 - alphas_bar_t)
+    mean = coef1 * x0_pred + coef2 * x_t
+
+    # posterior variance
+    var = betas_t * (1.0 - alphas_bar_prev_t) / (1.0 - alphas_bar_t)
+
+    noise = torch.randn_like(x_t)
+
+    # t == 0이면 noise 없이 mean 반환
+    nonzero_mask = (t != 0).float().view(x_t.shape[0], *([1] * (x_t.dim() - 1)))
+    x_prev = mean + nonzero_mask * torch.sqrt(var) * noise
+
+    return x_prev, x0_pred
+
+
+def p_sample_loop_x0(model, cond_emb, iid_emb, device, start_mode="noise"):
+    """
+    start_mode:
+        - "noise": pure Gaussian에서 시작
+        - "cond" : cond_emb에서 시작
+    """
+    batch_size = cond_emb.shape[0]
+
+    if start_mode == "noise":
+        x_t = torch.randn_like(cond_emb).to(device)
+    elif start_mode == "cond":
+        x_t = cond_emb.clone().to(device)
+    else:
+        raise ValueError(f"Unknown start_mode: {start_mode}")
+
+    cond_mask = torch.ones(batch_size, device=device, dtype=torch.int)
+
+    final_x0_pred = None
+
+    for time_step in reversed(range(model.num_steps)):
+        t = torch.full((batch_size,), time_step, device=device, dtype=torch.long)
+        x_t, x0_pred = p_sample_x0(model, x_t, t, cond_emb, device, cond_mask)
+        final_x0_pred = x0_pred
+
+    return final_x0_pred, iid_emb
