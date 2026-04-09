@@ -69,7 +69,8 @@ class Run:
             self.root + "stylecache/_" + str(int(self.ratio[0] * 10)) + "_" + str(int(self.ratio[1] * 10)) + "/tgt_" + self.tgt + "_src_" + self.src
         )
 
-        aggretaion_name = str(True)
+        isResidual = "residual"
+        aggregaion_name = str(True)
         self.rqvae_ckpt_root = (
             self.root
             + "rqvae_ckpt/"
@@ -87,7 +88,8 @@ class Run:
             + "ep_"
             + str(config["rqvae_lr"])
             + "lr_"
-            + aggretaion_name
+            + aggregaion_name 
+            + "_" + isResidual + "_data_src" + "_tgt_" + self.tgt
         )
 
         self.results = {
@@ -826,7 +828,7 @@ class Run:
             self.update_results(mae, rmse, "diff")
             write(f"DIFF LOSS {loss.item():>10.6f} |  TASK LOSS {task_loss.item():>10.6f} | MAE: {mae:>10.6f} | RMSE: {rmse:>10.6f}")
 
-    def Diff_Parallel(self, model, diff_model, data_diff, data_test, optimizer, graph_train, graph_test, style_src, style_tgt_item, style_tgt_user):
+    def Diff_Parallel(self, model, diff_model, data_src, data_diff, data_test, optimizer, graph_train, graph_test, style_src, style_tgt_item, style_tgt_user):
         write(f"{' Diff_Parallel ':=^{30}}")
 
         diff_model.style_tgt_item = style_tgt_item
@@ -845,8 +847,8 @@ class Run:
         if self.rqvae_setting.get("pretrain_rq", False):
             if os.path.exists(self.rqvae_ckpt_root):
                 self.load_rqvae(diff_model, self.rqvae_ckpt_root)
-            else:
-                self.pretrain_rqvae(model, diff_model, data_diff)
+            else: 
+                self.pretrain_rqvae(model, diff_model, data_src)
                 self.save_rqvae(diff_model, self.rqvae_ckpt_root)
 
         # [FREEZE] Freeze RQ-VAE parameters if requested
@@ -855,7 +857,7 @@ class Run:
             if hasattr(diff_model, "rq_mf"):
                 for p in diff_model.rq_mf.parameters():
                     p.requires_grad = False
-            if self.parallel_setting.get("aggregation", "aggregation") != "none" and hasattr(diff_model, "rq_aggr"):
+            if hasattr(diff_model, "rq_aggr"):
                 for p in diff_model.rq_aggr.parameters():
                     p.requires_grad = False
 
@@ -905,47 +907,63 @@ class Run:
 
     def pretrain_rqvae(self, model, diff_model, data_diff):
         write(f"{' RQ-VAE Pretraining ':=^{30}}")
-        pretrain_epochs = self.rqvae_setting.get("pretrain_epochs", 50)
 
-        params = []
+        # 1) MF quantizer 따로 pretrain
         if hasattr(diff_model, "rq_mf"):
-            params += list(diff_model.rq_mf.parameters())
-        if self.parallel_setting.get("aggregation", "aggregation") != "none" and hasattr(diff_model, "rq_aggr"):
-            params += list(diff_model.rq_aggr.parameters())
+            self._pretrain_single_quantizer(
+                name="rq_mf",
+                quantizer=diff_model.rq_mf,
+                embed_fetch_fn=lambda tgt_uid: model.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze(),
+                data_diff=data_diff
+            )
 
-        if not params:
-            write("No RQ-VAE parameters found to pretrain.")
+        # 2) Aggr quantizer 따로 pretrain
+        if hasattr(diff_model, "rq_aggr"):
+            self._pretrain_single_quantizer(
+                name="rq_aggr",
+                quantizer=diff_model.rq_aggr,
+                embed_fetch_fn=lambda tgt_uid: model._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False),
+                data_diff=data_diff
+            )
+
+    def _pretrain_single_quantizer(self, name, quantizer, embed_fetch_fn, data_diff):
+        """
+        rq_mf 또는 rq_aggr 하나만 따로 pretrain
+        """
+        if quantizer is None:
+            write(f"Skip {name}: module is None")
             return
 
-        optimizer = torch.optim.Adam(params, lr=self.rqvae_setting["rqvae_lr"])
+        pretrain_epochs = self.rqvae_setting.get("pretrain_epochs", 50)
+        optimizer = torch.optim.Adam(quantizer.parameters(), lr=self.rqvae_setting["rqvae_lr"])
 
-        diff_model.train()
+        quantizer.train()
+
+        write(f"{' Pretraining ' + name + ' ':=^{30}}")
+
+        with torch.no_grad():
+            all_uids = torch.arange(self.uid_all).to(self.device)
+            all_z = embed_fetch_fn(all_uids)  # [N, D]
+
+        z_loader = torch.utils.data.DataLoader(
+            torch.utils.data.TensorDataset(all_z),
+            batch_size=self.batchsize_diff,
+            shuffle=True
+        )
+        
         for epoch in range(pretrain_epochs):
-            total_loss = 0
-            for batch in data_diff:
-                tgt_uid, iid_input, y_input = [b.to(self.device) for b in batch]
+            total_loss = 0.0
 
-                # Fetch MF embeddings (Condition)
-                src_uid_emb1 = model.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
-
-                # MF path loss
-                _, _, loss1 = diff_model.rq_mf(src_uid_emb1)
-                loss = loss1
-
-                # Aggr path loss if applicable
-                if self.parallel_setting.get("aggregation", "aggregation") != "none" and hasattr(diff_model, "rq_aggr"):
-                    src_uid_emb2 = model._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
-                    _, _, loss2 = diff_model.rq_aggr(src_uid_emb2)
-                    loss += loss2
-
+            for (z_batch,) in z_loader:
+                _, _, loss = quantizer(z_batch)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 total_loss += loss.item()
 
             if (epoch + 1) % 10 == 0 or epoch == 0:
-                write(f"Pretrain RQ Epoch {epoch+1}/{pretrain_epochs} | Loss: {total_loss/len(data_diff):.6f}")
-
+                write(f"{name} Epoch {epoch+1}/{pretrain_epochs} | Loss: {total_loss/len(data_diff):.6f}")
+                
     def SS_CDR(self, model, ss_model, data_ss, data_test, optimizer_ss):
         write("==========SS_CDR==========")
         for i in range(self.epoch):
@@ -1119,16 +1137,7 @@ class Run:
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
             self.Diff_Parallel(
-                model,
-                diff_model,
-                data_diff,
-                data_diff_test,
-                optimizer_diff,
-                graph_data["train"],
-                graph_data["test"],
-                style_src,
-                style_tgt_item,
-                style_tgt_user,
+                model, diff_model, data_src, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"], style_src, style_tgt_item, style_tgt_user,
             )
             self.result_print(["diff_parallel"])
 
