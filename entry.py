@@ -38,7 +38,8 @@ def prepare_1():
 
     parser.add_argument("--root", default="./")
     parser.add_argument("--exp_part", default="None_CDR")
-    parser.add_argument("--save_path", default="/home/shared/cjp/model_save_default_9/model")
+    # parser.add_argument("--save_path", default="/home/shared/cjp/model_save_default_9/model")
+    parser.add_argument("--save_path", default="/home/schoi/DiffCDR/model_save_default/model_mlp")
     parser.add_argument("--use_cuda", default=1)
     parser.add_argument("--experiment", default="DiffCDR")
 
@@ -49,7 +50,7 @@ def prepare_1():
     # RQVAE(code_dim=input_dim, num_levels=4, codebook_size=256)
     parser.add_argument("--codebook_num", type=int, default=4, help="RQVAE 코드북 개수(level)")
     parser.add_argument("--codebook_size", type=int, default=64, help="RQVAE 코드북 크기")
-    parser.add_argument("--RQVAE", type=str2bool, default=True, help="rq 사용 여부")
+    parser.add_argument("--RQVAE", type=str2bool, default=False, help="rq 사용 여부")
     parser.add_argument("--pretrain_rq", type=str2bool, default=True, help="rqvae pretrain 여부")
     parser.add_argument("--pretrain_epochs", type=int, default=50, help="rqvae pretrain epoch")
     parser.add_argument("--freeze_rq", type=str2bool, default=True, help="rqvae 파라미터 고정 여부")

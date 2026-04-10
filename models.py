@@ -217,11 +217,11 @@ class MFBasedModel(torch.nn.Module):
                 quantized2, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2)
 
                 cond1, cond2 = all_level_vectors1, all_level_vectors2
-                p_sample = Diff.p_sample_loop_parallel
+                p_sample = Diff.p_sample_loop_x0_solver
 
             else:
                 cond1, cond2 = src_uid_emb1, src_uid_emb2
-                p_sample = Diff.p_sample_loop
+                p_sample = Diff.p_sample_loop_x0_solver
 
             if diff_model.rqvae["start_point"] == "src_u":
                 start1, start2 = src_uid_emb1, src_uid_emb2
@@ -233,8 +233,8 @@ class MFBasedModel(torch.nn.Module):
             iid_emb = diff_model.ln_iid(iid_emb)
 
             if diff_model.aggregation == "aggregation":
-                final_output_m, iid_emb = p_sample(diff_model, start1, cond1, iid_emb, device, diff_id=0)
-                final_output_g, iid_emb = p_sample(diff_model, start2, cond2, iid_emb, device, diff_id=1)
+                final_output_m, iid_emb = p_sample(diff_model, cond1, iid_emb, device, diff_id=0)
+                final_output_g, iid_emb = p_sample(diff_model, cond2, iid_emb, device, diff_id=1)
                 final_output_m = diff_model.ln_m(diff_model.linear_m(final_output_m))
                 final_output_g = diff_model.ln_g(diff_model.linear_g(final_output_g))
                 base_tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
