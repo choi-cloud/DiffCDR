@@ -90,6 +90,7 @@ class Run:
             + "lr_"
             + aggregaion_name 
             + "_" + isResidual + "_data_src" + "_tgt_" + self.tgt
+            + "MF_MLP"
         )
 
         self.results = {
@@ -967,7 +968,8 @@ class Run:
             self._pretrain_single_quantizer(
                 name="rq_mf",
                 quantizer=diff_model.rq_mf,
-                embed_fetch_fn=lambda tgt_uid: model.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze(),
+                # embed_fetch_fn=lambda tgt_uid: model.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze(),
+                embed_fetch_fn=lambda tgt_uid: model.src_model.user_mlp(model.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()),
                 data_diff=data_diff
             )
 
