@@ -176,7 +176,10 @@ class MFBasedModel(torch.nn.Module):
             # final_output_raw, iid_emb = Diff.p_sample_loop_naive(diff_model, cond_emb, iid_emb, device, start_mode="x0_forward", x0_ref=tgt_emb)
             # final_output_raw, iid_emb = Diff.p_sample_loop_naive(diff_model, cond_emb, iid_emb, device, start_mode="cond")
             # final_output_raw, iid_emb = Diff.p_sample_loop_naive(diff_model, cond_emb, iid_emb, device, start_mode="noise")
-            final_output_raw, iid_emb = Diff.p_sample_loop_x0(diff_model, cond_emb, iid_emb, device, start_mode="cond")
+            # final_output_raw, iid_emb = Diff.p_sample_loop_x0(diff_model, cond_emb, iid_emb, device, start_mode="cond")
+            final_output_raw, iid_emb = Diff.p_sample_loop_x0_solver(
+                model=diff_model, cond_emb=cond_emb, iid_emb=iid_emb, device=device, start_mode="cond", sample_steps=20, eta=0.0
+            )
 
             final_output_proj = diff_model.al_linear(final_output_raw)
 

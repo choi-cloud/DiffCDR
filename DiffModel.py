@@ -39,16 +39,6 @@ import torch
 import torch.nn.functional as F
 
 
-def extract(a, t, x_shape):
-    """
-    a: [T]
-    t: [B]
-    return: [B, 1, ..., 1]
-    """
-    out = a.gather(0, t)
-    return out.view(t.shape[0], *([1] * (len(x_shape) - 1)))
-
-
 class DiffCDR(nn.Module):
     def __init__(self, num_steps=200, diff_dim=32, input_dim=32, c_scale=0.1, diff_sample_steps=30, diff_task_lambda=0.1, diff_mask_rate=0.1):
         super(DiffCDR, self).__init__()
@@ -192,7 +182,12 @@ def diffusion_loss_fn(model, x_0, cond_emb, iid_emb, y_input, device, is_task):
         return F.smooth_l1_loss(x_0, x0_pred)
 
     elif is_task:
-        final_output_raw, iid_emb = p_sample_loop_x0(model, cond_emb, iid_emb, device, start_mode="cond")
+        # final_output_raw, iid_emb = p_sample_loop_x0(model, cond_emb, iid_emb, device, start_mode="cond")
+        final_output_raw, iid_emb = p_sample_loop_x0_solver(
+            model=model, cond_emb=cond_emb, iid_emb=iid_emb, device=device, start_mode="cond", sample_steps=20, eta=0.0
+        )
+
+        log_batch_similarity_stats(iid_emb, global_step=model.global_step, log_every=200, prefix="iid_emb")
 
         log_batch_similarity_stats(final_output_raw, global_step=model.global_step, log_every=200, prefix="final_output_raw")
 
@@ -533,5 +528,154 @@ def p_sample_loop_x0(model, cond_emb, iid_emb, device, start_mode="noise"):
         t = torch.full((batch_size,), time_step, device=device, dtype=torch.long)
         x_t, x0_pred = p_sample_x0(model, x_t, t, cond_emb, device, cond_mask)
         final_x0_pred = x0_pred
+
+    return final_x0_pred, iid_emb
+
+
+import torch
+
+
+def extract(a, t, x_shape):
+    """
+    a: [T]
+    t: [B]
+    return: [B, 1, ..., 1] broadcastable to x_shape
+    """
+    out = a.gather(0, t)
+    return out.view(t.shape[0], *([1] * (len(x_shape) - 1)))
+
+
+def predict_eps_from_x0(model, x_t, t, cond_emb, device, cond_mask=None):
+    """
+    model predicts x0, then convert to eps
+
+    x_t = sqrt(alpha_bar_t) * x0 + sqrt(1 - alpha_bar_t) * eps
+    => eps = (x_t - sqrt(alpha_bar_t) * x0) / sqrt(1 - alpha_bar_t)
+    """
+    if cond_mask is None:
+        cond_mask = torch.ones(x_t.shape[0], device=device, dtype=torch.int)
+
+    alpha_bar_t = extract(model.alphas_prod.to(device), t, x_t.shape)
+
+    x0_pred = model(x_t, t, cond_emb, cond_mask)
+    eps_pred = (x_t - torch.sqrt(alpha_bar_t) * x0_pred) / (torch.sqrt(1.0 - alpha_bar_t) + 1e-8)
+
+    return x0_pred, eps_pred
+
+
+@torch.no_grad()
+def ddim_step_from_x0(
+    model,
+    x_t,
+    t,
+    t_prev,
+    cond_emb,
+    device,
+    cond_mask=None,
+    eta=0.0,
+):
+    """
+    x0-prediction model + DDIM step
+
+    eta = 0.0 이면 deterministic ODE-like sampling
+    eta > 0.0 이면 stochastic DDIM
+    """
+    if cond_mask is None:
+        cond_mask = torch.ones(x_t.shape[0], device=device, dtype=torch.int)
+
+    x0_pred, eps_pred = predict_eps_from_x0(model, x_t, t, cond_emb, device, cond_mask)
+
+    alpha_bar_t = extract(model.alphas_prod.to(device), t, x_t.shape)
+    alpha_bar_prev = extract(model.alphas_prod.to(device), t_prev, x_t.shape)
+
+    # DDIM sigma
+    sigma = eta * torch.sqrt((1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t)) * torch.sqrt(1.0 - alpha_bar_t / alpha_bar_prev)
+
+    noise = torch.randn_like(x_t)
+
+    # direction term
+    dir_xt = torch.sqrt(torch.clamp(1.0 - alpha_bar_prev - sigma**2, min=0.0)) * eps_pred
+
+    x_prev = torch.sqrt(alpha_bar_prev) * x0_pred + dir_xt + sigma * noise
+
+    return x_prev, x0_pred
+
+
+def make_ddim_timesteps(num_steps, sample_steps, device):
+    """
+    ex) num_steps=200, sample_steps=20
+    -> [199, 188, 178, ..., 0]
+    """
+    if sample_steps > num_steps:
+        raise ValueError("sample_steps must be <= num_steps")
+
+    step_indices = torch.linspace(0, num_steps - 1, sample_steps, device=device).long()
+    step_indices = torch.unique(step_indices)
+    step_indices = torch.flip(step_indices, dims=[0])
+
+    if step_indices[-1].item() != 0:
+        step_indices = torch.cat([step_indices, torch.zeros(1, device=device, dtype=torch.long)], dim=0)
+
+    return step_indices
+
+
+@torch.no_grad()
+def p_sample_loop_x0_solver(
+    model,
+    cond_emb,
+    iid_emb,
+    device,
+    start_mode="noise",
+    sample_steps=20,
+    eta=0.0,
+):
+    """
+    solver-style sampling for x0-prediction model
+
+    start_mode:
+        - "noise": pure Gaussian에서 시작
+        - "cond" : cond_emb에서 시작
+
+    sample_steps:
+        전체 diffusion step(num_steps)보다 적게 두면 빠른 샘플링 가능
+
+    eta:
+        0.0 -> deterministic DDIM / ODE-like
+        >0  -> stochastic DDIM
+    """
+    batch_size = cond_emb.shape[0]
+
+    if start_mode == "noise":
+        x_t = torch.randn_like(cond_emb).to(device)
+    elif start_mode == "cond":
+        x_t = cond_emb.clone().to(device)
+    else:
+        raise ValueError(f"Unknown start_mode: {start_mode}")
+
+    cond_mask = torch.ones(batch_size, device=device, dtype=torch.int)
+
+    timesteps = make_ddim_timesteps(model.num_steps, sample_steps, device)
+
+    final_x0_pred = None
+
+    for i in range(len(timesteps) - 1):
+        t = torch.full((batch_size,), timesteps[i].item(), device=device, dtype=torch.long)
+        t_prev = torch.full((batch_size,), timesteps[i + 1].item(), device=device, dtype=torch.long)
+
+        x_t, x0_pred = ddim_step_from_x0(
+            model=model,
+            x_t=x_t,
+            t=t,
+            t_prev=t_prev,
+            cond_emb=cond_emb,
+            device=device,
+            cond_mask=cond_mask,
+            eta=eta,
+        )
+        final_x0_pred = x0_pred
+
+    # 마지막 t=0에서 한 번 더 x0 prediction 정리
+    t0 = torch.zeros(batch_size, device=device, dtype=torch.long)
+    final_x0_pred = model(x_t, t0, cond_emb, cond_mask)
 
     return final_x0_pred, iid_emb
