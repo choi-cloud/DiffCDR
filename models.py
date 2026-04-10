@@ -168,6 +168,8 @@ class MFBasedModel(torch.nn.Module):
             # mu = cond_emb.mean(dim=0, keepdim=True)  # [1, D]
             # std = cond_emb.std(dim=0, keepdim=True)  # [1, D]
             # cond_emb = torch.randn_like(cond_emb) * std + mu
+            # perm = torch.randperm(cond_emb.size(0))
+            # cond_emb = cond_emb[perm]
 
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
             iid_emb = self.tgt_model.item_mlp(iid_emb)
