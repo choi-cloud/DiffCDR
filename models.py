@@ -8,18 +8,44 @@ import lacdr_model as LACDR
 from rqvae import ResidualQuantizer
 from utils import AttentionLayer
 
+from utils import log_batch_similarity_stats
 
-class LookupEmbedding(torch.nn.Module):
+class LookupEmbedding(nn.Module):
 
-    def __init__(self, uid_all, iid_all, emb_dim):
+    def __init__(self, uid_all, iid_all, emb_dim, hidden_dim=64, out_dim=10, uni_lambda=0.1):
         super().__init__()
-        self.uid_embedding = torch.nn.Embedding(uid_all, emb_dim)
-        self.iid_embedding = torch.nn.Embedding(iid_all + 1, emb_dim)
+        self.uid_embedding = nn.Embedding(uid_all, emb_dim)
+        self.iid_embedding = nn.Embedding(iid_all + 1, emb_dim)
 
-    def forward(self, x):
-        uid_emb = self.uid_embedding(x[:, 0].unsqueeze(1))
-        iid_emb = self.iid_embedding(x[:, 1].unsqueeze(1))
-        emb = torch.cat([uid_emb, iid_emb], dim=1)
+        # user mlp
+        self.user_mlp = nn.Sequential(nn.Linear(emb_dim, hidden_dim), nn.ReLU(inplace=True), nn.Linear(hidden_dim, out_dim))
+
+        # item mlp
+        self.item_mlp = nn.Sequential(nn.Linear(emb_dim, hidden_dim), nn.ReLU(inplace=True), nn.Linear(hidden_dim, out_dim))
+
+        self.uni_lambda = uni_lambda
+
+    def uniformity_loss(self, z, t=2.0):
+        z = F.normalize(z, dim=1)
+        sq_pdist = torch.pdist(z, p=2).pow(2)
+        return torch.log(torch.exp(-t * sq_pdist).mean() + 1e-8)
+
+    def forward(self, x, return_loss=False):
+        uid_emb = self.uid_embedding(x[:, 0])  # [B, D]
+        iid_emb = self.iid_embedding(x[:, 1])  # [B, D]
+
+        user_vec = self.user_mlp(uid_emb)  # [B, d]
+        item_vec = self.item_mlp(iid_emb)  # [B, d]
+
+        emb = torch.stack([user_vec, item_vec], dim=1)  # [B, 2, d]
+
+        if return_loss:
+            user_uni = self.uniformity_loss(user_vec)
+            item_uni = self.uniformity_loss(item_vec)
+
+            uni_loss = self.uni_lambda * (user_uni + item_uni)
+            return emb, uni_loss
+
         return emb
 
 
@@ -58,11 +84,28 @@ class MFBasedModel(torch.nn.Module):
 
     def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False, item_cond=False, style_src=None):
         if stage == "train_src":
-            emb = self.src_model.forward(x)
-            x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
-            return x
+            emb, uni_loss = self.src_model.forward(x, return_loss=True)  # [B, 2, d]
 
-        elif stage in ["train_tgt", "test_tgt"]:
+            user_emb = emb[:, 0, :]  # [B, d]
+            item_emb = emb[:, 1, :]  # [B, d]
+
+            # log_batch_similarity_stats(user_emb, global_step=self.global_step, log_every=600, prefix="train_src")
+
+            x = torch.sum(user_emb * item_emb, dim=1)
+            return x, uni_loss
+
+        elif stage == "train_tgt":
+            emb, uni_loss = self.tgt_model.forward(x, return_loss=True)
+
+            user_emb = emb[:, 0, :]  # [B, d]
+            item_emb = emb[:, 1, :]  # [B, d]
+
+            # log_batch_similarity_stats(user_emb, global_step=self.global_step, log_every=600, prefix="train_tgt")
+
+            x = torch.sum(user_emb * item_emb, dim=1)
+            return x, uni_loss
+
+        elif stage == "test_tgt":
             emb = self.tgt_model.forward(x)
             x = torch.sum(emb[:, 0, :] * emb[:, 1, :], dim=1)
             return x
@@ -159,7 +202,10 @@ class MFBasedModel(torch.nn.Module):
 
             tgt_uid, iid_input, y_input = x
             tgt_emb1 = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
+            tgt_emb1 = self.tgt_model.user_mlp(tgt_emb1)
+
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
+            src_uid_emb1 = self.src_model.user_mlp(src_uid_emb1)
 
             tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)  # Aggr
             src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
@@ -168,6 +214,7 @@ class MFBasedModel(torch.nn.Module):
             cond_emb2 = src_uid_emb2
 
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
+            iid_emb = self.tgt_model.item_mlp(iid_emb)
 
             # ! mf 임베딩과 aggr 임베딩 양자화
             if diff_model.rqvae["RQVAE"] == True:
@@ -206,11 +253,14 @@ class MFBasedModel(torch.nn.Module):
             tgt_uid, iid_input, _ = x
 
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
+            src_uid_emb1 = self.src_model.user_mlp(src_uid_emb1)
+            
             src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
 
             cond_emb1 = src_uid_emb1
             cond_emb2 = src_uid_emb2
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
+            iid_emb = self.tgt_model.item_mlp(iid_emb)
 
             if diff_model.rqvae["RQVAE"] == True:
                 quantized1, all_level_vectors1, _ = diff_model.rq_mf(cond_emb1)  # [L, B, D]

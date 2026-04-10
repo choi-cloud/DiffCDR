@@ -116,6 +116,8 @@ class Run:
             "aggregation": config["aggregation"],
             "bias_mapping": config["bias_mapping"],
             "mapping_lambda": config["mapping_lambda"],
+            "uniformity_loss": config["uniformity_loss"],
+            "zero_cond": config["zero_cond"],
         }
 
         self.rqvae_setting = {
@@ -438,11 +440,18 @@ class Run:
         # simple 2-hop aggregation (user -> items -> users) excluding 1-hop self contribution
         uv_adj = graph_data["uv_adj"].to(self.device)
         vu_adj = graph_data["vu_adj"].to(self.device)
+        
         if use_target:
-            user_feat = base_model.tgt_model.uid_embedding.weight.detach().to(self.device)
+            model = base_model.tgt_model
         else:
-            user_feat = base_model.src_model.uid_embedding.weight.detach().to(self.device)
+            model = base_model.src_model
+        
         with torch.no_grad():
+            # 룩업 후 MLP 통과 (모든 유저)
+            all_uid = torch.arange(model.uid_embedding.num_embeddings, device=self.device)
+            raw_user_feat = model.uid_embedding(all_uid)        # [num_users, D]
+            user_feat = model.user_mlp(raw_user_feat)           # [num_users, d]  ← 추가
+
             # 1-hop: items aggregate from users
             item_msg = torch.sparse.mm(vu_adj, user_feat)  # [num_items, d]
 
@@ -580,6 +589,16 @@ class Run:
         print("Training Epoch {}:".format(epoch + 1))
 
         loss_ls = []
+        # MAE / RMSE 계산용 변수
+        sum_abs_err = 0.0
+        sum_sq_err = 0.0
+        total_count = 0
+
+        mse_loss_sum = 0.0
+        uni_loss_sum = 0.0
+        total_loss_sum = 0.0
+        num_batches = 0
+
         if diff == False and ss == False and la == False:
             for X, y in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                 if mapping:
@@ -595,14 +614,49 @@ class Run:
                 else:
                     model.train()
 
-                    pred = model(X, stage, self.device)
-                    loss = criterion(pred, y.squeeze().float())
+                    pred, uni_loss = model(X, stage, self.device)
+                    mse_loss = criterion(pred, y.squeeze().float())
+                    total_loss = mse_loss + uni_loss
 
                     model.zero_grad()
-                    loss.backward()
+                    total_loss.backward()
                     optimizer.step()
 
-                loss_ls.append(loss.item())
+                    # -----------------------------
+                    # accumulate
+                    # -----------------------------
+                    mse_loss_sum += mse_loss.item()
+                    uni_loss_sum += uni_loss.item()
+                    total_loss_sum += total_loss.item()
+                    num_batches += 1
+
+                loss_ls.append(total_loss.item())
+
+                                # ====== MAE / RMSE 계산 ======
+                with torch.no_grad():
+                    y_true = y.squeeze()
+                    abs_err = torch.abs(pred - y_true)
+                    sq_err = (pred - y_true) ** 2
+
+                    sum_abs_err += abs_err.sum().item()
+                    sum_sq_err += sq_err.sum().item()
+                    total_count += y_true.numel()
+            
+            # ====== epoch metric 계산 ======
+            mae = sum_abs_err / total_count
+            rmse = (sum_sq_err / total_count) ** 0.5
+
+            # =====================================
+            # epoch logging
+            # =====================================
+            mse_avg = mse_loss_sum / num_batches
+            uni_avg = uni_loss_sum / num_batches
+            total_avg = total_loss_sum / num_batches
+
+            print(f"[Epoch {epoch+1}] total: {total_avg:.4f} | mse: {mse_avg:.4f} | uni: {uni_avg:.4f}")
+
+            print(f"[Epoch {epoch+1}] | MAE: {mae:.6f} | RMSE: {rmse:.6f}")
+
             return torch.tensor(loss_ls).mean()
 
         elif diff == False and ss == True and la == False:

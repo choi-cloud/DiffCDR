@@ -93,24 +93,31 @@ def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous:
     t_norm = 1.0 - t_continuous / T
     t_norm = torch.clamp(t_norm, 0.0, 1.0)  # [B]
 
-    t_norm_exp = t_norm.view(B, 1, 1)  # [B, 1, 1]
+    # ---------------------------
+    # 1) 구간 길이(weights) 설정
+    # --------------------------
+    widths = torch.ones(L, device=device, dtype=torch.float32)
+    widths = widths / widths.sum()   # 합이 1이 되도록 정규화
 
-    # 레벨 인덱스 0~L-1 → 0~1 정규화 (0=추상, 1=구체)
-    level_ids = torch.arange(L, device=device).float().view(1, L, 1)  # [1, L, 1]
-    level_norm = level_ids / max(L - 1, 1)  # [1, L, 1]
+    # boundary: 각 구간의 끝점
+    # 예: widths=[0.25,0.25,0.25,0.25] -> boundaries=[0.25,0.5,0.75]
+    boundaries = torch.cumsum(widths, dim=0)[:-1]   # [L-1]
 
-    # t_norm이 작을 때는 level_norm 상위 레벨만, 클수록 더 많은 레벨
-    # mask: [B, L, 1]
-    mask = (t_norm_exp >= level_norm).float()
-    # [L, B, 1]
-    mask = mask.permute(1, 0, 2)
+    # ---------------------------
+    # 2) 현재 시점에서 활성화할 레벨 수 결정
+    # ---------------------------
+    # boundary를 몇 개 넘었는지 + 1 = active level 수
+    # 결과 범위: 1 ~ L
+    num_active = 1 + (t_norm.unsqueeze(1) >= boundaries.unsqueeze(0)).sum(dim=1)  # [B]
 
-    # 마스킹 후 합
-    weighted = all_level_vectors * mask  # [L, B, D]
-    cond_emb = weighted.sum(dim=0)  # [B, D]
-
-    denom = mask.sum(dim=0)  # [B, 1]
-    cond_emb = cond_emb / torch.clamp(denom, min=1.0)
+    # ---------------------------
+    # 3) 앞에서부터 num_active개 레벨 평균
+    # ---------------------------
+    level_ids = torch.arange(L, device=device).view(L, 1)         # [L, 1]
+    mask = (level_ids < num_active.view(1, B)).float().unsqueeze(-1)  # [L, B, 1]
+    weighted = all_level_vectors * mask        # [L, B, D]
+    cond_emb = weighted.sum(dim=0)             # [B, D]
+    cond_emb = cond_emb / num_active.view(B, 1).float()
 
     return cond_emb
 
