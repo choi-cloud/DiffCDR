@@ -75,7 +75,7 @@ class DiffCDR(nn.Module):
         self.uni_lambda = 0.1
         # -----------------------------------------------
 
-        self.linears = nn.ModuleList([nn.Linear(input_dim, diff_dim), nn.Linear(diff_dim, diff_dim), nn.Linear(diff_dim, input_dim)])
+        self.linears = nn.ModuleList([nn.Linear(input_dim * 3, diff_dim), nn.Linear(diff_dim, diff_dim), nn.Linear(diff_dim, input_dim)])
 
         self.step_emb_linear = nn.ModuleList([nn.Linear(diff_dim, input_dim)])
 
@@ -86,18 +86,28 @@ class DiffCDR(nn.Module):
         # linear for alm
         self.al_linear = nn.Linear(input_dim, input_dim, False)
 
-    def forward(self, x, t, cond_emb, cond_mask):
+    def forward(self, x, t, cond_emb, cond_mask, zero_time=False, zero_cond=False):
 
         for idx in range(self.num_layers):
 
             t_embedding = get_timestep_embedding(t, self.diff_dim)
             t_embedding = self.step_emb_linear[idx](t_embedding)
 
+            if zero_time:
+                t_embedding = torch.zeros_like(t_embedding)
+
             cond_embedding = self.cond_emb_linear[idx](cond_emb)
 
-            t_c_emb = t_embedding + cond_embedding * cond_mask.unsqueeze(-1)
-            x = x + t_c_emb
-            # x= torch.cat([t_embedding,cond_embedding * cond_mask.unsqueeze(-1),x],axis=1)
+            if zero_cond:
+                cond_embedding = torch.zeros_like(cond_embedding)
+
+            # t_c_emb = t_embedding + cond_embedding * cond_mask.unsqueeze(-1)
+            # x = x + t_c_emb
+
+            # -------------------------
+            # concat
+            # -------------------------
+            x = torch.cat([x, t_embedding, cond_embedding], dim=1)
 
             x = self.linears[0](x)
             x = self.linears[1](x)
@@ -112,16 +122,6 @@ class DiffCDR(nn.Module):
 # ---------------------------------------------------------
 # loss
 import torch.nn.functional as F
-
-
-# def q_x_fn(model, x_0, t, device):
-#     # eq(4)
-#     noise = torch.normal(0, 1, size=x_0.size(), device=device)
-
-#     alphas_t = model.alphas_bar_sqrt.to(device)[t]
-#     alphas_1_m_t = model.one_minus_alphas_bar_sqrt.to(device)[t]
-
-#     return (alphas_t * x_0 + alphas_1_m_t * noise), noise
 
 
 def q_x_fn(model, x_0, t, device):
@@ -184,144 +184,145 @@ def diffusion_loss_fn(model, x_0, cond_emb, iid_emb, y_input, device, is_task):
     elif is_task:
         # final_output_raw, iid_emb = p_sample_loop_x0(model, cond_emb, iid_emb, device, start_mode="cond")
         final_output_raw, iid_emb = p_sample_loop_x0_solver(
-            model=model, cond_emb=cond_emb, iid_emb=iid_emb, device=device, start_mode="cond", sample_steps=20, eta=0.0
+            model=model, cond_emb=cond_emb, iid_emb=iid_emb, device=device, start_mode="noise", sample_steps=20, eta=0.0
         )
 
         log_batch_similarity_stats(iid_emb, global_step=model.global_step, log_every=200, prefix="iid_emb")
 
         log_batch_similarity_stats(final_output_raw, global_step=model.global_step, log_every=200, prefix="final_output_raw")
 
-        final_output_proj = model.al_linear(final_output_raw)
+        # final_output_proj = model.al_linear(final_output_raw)
 
-        log_batch_similarity_stats(final_output_proj, global_step=model.global_step, log_every=200, prefix="final_output_proj")
+        # log_batch_similarity_stats(final_output_proj, global_step=model.global_step, log_every=200, prefix="final_output_proj")
 
         # -------------------------------------------------
         # debug log
         # -------------------------------------------------
-        if model.global_step % 200 == 0:
-            with torch.no_grad():
-                target = y_input.squeeze().float()
+        # if model.global_step % 200 == 0:
+        #     with torch.no_grad():
+        #         target = y_input.squeeze().float()
 
-                # -------------------------
-                # norm stats
-                # -------------------------
-                x0_norm = x_0.norm(dim=1)
-                raw_norm = final_output_raw.norm(dim=1)
-                proj_norm = final_output_proj.norm(dim=1)
-                iid_norm = iid_emb.norm(dim=1)
+        #         # -------------------------
+        #         # norm stats
+        #         # -------------------------
+        #         x0_norm = x_0.norm(dim=1)
+        #         raw_norm = final_output_raw.norm(dim=1)
+        #         proj_norm = final_output_proj.norm(dim=1)
+        #         iid_norm = iid_emb.norm(dim=1)
 
-                print(f"\n[step {model.global_step}] ================= DEBUG =================")
-                print(
-                    f"x_0 norm           | mean={x0_norm.mean().item():.4f}, "
-                    f"std={x0_norm.std().item():.4f}, "
-                    f"min={x0_norm.min().item():.4f}, "
-                    f"max={x0_norm.max().item():.4f}"
-                )
-                print(
-                    f"final_output_raw   | mean={raw_norm.mean().item():.4f}, "
-                    f"std={raw_norm.std().item():.4f}, "
-                    f"min={raw_norm.min().item():.4f}, "
-                    f"max={raw_norm.max().item():.4f}"
-                )
-                print(
-                    f"final_output_proj  | mean={proj_norm.mean().item():.4f}, "
-                    f"std={proj_norm.std().item():.4f}, "
-                    f"min={proj_norm.min().item():.4f}, "
-                    f"max={proj_norm.max().item():.4f}"
-                )
-                print(
-                    f"iid_emb norm       | mean={iid_norm.mean().item():.4f}, "
-                    f"std={iid_norm.std().item():.4f}, "
-                    f"min={iid_norm.min().item():.4f}, "
-                    f"max={iid_norm.max().item():.4f}"
-                )
+        #         print(f"\n[step {model.global_step}] ================= DEBUG =================")
+        #         print(
+        #             f"x_0 norm           | mean={x0_norm.mean().item():.4f}, "
+        #             f"std={x0_norm.std().item():.4f}, "
+        #             f"min={x0_norm.min().item():.4f}, "
+        #             f"max={x0_norm.max().item():.4f}"
+        #         )
+        #         print(
+        #             f"final_output_raw   | mean={raw_norm.mean().item():.4f}, "
+        #             f"std={raw_norm.std().item():.4f}, "
+        #             f"min={raw_norm.min().item():.4f}, "
+        #             f"max={raw_norm.max().item():.4f}"
+        #         )
+        #         print(
+        #             f"final_output_proj  | mean={proj_norm.mean().item():.4f}, "
+        #             f"std={proj_norm.std().item():.4f}, "
+        #             f"min={proj_norm.min().item():.4f}, "
+        #             f"max={proj_norm.max().item():.4f}"
+        #         )
+        #         print(
+        #             f"iid_emb norm       | mean={iid_norm.mean().item():.4f}, "
+        #             f"std={iid_norm.std().item():.4f}, "
+        #             f"min={iid_norm.min().item():.4f}, "
+        #             f"max={iid_norm.max().item():.4f}"
+        #         )
 
-                # -------------------------
-                # cosine similarity
-                # -------------------------
-                cos_x0_raw = F.cosine_similarity(x_0, final_output_raw, dim=1)
-                cos_x0_proj = F.cosine_similarity(x_0, final_output_proj, dim=1)
+        #         # -------------------------
+        #         # cosine similarity
+        #         # -------------------------
+        #         cos_x0_raw = F.cosine_similarity(x_0, final_output_raw, dim=1)
+        #         cos_x0_proj = F.cosine_similarity(x_0, final_output_proj, dim=1)
 
-                print(
-                    f"x0 vs raw cosine   | mean={cos_x0_raw.mean().item():.4f}, "
-                    f"std={cos_x0_raw.std().item():.4f}, "
-                    f"min={cos_x0_raw.min().item():.4f}, "
-                    f"max={cos_x0_raw.max().item():.4f}"
-                )
-                print(
-                    f"x0 vs proj cosine  | mean={cos_x0_proj.mean().item():.4f}, "
-                    f"std={cos_x0_proj.std().item():.4f}, "
-                    f"min={cos_x0_proj.min().item():.4f}, "
-                    f"max={cos_x0_proj.max().item():.4f}"
-                )
+        #         print(
+        #             f"x0 vs raw cosine   | mean={cos_x0_raw.mean().item():.4f}, "
+        #             f"std={cos_x0_raw.std().item():.4f}, "
+        #             f"min={cos_x0_raw.min().item():.4f}, "
+        #             f"max={cos_x0_raw.max().item():.4f}"
+        #         )
+        #         print(
+        #             f"x0 vs proj cosine  | mean={cos_x0_proj.mean().item():.4f}, "
+        #             f"std={cos_x0_proj.std().item():.4f}, "
+        #             f"min={cos_x0_proj.min().item():.4f}, "
+        #             f"max={cos_x0_proj.max().item():.4f}"
+        #         )
 
-                # -------------------------
-                # prediction stats
-                # -------------------------
-                y_pred_x0 = torch.sum(x_0 * iid_emb, dim=1)
-                y_pred_raw = torch.sum(final_output_raw * iid_emb, dim=1)
-                y_pred_proj = torch.sum(final_output_proj * iid_emb, dim=1)
+        #         # -------------------------
+        #         # prediction stats
+        #         # -------------------------
+        #         y_pred_x0 = torch.sum(x_0 * iid_emb, dim=1)
+        #         y_pred_raw = torch.sum(final_output_raw * iid_emb, dim=1)
+        #         y_pred_proj = torch.sum(final_output_proj * iid_emb, dim=1)
 
-                print(
-                    f"target             | mean={target.mean().item():.4f}, "
-                    f"std={target.std().item():.4f}, "
-                    f"min={target.min().item():.4f}, "
-                    f"max={target.max().item():.4f}"
-                )
+        #         print(
+        #             f"target             | mean={target.mean().item():.4f}, "
+        #             f"std={target.std().item():.4f}, "
+        #             f"min={target.min().item():.4f}, "
+        #             f"max={target.max().item():.4f}"
+        #         )
 
-                print(
-                    f"pred(x0, iid)      | mean={y_pred_x0.mean().item():.4f}, "
-                    f"std={y_pred_x0.std().item():.4f}, "
-                    f"min={y_pred_x0.min().item():.4f}, "
-                    f"max={y_pred_x0.max().item():.4f}"
-                )
-                print(
-                    f"pred(raw, iid)     | mean={y_pred_raw.mean().item():.4f}, "
-                    f"std={y_pred_raw.std().item():.4f}, "
-                    f"min={y_pred_raw.min().item():.4f}, "
-                    f"max={y_pred_raw.max().item():.4f}"
-                )
-                print(
-                    f"pred(proj, iid)    | mean={y_pred_proj.mean().item():.4f}, "
-                    f"std={y_pred_proj.std().item():.4f}, "
-                    f"min={y_pred_proj.min().item():.4f}, "
-                    f"max={y_pred_proj.max().item():.4f}"
-                )
+        #         print(
+        #             f"pred(x0, iid)      | mean={y_pred_x0.mean().item():.4f}, "
+        #             f"std={y_pred_x0.std().item():.4f}, "
+        #             f"min={y_pred_x0.min().item():.4f}, "
+        #             f"max={y_pred_x0.max().item():.4f}"
+        #         )
+        #         print(
+        #             f"pred(raw, iid)     | mean={y_pred_raw.mean().item():.4f}, "
+        #             f"std={y_pred_raw.std().item():.4f}, "
+        #             f"min={y_pred_raw.min().item():.4f}, "
+        #             f"max={y_pred_raw.max().item():.4f}"
+        #         )
+        #         print(
+        #             f"pred(proj, iid)    | mean={y_pred_proj.mean().item():.4f}, "
+        #             f"std={y_pred_proj.std().item():.4f}, "
+        #             f"min={y_pred_proj.min().item():.4f}, "
+        #             f"max={y_pred_proj.max().item():.4f}"
+        #         )
 
-                # -------------------------
-                # loss stats
-                # -------------------------
-                recon_raw = F.smooth_l1_loss(x_0, final_output_raw)
-                recon_proj = F.smooth_l1_loss(x_0, final_output_proj)
+        #         # -------------------------
+        #         # loss stats
+        #         # -------------------------
+        #         recon_raw = F.smooth_l1_loss(x_0, final_output_raw)
+        #         recon_proj = F.smooth_l1_loss(x_0, final_output_proj)
 
-                task_loss_x0 = (y_pred_x0 - target).square().mean()
-                task_loss_raw = (y_pred_raw - target).square().mean()
-                task_loss_proj = (y_pred_proj - target).square().mean()
+        #         task_loss_x0 = (y_pred_x0 - target).square().mean()
+        #         task_loss_raw = (y_pred_raw - target).square().mean()
+        #         task_loss_proj = (y_pred_proj - target).square().mean()
 
-                mae_x0 = torch.abs(y_pred_x0 - target).mean()
-                mae_raw = torch.abs(y_pred_raw - target).mean()
-                mae_proj = torch.abs(y_pred_proj - target).mean()
+        #         mae_x0 = torch.abs(y_pred_x0 - target).mean()
+        #         mae_raw = torch.abs(y_pred_raw - target).mean()
+        #         mae_proj = torch.abs(y_pred_proj - target).mean()
 
-                print(f"recon raw loss     | {recon_raw.item():.6f}")
-                print(f"recon proj loss    | {recon_proj.item():.6f}")
-                print(f"task mse x0        | {task_loss_x0.item():.6f}")
-                print(f"task mse raw       | {task_loss_raw.item():.6f}")
-                print(f"task mse proj      | {task_loss_proj.item():.6f}")
-                print(f"task mae x0        | {mae_x0.item():.6f}")
-                print(f"task mae raw       | {mae_raw.item():.6f}")
-                print(f"task mae proj      | {mae_proj.item():.6f}")
-                print("===================================================\n")
+        #         print(f"recon raw loss     | {recon_raw.item():.6f}")
+        #         print(f"recon proj loss    | {recon_proj.item():.6f}")
+        #         print(f"task mse x0        | {task_loss_x0.item():.6f}")
+        #         print(f"task mse raw       | {task_loss_raw.item():.6f}")
+        #         print(f"task mse proj      | {task_loss_proj.item():.6f}")
+        #         print(f"task mae x0        | {mae_x0.item():.6f}")
+        #         print(f"task mae raw       | {mae_raw.item():.6f}")
+        #         print(f"task mae proj      | {mae_proj.item():.6f}")
+        #         print("===================================================\n")
 
         model.global_step += 1
 
-        uni_loss_proj = uniformity_loss(final_output_proj)
+        # uni_loss_proj = uniformity_loss(final_output_proj)
+        uni_loss_proj = uniformity_loss(final_output_raw)
 
-        y_pred = torch.sum(final_output_proj * iid_emb, dim=1)
+        y_pred = torch.sum(final_output_raw * iid_emb, dim=1)
 
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
 
-        return F.smooth_l1_loss(x_0, final_output_proj), model.task_lambda * task_loss, model.uni_lambda * uni_loss_proj
+        return F.smooth_l1_loss(x_0, final_output_raw), model.task_lambda * task_loss, model.uni_lambda * uni_loss_proj
 
 
 # generation fun
@@ -557,7 +558,10 @@ def predict_eps_from_x0(model, x_t, t, cond_emb, device, cond_mask=None):
 
     alpha_bar_t = extract(model.alphas_prod.to(device), t, x_t.shape)
 
-    x0_pred = model(x_t, t, cond_emb, cond_mask)
+    # x0_pred = model(x_t, t, cond_emb, cond_mask)
+    x0_pred = model(x_t, t, cond_emb, cond_mask, zero_cond=True)
+    # x0_pred = model(x_t, t, cond_emb, cond_mask, zero_time=True, zero_cond=True)
+
     eps_pred = (x_t - torch.sqrt(alpha_bar_t) * x0_pred) / (torch.sqrt(1.0 - alpha_bar_t) + 1e-8)
 
     return x0_pred, eps_pred
@@ -620,15 +624,7 @@ def make_ddim_timesteps(num_steps, sample_steps, device):
 
 
 @torch.no_grad()
-def p_sample_loop_x0_solver(
-    model,
-    cond_emb,
-    iid_emb,
-    device,
-    start_mode="noise",
-    sample_steps=20,
-    eta=0.0,
-):
+def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise", sample_steps=20, eta=0.0):
     """
     solver-style sampling for x0-prediction model
 
@@ -676,6 +672,7 @@ def p_sample_loop_x0_solver(
 
     # 마지막 t=0에서 한 번 더 x0 prediction 정리
     t0 = torch.zeros(batch_size, device=device, dtype=torch.long)
-    final_x0_pred = model(x_t, t0, cond_emb, cond_mask)
+    # final_x0_pred = model(x_t, t0, cond_emb, cond_mask)
+    final_x0_pred = model(x_t, t0, cond_emb, cond_mask, zero_cond=True)
 
     return final_x0_pred, iid_emb

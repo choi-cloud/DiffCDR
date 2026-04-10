@@ -79,7 +79,7 @@ if __name__ == "__main__":
         )
     )
 
-    print(f"\n원래 DiffCDR\n")
+    print(f"\n원래 DiffCDR & start == noise & time == zero & cond == zero\n")
     print(f"save_path: {args.save_path}")
 
     if not args.process_data_mid and not args.process_data_ready:
