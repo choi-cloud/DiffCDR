@@ -72,3 +72,95 @@ class ResidualQuantizer(nn.Module):
         quantized = all_level_vectors.sum(dim=0)  # [B, D]
 
         return quantized, all_level_vectors, rq_loss
+
+
+class SingleVQ(nn.Module):
+    """
+    코드북 1개를 가진 독립 VQ
+    - 입력 z를 직접 quantize
+    - residual 없음
+    """
+    def __init__(self, code_dim: int, codebook_size: int):
+        super().__init__()
+        self.code_dim = code_dim
+        self.codebook_size = codebook_size
+
+        self.codebook = nn.Parameter(torch.randn(codebook_size, code_dim) * 0.1)
+
+    def forward(self, z: torch.Tensor):
+        """
+        z: [B, D]
+        returns:
+            chosen_ste: [B, D]
+            rq_loss: scalar
+            idx: [B]
+        """
+        z_expanded = z.unsqueeze(1)                    # [B, 1, D]
+        codebook_expanded = self.codebook.unsqueeze(0)  # [1, K, D]
+        dist = torch.sum((z_expanded - codebook_expanded) ** 2, dim=-1)  # [B, K]
+
+        idx = torch.argmin(dist, dim=-1)   # [B]
+        chosen = self.codebook[idx]        # [B, D]
+
+        # 각 VQ는 원본 z를 직접 복원하도록 독립 학습
+        rq_loss = F.mse_loss(chosen, z.detach())
+
+        # STE
+        chosen_ste = z + (chosen - z).detach()
+
+        return chosen_ste, rq_loss, idx
+
+
+class MultiLevelVQ(nn.Module):
+    """
+    SingleVQ 10개를 가진 multi-level VQ
+    - 각 레벨은 독립 VQ
+    - 모든 레벨이 같은 원본 z를 입력으로 받음
+    - 반환 형식은 기존 ResidualQuantizer와 동일
+    """
+    def __init__(self, code_dim: int, num_levels: int = 4, codebook_sizes=None):
+        super().__init__()
+
+        if codebook_sizes is None:
+            codebook_sizes = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+
+        self.code_dim = code_dim
+        self.codebook_sizes = codebook_sizes
+        self.total_num_levels = len(codebook_sizes)
+        self.num_levels = num_levels
+
+        assert 1 <= self.num_levels <= self.total_num_levels
+
+        self.vqs = nn.ModuleList([
+            SingleVQ(code_dim=code_dim, codebook_size=k)
+            for k in self.codebook_sizes
+        ])
+
+    def get_pretrain_num_levels(self):
+        return self.total_num_levels
+
+    def forward(self, z: torch.Tensor, num_levels: int = None):
+        """
+        z: [B, D]
+        returns:
+            quantized: [B, D]
+            all_level_vectors: [L, B, D]
+            rq_loss: scalar
+        """
+        if num_levels is None:
+            num_levels = self.num_levels
+
+        assert 1 <= num_levels <= self.total_num_levels
+
+        all_level_vectors = []
+        rq_loss = z.new_tensor(0.0)
+
+        for l in range(num_levels):
+            chosen_ste, loss_l, _ = self.vqs[l](z)   # 모든 레벨이 같은 z 사용
+            all_level_vectors.append(chosen_ste)
+            rq_loss = rq_loss + loss_l
+
+        all_level_vectors = torch.stack(all_level_vectors, dim=0)  # [L, B, D]
+        quantized = all_level_vectors.sum(dim=0)                   # [B, D]
+
+        return quantized, all_level_vectors, rq_loss

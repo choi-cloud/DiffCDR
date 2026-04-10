@@ -56,6 +56,10 @@ def prepare_1():
     parser.add_argument("--cross_cond", type=str2bool, default=False, help="MF vs Aggr 컨디션 교차 여부")
     parser.add_argument("--start_point", default="noise", help="[src_u, quant_u, noise]")
     parser.add_argument("--rqvae_lr", type=float, default=0.001, help="rqvae pretrain lr")
+    parser.add_argument("--rq_exp", type=str, default="None", help="[None, same, reverse]")
+    parser.add_argument("--rq_div", type=str, default="even", help="[even, incre, decre]")
+    parser.add_argument("--rq_accu", type=str, default="sum", help="[sum, separate]")
+    parser.add_argument("--residual", type=str2bool, default=True, help="RQVAE or 코드북 개별적으로 사이즈만 커지게")
 
     # item cond
     parser.add_argument("--diff_task_lambda", type=float, default=1.0, help="Task loss weight")
@@ -64,6 +68,9 @@ def prepare_1():
     parser.add_argument("--emb_dim", type=int, default=10, help="MF emb dim")
     parser.add_argument("--bias_mapping", type=str, default="user", help="[None, user, user_domain] mapper input")
     parser.add_argument("--mapping_lambda", type=float, default=10, help="mapping loss 가중치")
+    parser.add_argument("--uniformity_loss", type=float, default=0.0, help="uniformity loss 가중치")
+
+    parser.add_argument("--cond_rand", type=str2bool, default=False, help="random noise condition으로 주기")
 
     args = parser.parse_args()
 
@@ -100,7 +107,13 @@ def prepare_2(args, config_path):
         config["diff_task_lambda"] = args.diff_task_lambda
         config["diff_scale"] = args.diff_scale
         config["diff_mask_rate"] = args.diff_mask_rate
+        config["rq_exp"] = args.rq_exp
+        config["rq_div"] = args.rq_div
+        config["rq_accu"] = args.rq_accu
+        config["residual"] = args.residual
         config["mapping_lambda"] = args.mapping_lambda
+        config["uniformity_loss"] = args.uniformity_loss
+        config["cond_rand"] = args.cond_rand
 
     return config
 
@@ -150,14 +163,18 @@ if __name__ == "__main__":
     write(f"✅ Ratio {args.ratio}")
     write(f"✅ Model {args.exp_part}")
 
-    write(f"🍎 emb dim     : {args.emb_dim}")
-    write(f"🍎 bias  : {args.set_aggr}")
-    write(f"🍎 aggregation  : {args.aggregation}")
-    write(f"🍎 RQVAE       : {args.RQVAE}")
-    write(f"🍎 start_point : {args.start_point}")
+    write(f"🍎 RQ num, size : {args.codebook_num}, {args.codebook_size}")
+    write(f"🍎 residual     : {args.residual}")
+    write(f"🍎 rq exp       : {args.rq_exp}")
+    write(f"🍎 rq div       : {args.rq_div}")
+    write(f"🍎 rq accu      : {args.rq_accu}")
 
-    write(f"🍏 cross cond   : {args.cross_cond}")
-    write(f"🍏 bias mapping : {args.bias_mapping}")
+    # write(f"Ablation: RQ {args.RQVAE} | bias {args.set_aggr} | aggr {args.aggregation}")
+    # write(f"🍏 codebook_size  : {args.codebook_size}")
+    # write(f"🍏 diff_scale     : {args.diff_scale}")
+    # write(f"🍏 diff_lr        : {args.diff_lr}")
+    # write(f"🍏 task_lambda    : {args.diff_task_lambda}")
+    # write(f"🍏 mapping_lambda : {args.mapping_lambda}")
 
     if not args.process_data_mid and not args.process_data_ready:
         Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth")

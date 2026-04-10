@@ -150,7 +150,7 @@ class MFBasedModel(torch.nn.Module):
             cond_emb = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
 
-            trans_emb, iid_emb_out = Diff.p_sample_loop(diff_model, cond_emb, iid_emb, device)
+            trans_emb, iid_emb_out = Diff.p_sample_loop(diff_model, cond_emb, cond_emb, iid_emb, device, 0)
 
             x = torch.sum(trans_emb * iid_emb_out, dim=1)
             return x
@@ -214,10 +214,18 @@ class MFBasedModel(torch.nn.Module):
 
             if diff_model.rqvae["RQVAE"] == True:
                 quantized1, all_level_vectors1, _ = diff_model.rq_mf(cond_emb1)  # [L, B, D]
-                quantized2, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2)
-
-                cond1, cond2 = all_level_vectors1, all_level_vectors2
-                p_sample = Diff.p_sample_loop_parallel
+                quantized2, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2) 
+                
+                if diff_model.rqvae["rq_exp"] == 'None': 
+                    cond1, cond2 = all_level_vectors1, all_level_vectors2
+                    p_sample = Diff.p_sample_loop_parallel
+                elif diff_model.rqvae["rq_exp"] == 'same':
+                    cond1, cond2 = quantized1, quantized2
+                    p_sample = Diff.p_sample_loop
+                elif diff_model.rqvae["rq_exp"] == 'reverse': 
+                    cond1 = torch.flip(all_level_vectors1, dims=[0])
+                    cond2 = torch.flip(all_level_vectors2, dims=[0])
+                    p_sample = Diff.p_sample_loop_parallel
 
             else:
                 cond1, cond2 = src_uid_emb1, src_uid_emb2
@@ -233,19 +241,19 @@ class MFBasedModel(torch.nn.Module):
             iid_emb = diff_model.ln_iid(iid_emb)
 
             if diff_model.aggregation == "aggregation":
-                final_output_m, iid_emb = p_sample(diff_model, start1, cond1, iid_emb, device, diff_id=0)
-                final_output_g, iid_emb = p_sample(diff_model, start2, cond2, iid_emb, device, diff_id=1)
+                final_output_m, iid_emb = p_sample(diff_model, start1, cond1, iid_emb, device, diff_id=0, rq_div=diff_model.rqvae["rq_div"])
+                final_output_g, iid_emb = p_sample(diff_model, start2, cond2, iid_emb, device, diff_id=1, rq_div=diff_model.rqvae["rq_div"])
                 final_output_m = diff_model.ln_m(diff_model.linear_m(final_output_m))
                 final_output_g = diff_model.ln_g(diff_model.linear_g(final_output_g))
                 base_tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
 
             elif diff_model.aggregation == "aggregation_ab1":
-                final_output_m, iid_emb = p_sample(diff_model, start1, cond1, iid_emb, device, diff_id=0)
+                final_output_m, iid_emb = p_sample(diff_model, start1, cond1, iid_emb, device, diff_id=0, rq_div=diff_model.rqvae["rq_div"])
                 final_output_m = diff_model.ln_m(diff_model.linear_m(final_output_m))
                 base_tokens = torch.stack([iid_emb, final_output_m], dim=1)
 
             elif diff_model.aggregation == "aggregation_ab2":
-                final_output_g, iid_emb = p_sample(diff_model, start2, cond2, iid_emb, device, diff_id=0)
+                final_output_g, iid_emb = p_sample(diff_model, start2, cond2, iid_emb, device, diff_id=0, rq_div=diff_model.rqvae["rq_div"])
                 final_output_g = diff_model.ln_g(diff_model.linear_g(final_output_g))
                 base_tokens = torch.stack([iid_emb, final_output_g], dim=1)
 

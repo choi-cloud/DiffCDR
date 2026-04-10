@@ -7,7 +7,7 @@ import math
 from dpm_solver_pytorch import model_wrapper, model_wrapper_hierarchical_cond, NoiseScheduleVP, DPM_Solver, hierarchical_cond_from_levels
 from utils import AttentionLayer, SimilarityProjector
 
-from rqvae import ResidualQuantizer
+from rqvae import ResidualQuantizer, MultiLevelVQ
 
 noise_schedule = NoiseScheduleVP(schedule="linear")
 
@@ -111,7 +111,7 @@ class DiffCDR(nn.Module):
         # linear for alm
         self.al_linear = nn.Linear(input_dim, input_dim, False)
 
-    def forward(self, x, t, cond_emb, cond_mask):
+    def forward(self, x,t, cond_emb,cond_mask, diff_id=None ):
 
         for idx in range(self.num_layers):
 
@@ -253,8 +253,12 @@ class DiffParallel(nn.Module):
             self.style_scale = nn.Parameter(torch.tensor(0.1))
 
         if self.rqvae["RQVAE"]:
-            self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
-            self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
+            if self.rqvae["residual"] == False: 
+                self.rq_mf = MultiLevelVQ(code_dim=input_dim, num_levels=self.rqvae["codebook_num"])
+                self.rq_aggr = MultiLevelVQ(code_dim=input_dim,num_levels=self.rqvae["codebook_num"])
+            else: 
+                self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
+                self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
 
     def forward(self, x, t, cond_emb, cond_mask, diff_id):
 
@@ -280,7 +284,8 @@ def q_x_fn(model, x_0, t, device):  # forward
     return (alphas_t * x_0 + alphas_1_m_t * noise), noise  # x0에 노이즈를 더함.
 
 
-def diffusion_loss_fn(model, x_0, cond_emb, iid_emb, y_input, device, is_task, style_src=None, uid=None, iid=None):
+def diffusion_loss_fn(model,x_0,cond_emb, iid_emb,y_input,
+                        device,is_task):
 
     num_steps = model.num_steps
     mask_rate = model.mask_rate
@@ -312,39 +317,13 @@ def diffusion_loss_fn(model, x_0, cond_emb, iid_emb, y_input, device, is_task, s
         return F.smooth_l1_loss(e, output)
 
     elif is_task:
-        final_output, iid_emb = p_sample_loop(model, cond_emb, iid_emb, device)
-
-        iid_emb = model.ln_iid(iid_emb)
-        final_output_m = model.ln_m(model.linear_m(final_output))
-
-        uid = uid.long()  # (B,)
-
-        style_src = style_src.to(final_output_m.device)
-        style_u = style_src[uid]  # (B, F)
-        style_tok = model.style_encoder(style_u)  # (B, D)
-        style_tok = model.style_ln(style_tok)  # (B, D)
-        style_tok_u = model.style_scale * style_tok  # (B, D)
-
-        style_tgt_item = model.style_tgt_item.to(final_output_m.device)  # [I_total, F_item]
-        style_i = style_tgt_item[iid.squeeze(1)]  # (B, F_item)
-        item_style_tok = model.item_style_encoder(style_i)  # (B, D)
-        item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
-        item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
-
-        tokens = torch.stack([iid_emb, final_output_m, style_tok_u, item_style_tok], dim=1)
-        out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
-        final_output = out[:, 0, :]  # (B, D)
-
-        y_pred = torch.sum(final_output * iid_emb, dim=1)
-
-        # domain bias
-        mu_t = model.tgt_global_bias
-        y_pred = y_pred + mu_t
-
-        # MSE
-        task_loss = (y_pred - y_input.squeeze().float()).square().mean()
-        # RMSE
-        # task_loss =   (y_pred - y_input.squeeze().float()).square().sum().sqrt() / y_pred.shape[0]
+        final_output,iid_emb=p_sample_loop(model,cond_emb,cond_emb,iid_emb,device, 0)
+        y_pred = torch.sum( final_output * iid_emb , dim=1)
+        
+        #MSE
+        task_loss =   (y_pred - y_input.squeeze().float()).square().mean()
+        #RMSE
+        #task_loss =   (y_pred - y_input.squeeze().float()).square().sum().sqrt() / y_pred.shape[0]
 
         return F.smooth_l1_loss(x_0, final_output) + model.task_lambda * task_loss
 
@@ -394,13 +373,25 @@ def diffusion_loss_fn_parallel(
         cond_mask2 = 1 * (torch.rand(cond_emb2.shape[0], device=device) <= mask_rate)
         cond_mask2 = 1 - cond_mask2.int()
 
-        if model.rqvae["RQVAE"] == True and q_embs1 is not None:
+        # [TRAIN-DIM] 3. Diff1, Diff2 -> noise 예측
+        # [NEW] Apply hierarchical RQ conditioning during training for consistency
+        if model.rqvae["RQVAE"] == True and model.rqvae["rq_exp"] == 'None':
             ns = NoiseScheduleVP(schedule="linear")
             t_cont = t.squeeze(-1).float() / model.num_steps
-            c1 = hierarchical_cond_from_levels(q_embs1, t_cont, ns)
-            c2 = hierarchical_cond_from_levels(q_embs2, t_cont, ns) if q_embs2 is not None else cond_emb2
+            c1 = hierarchical_cond_from_levels(q_embs1, t_cont, ns, rq_div=model.rqvae["rq_div"], rq_accu=model.rqvae["rq_accu"])
+            c2 = hierarchical_cond_from_levels(q_embs2, t_cont, ns, rq_div=model.rqvae["rq_div"], rq_accu=model.rqvae["rq_accu"]) if q_embs2 is not None else cond_emb2
+        elif model.rqvae["RQVAE"] == True and model.rqvae["rq_exp"] == 'same': 
+            # 전체 양자화 결과만 사용 (e1+e2+e3+e4)
+            c1, c2  = Q_emb1, Q_emb2
+        elif model.rqvae["RQVAE"] == True and model.rqvae["rq_exp"] == 'reverse':
+            ns = NoiseScheduleVP(schedule="linear")
+            t_cont = t.squeeze(-1).float() / model.num_steps
+            c1 = hierarchical_cond_from_levels(q_embs1.flip(0), t_cont, ns, rq_div=model.rqvae["rq_div"], rq_accu=model.rqvae["rq_accu"])
+            c2 = hierarchical_cond_from_levels(q_embs2.flip(0), t_cont, ns, rq_div=model.rqvae["rq_div"], rq_accu=model.rqvae["rq_accu"]) if q_embs2 is not None else cond_emb2
         else:
             c1, c2 = cond_emb1, cond_emb2
+
+
 
         if model.aggregation == "aggregation":
             output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)
@@ -428,49 +419,45 @@ def diffusion_loss_fn_parallel(
             cond1, cond2 = cond_emb1, cond_emb2
             p_sample = p_sample_loop
 
-        log_embedding_stats("item_raw", iid_emb, model.global_step)
+        # log_embedding_stats("item_raw", iid_emb, model.global_step)
         iid_emb = model.ln_iid(iid_emb)
-        log_embedding_stats("item_norm", iid_emb, model.global_step)
+        # log_embedding_stats("item_norm", iid_emb, model.global_step)
 
         if model.aggregation == "aggregation":
-            final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0)
-            final_output_g, iid_emb = p_sample(model, start2, cond2, iid_emb, device, diff_id=1)
+            final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0, rq_div=model.rqvae["rq_div"], rq_accu=model.rqvae["rq_accu"])
+            final_output_g, iid_emb = p_sample(model, start2, cond2, iid_emb, device, diff_id=1, rq_div=model.rqvae["rq_div"], rq_accu=model.rqvae["rq_accu"])
             # -------------------------
             # Raw
             # -------------------------
-            log_embedding_stats("user_m_raw", final_output_m, model.global_step)
-            log_embedding_stats("user_g_raw", final_output_g, model.global_step)
+            # log_embedding_stats("user_m_raw", final_output_m, model.global_step)
+            # log_embedding_stats("user_g_raw", final_output_g, model.global_step)
 
             final_output_m_proj = model.linear_m(final_output_m)
             final_output_g_proj = model.linear_g(final_output_g)
             # -------------------------
             # Proj
             # -------------------------
-            log_embedding_stats("user_m_proj", final_output_m_proj, model.global_step)
-            log_embedding_stats("user_g_proj", final_output_g_proj, model.global_step)
+            # log_embedding_stats("user_m_proj", final_output_m_proj, model.global_step)
+            # log_embedding_stats("user_g_proj", final_output_g_proj, model.global_step)
 
             final_output_m = model.ln_m(final_output_m_proj)
             final_output_g = model.ln_g(final_output_g_proj)
             # -------------------------
             # Norm
             # -------------------------
-            log_embedding_stats("user_m_norm", final_output_m, model.global_step)
-            log_embedding_stats("user_g_norm", final_output_g, model.global_step)
+            # log_embedding_stats("user_m_norm", final_output_m, model.global_step)
+            # log_embedding_stats("user_g_norm", final_output_g, model.global_step)
 
             base_tokens = torch.stack([final_output_m, final_output_g], dim=1)
 
-            uni_loss_m = uniformity_loss(final_output_m, t=2.0)
-            uni_loss_g = uniformity_loss(final_output_g, t=2.0)
-            uni_loss = 0.1 * (uni_loss_m + uni_loss_g)
-
         elif model.aggregation == "aggregation_ab1":
-            final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0)
+            final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0, rq_div=model.rqvae["rq_div"], rq_accu=model.rqvae["rq_accu"])
             final_output_m_proj = model.linear_m(final_output_m)
             final_output_m = model.ln_m(final_output_m_proj)
             base_tokens = torch.stack([final_output_m], dim=1)
 
         elif model.aggregation == "aggregation_ab2":
-            final_output_g, iid_emb = p_sample(model, start2, cond2, iid_emb, device, diff_id=0)
+            final_output_g, iid_emb = p_sample(model, start2, cond2, iid_emb, device, diff_id=0, rq_div=model.rqvae["rq_div"], rq_accu=model.rqvae["rq_accu"])
             final_output_g_proj = model.linear_g(final_output_g)
             final_output_g = model.ln_g(final_output_g_proj)
             base_tokens = torch.stack([final_output_g], dim=1)
@@ -539,6 +526,14 @@ def diffusion_loss_fn_parallel(
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
 
+        # uniformity loss
+        if model.parallel["uniformity_loss"] > 0: 
+            uni_loss_m = uniformity_loss(final_output_m, t=2.0)
+            uni_loss_g = uniformity_loss(final_output_g, t=2.0)
+            uni_loss = model.parallel["uniformity_loss"] * (uni_loss_m + uni_loss_g)
+        else: 
+            uni_loss = x_0_m.new_zeros(1).squeeze()
+            
         if model.parallel["bias_mapping"] == "user":
             task_loss += model.parallel["mapping_lambda"] * mapping_loss
 
@@ -586,13 +581,30 @@ def p_sample(model, cond_emb, x, iid_emb, device, diff_id):  # ALM + task loss
     return sample, iid_emb
 
 
-def p_sample_loop(model, start_emb, cond_emb, iid_input, device, diff_id):
+def p_sample_loop(model, start_emb, cond_emb, iid_input, device, diff_id, rq_div="even", rq_accu="sum"):
+    # source emb input
+    # cur_x = cond_emb
+    # noise input
+    # cur_x = torch.normal(0,1,size = cond_emb.size() ,device=device)
+
+    # reversing
     cur_x, iid_emb_out = p_sample(model, cond_emb, start_emb, iid_input, device, diff_id)  # denoised embedding, item emb
 
     return cur_x, iid_emb_out
 
 
-def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):
+def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id, rq_div="even", rq_accu="sum"):# ALM + task loss
+    """
+    Docstring for p_sample_parallel
+
+    :param model: DiffParallel
+    :param cond_emb: condition
+    :param x: Noised emb(x0) <- start emb
+    :param iid_emb: Description
+    :param device: Description
+    :param diff_id: MF(0), Aggr(1)
+    """
+    # wrap for dpm_solver
     classifier_scale_para = model.c_scale
     dmp_sample_steps = model.sample_steps
     num_steps = model.num_steps
@@ -614,6 +626,8 @@ def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):
         time_input_type="1",
         total_N=num_steps,
         model_kwargs=model_kwargs,
+        rq_div=rq_div,
+        rq_accu=rq_accu
     )
 
     dpm_solver = DPM_Solver(model_fn, noise_schedule)
@@ -629,8 +643,8 @@ def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):
     return sample, iid_emb
 
 
-def p_sample_loop_parallel(model, start_emb, cond_emb, iid_input, device, diff_id):
-    cur_x, iid_emb_out = p_sample_parallel(model=model, cond_emb=cond_emb, x=start_emb, iid_emb=iid_input, device=device, diff_id=diff_id)
+def p_sample_loop_parallel(model, start_emb, cond_emb, iid_input, device, diff_id, rq_div="even", rq_accu="sum"):
+    cur_x, iid_emb_out = p_sample_parallel(model=model, cond_emb=cond_emb, x=start_emb, iid_emb=iid_input, device=device, diff_id=diff_id, rq_div=rq_div, rq_accu=rq_accu)
     return cur_x, iid_emb_out
 
 

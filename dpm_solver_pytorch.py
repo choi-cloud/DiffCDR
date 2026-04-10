@@ -12,6 +12,8 @@ def model_wrapper_hierarchical_cond(
     time_input_type="1",
     total_N=1000,
     model_kwargs=None,
+    rq_div="even",
+    rq_accu="sum"
 ):
     """
     model_kwargs:
@@ -49,7 +51,7 @@ def model_wrapper_hierarchical_cond(
 
             # ! 양자화된 컨디션 임베딩을 시간축에 따라 분할
             # ! 초기에는 추상적인 정보, 후기에는 구체적인 정보
-            cond_emb_quantized = hierarchical_cond_from_levels(cond_emb, t_continuous, noise_schedule)  # [B, D]
+            cond_emb_quantized = hierarchical_cond_from_levels(cond_emb, t_continuous, noise_schedule, rq_div, rq_accu)  # [B, D]
 
             if diff_id is not None:
                 noise_uncond = model(x, t_discrete, cond_emb_quantized, cond_mask, diff_id)
@@ -73,7 +75,7 @@ def model_wrapper_hierarchical_cond(
     return model_fn
 
 
-def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous: torch.Tensor, noise_schedule):
+def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous: torch.Tensor, noise_schedule, rq_div="even", rq_accu="sum"):
     """
     all_level_vectors: [L, B, D]  (RQ-VAE 코드북 레벨별 벡터)
     t_continuous: [B]  (DPM-Solver가 넘겨주는 연속 시간)
@@ -93,10 +95,49 @@ def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous:
     t_norm = 1.0 - t_continuous / T
     t_norm = torch.clamp(t_norm, 0.0, 1.0)  # [B]
 
+    # t_norm_exp = t_norm.view(B, 1, 1)  # [B, 1, 1]
+
+    # # 레벨 인덱스 0~L-1 → 0~1 정규화 (0=추상, 1=구체)
+    # level_ids = torch.arange(L, device=device).float().view(1, L, 1)  # [1, L, 1]
+    # level_norm = level_ids / max(L - 1, 1)  # [1, L, 1]
+
+    # # t_norm이 작을 때는 level_norm 상위 레벨만, 클수록 더 많은 레벨
+    # # mask: [B, L, 1]
+    # mask = (t_norm_exp >= level_norm).float()
+    # # [L, B, 1]
+    # mask = mask.permute(1, 0, 2)
+
+    # # 마스킹 후 합
+    # weighted = all_level_vectors * mask  # [L, B, D]
+    # cond_emb = weighted.sum(dim=0)  # [B, D]
+
+    # denom = mask.sum(dim=0)  # [B, 1]
+    # cond_emb = cond_emb / torch.clamp(denom, min=1.0)
+
+    # 각 sample이 현재 몇 개의 레벨을 사용할지 결정
+    # [0,1) 구간을 L등분
+        # 0.00 ~ 0.249... → 1개
+        # 0.25 ~ 0.499... → 2개
+        # 0.50 ~ 0.749... → 3개
+        # 0.75 ~ 1.00 → 4개
+
     # ---------------------------
     # 1) 구간 길이(weights) 설정
     # --------------------------
-    widths = torch.ones(L, device=device, dtype=torch.float32)
+    if rq_div == "even":
+        # 균등 분할
+        widths = torch.ones(L, device=device, dtype=torch.float32)
+
+    elif rq_div == "incre":
+        # 뒤로 갈수록 구간이 커짐
+        # 예: L=4 -> [1,2,3,4] / 10 => 0.1, 0.2, 0.3, 0.4 비율 => [0.1, 0.3, 0.6, 1.0]
+        widths = torch.arange(1, L + 1, device=device, dtype=torch.float32)
+
+    elif rq_div == "decre":
+        # 뒤로 갈수록 구간이 작아짐
+        # 예: L=4 -> [4,3,2,1] / 10
+        widths = torch.arange(L, 0, -1, device=device, dtype=torch.float32)
+    
     widths = widths / widths.sum()   # 합이 1이 되도록 정규화
 
     # boundary: 각 구간의 끝점
@@ -113,11 +154,25 @@ def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous:
     # ---------------------------
     # 3) 앞에서부터 num_active개 레벨 평균
     # ---------------------------
-    level_ids = torch.arange(L, device=device).view(L, 1)         # [L, 1]
-    mask = (level_ids < num_active.view(1, B)).float().unsqueeze(-1)  # [L, B, 1]
-    weighted = all_level_vectors * mask        # [L, B, D]
-    cond_emb = weighted.sum(dim=0)             # [B, D]
-    cond_emb = cond_emb / num_active.view(B, 1).float()
+     # ---------------------------
+    # 3) rq_exp에 따라 conditioning 구성
+    # ---------------------------
+    if rq_accu == "separate":
+        # num_active=1 -> 0번 레벨
+        # num_active=2 -> 1번 레벨
+        # ...
+        selected_level = num_active - 1   # [B]
+
+        batch_idx = torch.arange(B, device=device)
+        cond_emb = all_level_vectors[selected_level, batch_idx]   # [B, D]
+
+    else:
+        level_ids = torch.arange(L, device=device).view(L, 1)         # [L, 1]
+        mask = (level_ids < num_active.view(1, B)).float().unsqueeze(-1)  # [L, B, 1]
+
+        weighted = all_level_vectors * mask        # [L, B, D]
+        cond_emb = weighted.sum(dim=0)             # [B, D]
+        cond_emb = cond_emb / num_active.view(B, 1).float()
 
     return cond_emb
 

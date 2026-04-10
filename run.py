@@ -116,6 +116,8 @@ class Run:
             "aggregation": config["aggregation"],
             "bias_mapping": config["bias_mapping"],
             "mapping_lambda": config["mapping_lambda"],
+            "uniformity_loss": config["uniformity_loss"],
+            "cond_rand": config["cond_rand"],
         }
 
         self.rqvae_setting = {
@@ -128,6 +130,10 @@ class Run:
             "freeze_rq": config["freeze_rq"],
             "rqvae_lr": config["rqvae_lr"],
             "cross_cond": config["cross_cond"],
+            "rq_exp": config["rq_exp"],
+            "rq_div": config["rq_div"],
+            "residual": config["residual"],
+            "rq_accu": config["rq_accu"]
         }
 
         self.device = "cuda" if config["use_cuda"] else "cpu"
@@ -972,13 +978,13 @@ class Run:
             self.update_results(mae, rmse, "sscdr")
             write("MAE: {} RMSE: {}".format(mae, rmse))
 
-    def LA_CDR(self, model, la_model, data_la, data_test, test_uid, optimizer_la):
+    def LA_CDR(self, model, la_model, data_la, data_test, optimizer_la):
         write("==========LA_CDR==========")
         for i in range(self.epoch):
             loss = self.train(data_la, [model, la_model], None, optimizer_la, i, stage="train_la", mapping=False, diff=False, ss=False, la=True)
             mae, rmse = self.eval_mae([model, la_model], data_test, stage="test_la")
             self.update_results(mae, rmse, "lacdr")
-            write("LA LOSS", loss.item(), "MAE: {} RMSE: {}  ".format(mae, rmse))
+            write("MAE: {} RMSE: {}  ".format(mae, rmse))
 
     def CDR(self, model, data_map, data_meta, data_test, criterion, optimizer_map, optimizer_meta):
 
