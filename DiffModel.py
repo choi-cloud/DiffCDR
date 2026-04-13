@@ -216,14 +216,14 @@ class DiffParallel(nn.Module):
         if self.aggregation in ["aggregation", "aggregation_ab1"]:
             self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim)]))
             self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
-            self.linear_m = nn.Linear(input_dim, input_dim, False)
-            self.ln_m = nn.LayerNorm(input_dim)
+            # self.linear_m = nn.Linear(input_dim, input_dim, False)
+            # self.ln_m = nn.LayerNorm(input_dim)
 
         if self.aggregation in ["aggregation", "aggregation_ab2"]:
             self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim)]))
             self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
-            self.linear_g = nn.Linear(input_dim, input_dim, False)
-            self.ln_g = nn.LayerNorm(input_dim)
+            # self.linear_g = nn.Linear(input_dim, input_dim, False)
+            # self.ln_g = nn.LayerNorm(input_dim)
 
         self.num_layers = 1
 
@@ -441,16 +441,18 @@ def diffusion_loss_fn_parallel(
             # log_embedding_stats("user_m_raw", final_output_m, model.global_step)
             # log_embedding_stats("user_g_raw", final_output_g, model.global_step)
 
-            final_output_m_proj = model.linear_m(final_output_m)
-            final_output_g_proj = model.linear_g(final_output_g)
+            # final_output_m_proj = model.linear_m(final_output_m)
+            # final_output_g_proj = model.linear_g(final_output_g)
+
             # -------------------------
             # Proj
             # -------------------------
             # log_embedding_stats("user_m_proj", final_output_m_proj, model.global_step)
             # log_embedding_stats("user_g_proj", final_output_g_proj, model.global_step)
 
-            final_output_m = model.ln_m(final_output_m_proj)
-            final_output_g = model.ln_g(final_output_g_proj)
+            # final_output_m = model.ln_m(final_output_m_proj)
+            # final_output_g = model.ln_g(final_output_g_proj)
+
             # -------------------------
             # Norm
             # -------------------------

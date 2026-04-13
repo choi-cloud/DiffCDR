@@ -286,8 +286,10 @@ class MFBasedModel(torch.nn.Module):
             if diff_model.aggregation == "aggregation":
                 final_output_m, iid_emb = p_sample(diff_model, cond1, iid_emb, device, diff_id=0)
                 final_output_g, iid_emb = p_sample(diff_model, cond2, iid_emb, device, diff_id=1)
-                final_output_m = diff_model.ln_m(diff_model.linear_m(final_output_m))
-                final_output_g = diff_model.ln_g(diff_model.linear_g(final_output_g))
+
+                # final_output_m = diff_model.ln_m(diff_model.linear_m(final_output_m))
+                # final_output_g = diff_model.ln_g(diff_model.linear_g(final_output_g))
+
                 base_tokens = torch.stack([final_output_m, final_output_g], dim=1)
 
             elif diff_model.aggregation == "aggregation_ab1":
