@@ -44,7 +44,7 @@ def prepare_1():
     parser.add_argument("--experiment", default="DiffCDR")
 
     # parallel setting
-    parser.add_argument("--set_aggr", type=str, default="item_iu", help="[item_diu, item_d, item_i, item_u, item_di, item_du, item_iu]")
+    parser.add_argument("--set_aggr", type=str, default="item", help="[item_diu, item_d, item_i, item_u, item_di, item_du, item_iu]")
     parser.add_argument("--aggregation", type=str, default="aggregation", help="[aggregation, aggregation_ab1, aggregation_ab2]")
 
     # RQVAE(code_dim=input_dim, num_levels=4, codebook_size=256)
@@ -63,7 +63,7 @@ def prepare_1():
     parser.add_argument("--diff_scale", type=float, default=0.5, help="Classifier-free guidance scale")
     parser.add_argument("--diff_mask_rate", type=float, default=0.1, help="Diffusion condition mask rate")
     parser.add_argument("--emb_dim", type=int, default=10, help="MF emb dim")
-    parser.add_argument("--bias_mapping", type=str, default="user", help="[None, user, user_domain] mapper input")
+    parser.add_argument("--bias_mapping", type=str, default="None", help="[None, user, user_domain] mapper input")
     parser.add_argument("--mapping_lambda", type=float, default=10, help="mapping loss 가중치")
     parser.add_argument("--uniformity_loss", type=float, default=0.1, help="uniformity loss 가중치")
     parser.add_argument("--zero_cond", type=str2bool, default=False, help="cond zero 실험")
@@ -163,6 +163,7 @@ if __name__ == "__main__":
 
     write(f"🍏 cross cond   : {args.cross_cond}")
     write(f"🍏 bias mapping : {args.bias_mapping}")
+    write(f"🍏 zero cond : {args.zero_cond}")
 
     if not args.process_data_mid and not args.process_data_ready:
         Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth")
