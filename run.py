@@ -88,8 +88,12 @@ class Run:
             + "ep_"
             + str(config["rqvae_lr"])
             + "lr_"
-            + aggregaion_name 
-            + "_" + isResidual + "_data_src" + "_tgt_" + self.tgt
+            + aggregaion_name
+            + "_"
+            + isResidual
+            + "_data_src"
+            + "_tgt_"
+            + self.tgt
             + "MF_MLP"
         )
 
@@ -441,17 +445,17 @@ class Run:
         # simple 2-hop aggregation (user -> items -> users) excluding 1-hop self contribution
         uv_adj = graph_data["uv_adj"].to(self.device)
         vu_adj = graph_data["vu_adj"].to(self.device)
-        
+
         if use_target:
             model = base_model.tgt_model
         else:
             model = base_model.src_model
-        
+
         with torch.no_grad():
             # 룩업 후 MLP 통과 (모든 유저)
             all_uid = torch.arange(model.uid_embedding.num_embeddings, device=self.device)
-            raw_user_feat = model.uid_embedding(all_uid)        # [num_users, D]
-            user_feat = model.user_mlp(raw_user_feat)           # [num_users, d]  ← 추가
+            raw_user_feat = model.uid_embedding(all_uid)  # [num_users, D]
+            user_feat = model.user_mlp(raw_user_feat)  # [num_users, d]  ← 추가
 
             # 1-hop: items aggregate from users
             item_msg = torch.sparse.mm(vu_adj, user_feat)  # [num_items, d]
@@ -633,7 +637,7 @@ class Run:
 
                 loss_ls.append(total_loss.item())
 
-                                # ====== MAE / RMSE 계산 ======
+                # ====== MAE / RMSE 계산 ======
                 with torch.no_grad():
                     y_true = y.squeeze()
                     abs_err = torch.abs(pred - y_true)
@@ -642,7 +646,7 @@ class Run:
                     sum_abs_err += abs_err.sum().item()
                     sum_sq_err += sq_err.sum().item()
                     total_count += y_true.numel()
-            
+
             # ====== epoch metric 계산 ======
             mae = sum_abs_err / total_count
             rmse = (sum_sq_err / total_count) ** 0.5
@@ -883,7 +887,9 @@ class Run:
             self.update_results(mae, rmse, "diff")
             write(f"DIFF LOSS {loss.item():>10.6f} |  TASK LOSS {task_loss.item():>10.6f} | MAE: {mae:>10.6f} | RMSE: {rmse:>10.6f}")
 
-    def Diff_Parallel(self, model, diff_model, data_src, data_diff, data_test, optimizer, graph_train, graph_test, style_src, style_tgt_item, style_tgt_user):
+    def Diff_Parallel(
+        self, model, diff_model, data_src, data_diff, data_test, optimizer, graph_train, graph_test, style_src, style_tgt_item, style_tgt_user
+    ):
         write(f"{' Diff_Parallel ':=^{30}}")
 
         diff_model.style_tgt_item = style_tgt_item
@@ -902,7 +908,7 @@ class Run:
         if self.rqvae_setting.get("pretrain_rq", False):
             if os.path.exists(self.rqvae_ckpt_root):
                 self.load_rqvae(diff_model, self.rqvae_ckpt_root)
-            else: 
+            else:
                 self.pretrain_rqvae(model, diff_model, data_src)
                 self.save_rqvae(diff_model, self.rqvae_ckpt_root)
 
@@ -970,7 +976,7 @@ class Run:
                 quantizer=diff_model.rq_mf,
                 # embed_fetch_fn=lambda tgt_uid: model.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze(),
                 embed_fetch_fn=lambda tgt_uid: model.src_model.user_mlp(model.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()),
-                data_diff=data_diff
+                data_diff=data_diff,
             )
 
         # 2) Aggr quantizer 따로 pretrain
@@ -979,7 +985,7 @@ class Run:
                 name="rq_aggr",
                 quantizer=diff_model.rq_aggr,
                 embed_fetch_fn=lambda tgt_uid: model._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False),
-                data_diff=data_diff
+                data_diff=data_diff,
             )
 
     def _pretrain_single_quantizer(self, name, quantizer, embed_fetch_fn, data_diff):
@@ -1001,12 +1007,8 @@ class Run:
             all_uids = torch.arange(self.uid_all).to(self.device)
             all_z = embed_fetch_fn(all_uids)  # [N, D]
 
-        z_loader = torch.utils.data.DataLoader(
-            torch.utils.data.TensorDataset(all_z),
-            batch_size=self.batchsize_diff,
-            shuffle=True
-        )
-        
+        z_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(all_z), batch_size=self.batchsize_diff, shuffle=True)
+
         for epoch in range(pretrain_epochs):
             total_loss = 0.0
 
@@ -1019,7 +1021,7 @@ class Run:
 
             if (epoch + 1) % 10 == 0 or epoch == 0:
                 write(f"{name} Epoch {epoch+1}/{pretrain_epochs} | Loss: {total_loss/len(data_diff):.6f}")
-                
+
     def SS_CDR(self, model, ss_model, data_ss, data_test, optimizer_ss):
         write("==========SS_CDR==========")
         for i in range(self.epoch):
@@ -1193,7 +1195,17 @@ class Run:
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
             self.Diff_Parallel(
-                model, diff_model, data_src, data_diff, data_diff_test, optimizer_diff, graph_data["train"], graph_data["test"], style_src, style_tgt_item, style_tgt_user,
+                model,
+                diff_model,
+                data_src,
+                data_diff,
+                data_diff_test,
+                optimizer_diff,
+                graph_data["train"],
+                graph_data["test"],
+                style_src,
+                style_tgt_item,
+                style_tgt_user,
             )
             self.result_print(["diff_parallel"])
 

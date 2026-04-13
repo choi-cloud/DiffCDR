@@ -10,6 +10,7 @@ from utils import AttentionLayer
 
 from utils import log_batch_similarity_stats
 
+
 class LookupEmbedding(nn.Module):
 
     def __init__(self, uid_all, iid_all, emb_dim, hidden_dim=64, out_dim=10, uni_lambda=0.1):
@@ -254,7 +255,7 @@ class MFBasedModel(torch.nn.Module):
 
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
             src_uid_emb1 = self.src_model.user_mlp(src_uid_emb1)
-            
+
             src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
 
             cond_emb1 = src_uid_emb1
