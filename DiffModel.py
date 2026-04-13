@@ -405,13 +405,13 @@ def diffusion_loss_fn_parallel(
         if model.aggregation == "aggregation":
             output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)
             output2 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=1)
-            return F.mse_loss(e_m, output1) + F.mse_loss(e_g, output2)
+            return F.smooth_l1_loss(x_0_m, output1) + F.smooth_l1_loss(x_0_g, output2)
         elif model.aggregation == "aggregation_ab1":
             output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)
-            return F.mse_loss(e_m, output1)
+            return F.smooth_l1_loss(x_0_m, output1)
         elif model.aggregation == "aggregation_ab2":
             output1 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=0)
-            return F.mse_loss(e_g, output1)
+            return F.smooth_l1_loss(x_0_g, output1)
 
     elif is_task:
         if model.rqvae["start_point"] == "src_u":

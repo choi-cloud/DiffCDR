@@ -288,17 +288,17 @@ class MFBasedModel(torch.nn.Module):
                 final_output_g, iid_emb = p_sample(diff_model, cond2, iid_emb, device, diff_id=1)
                 final_output_m = diff_model.ln_m(diff_model.linear_m(final_output_m))
                 final_output_g = diff_model.ln_g(diff_model.linear_g(final_output_g))
-                base_tokens = torch.stack([iid_emb, final_output_m, final_output_g], dim=1)
+                base_tokens = torch.stack([final_output_m, final_output_g], dim=1)
 
             elif diff_model.aggregation == "aggregation_ab1":
                 final_output_m, iid_emb = p_sample(diff_model, start1, cond1, iid_emb, device, diff_id=0)
                 final_output_m = diff_model.ln_m(diff_model.linear_m(final_output_m))
-                base_tokens = torch.stack([iid_emb, final_output_m], dim=1)
+                base_tokens = torch.stack([final_output_m], dim=1)
 
             elif diff_model.aggregation == "aggregation_ab2":
                 final_output_g, iid_emb = p_sample(diff_model, start2, cond2, iid_emb, device, diff_id=0)
                 final_output_g = diff_model.ln_g(diff_model.linear_g(final_output_g))
-                base_tokens = torch.stack([iid_emb, final_output_g], dim=1)
+                base_tokens = torch.stack([final_output_g], dim=1)
 
             if diff_model.parallel["set_aggr"] == "item":
                 tokens = base_tokens
