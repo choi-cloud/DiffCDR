@@ -281,7 +281,7 @@ class MFBasedModel(torch.nn.Module):
             elif diff_model.rqvae["start_point"] == "noise":
                 start1, start2 = torch.randn_like(src_uid_emb1), torch.randn_like(src_uid_emb2)
 
-            iid_emb = diff_model.ln_iid(iid_emb)
+            # iid_emb = diff_model.ln_iid(iid_emb)
 
             if diff_model.aggregation == "aggregation":
                 final_output_m, iid_emb = p_sample(diff_model, cond1, iid_emb, device, diff_id=0)
@@ -293,8 +293,10 @@ class MFBasedModel(torch.nn.Module):
                 base_tokens = torch.stack([final_output_m, final_output_g], dim=1)
 
             elif diff_model.aggregation == "aggregation_ab1":
-                final_output_m, iid_emb = p_sample(diff_model, start1, cond1, iid_emb, device, diff_id=0)
-                final_output_m = diff_model.ln_m(diff_model.linear_m(final_output_m))
+                final_output_m, iid_emb = p_sample(diff_model, cond1, iid_emb, device, diff_id=0)
+
+                # final_output_m = diff_model.ln_m(diff_model.linear_m(final_output_m))
+
                 base_tokens = torch.stack([final_output_m], dim=1)
 
             elif diff_model.aggregation == "aggregation_ab2":
@@ -352,9 +354,11 @@ class MFBasedModel(torch.nn.Module):
 
                 tokens = torch.cat([base_tokens, style_tok_u.unsqueeze(1)], dim=1)
 
-            out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
-            final_output = out[:, 0, :]  # (B, D)
-            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+            # out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            # final_output = out[:, 0, :]  # (B, D)
+            # y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+
+            y_pred = torch.sum(final_output_m * iid_emb, dim=1)
 
             return y_pred
 

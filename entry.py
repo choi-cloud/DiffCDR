@@ -45,7 +45,7 @@ def prepare_1():
 
     # parallel setting
     parser.add_argument("--set_aggr", type=str, default="item", help="[item_diu, item_d, item_i, item_u, item_di, item_du, item_iu]")
-    parser.add_argument("--aggregation", type=str, default="aggregation", help="[aggregation, aggregation_ab1, aggregation_ab2]")
+    parser.add_argument("--aggregation", type=str, default="aggregation_ab1", help="[aggregation, aggregation_ab1, aggregation_ab2]")
 
     # RQVAE(code_dim=input_dim, num_levels=4, codebook_size=256)
     parser.add_argument("--codebook_num", type=int, default=4, help="RQVAE 코드북 개수(level)")
@@ -164,6 +164,8 @@ if __name__ == "__main__":
     write(f"🍏 cross cond   : {args.cross_cond}")
     write(f"🍏 bias mapping : {args.bias_mapping}")
     write(f"🍏 zero cond : {args.zero_cond}")
+
+    print(f"\n아이템 표준화 제거 & cond_mask 제거\n")
 
     if not args.process_data_mid and not args.process_data_ready:
         Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth")
