@@ -67,13 +67,18 @@ def prepare_1():
     parser.add_argument("--mapping_lambda", type=float, default=10, help="mapping loss 가중치")
     parser.add_argument("--uniformity_loss", type=float, default=0.1, help="uniformity loss 가중치")
     parser.add_argument("--zero_cond", type=str2bool, default=False, help="cond zero 실험")
+    parser.add_argument("--batch_norm", type=str2bool, default=False, help="batch norm 사용 여부")
 
     args = parser.parse_args()
 
+    os.environ["PYTHONHASHSEED"] = str(args.seed)
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     return args
 
 
@@ -106,6 +111,7 @@ def prepare_2(args, config_path):
         config["mapping_lambda"] = args.mapping_lambda
         config["uniformity_loss"] = args.uniformity_loss
         config["zero_cond"] = args.zero_cond
+        config["batch_norm"] = args.batch_norm
 
     return config
 

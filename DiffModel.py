@@ -217,17 +217,20 @@ class DiffParallel(nn.Module):
             self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim)]))
             self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
             # self.linear_m = nn.Linear(input_dim, input_dim, False)
-            # self.ln_m = nn.LayerNorm(input_dim)
+            if self.parallel["batch_norm"]:
+                self.ln_m = nn.BatchNorm1d(input_dim)
 
         if self.aggregation in ["aggregation", "aggregation_ab2"]:
             self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim)]))
             self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
             # self.linear_g = nn.Linear(input_dim, input_dim, False)
-            # self.ln_g = nn.LayerNorm(input_dim)
+            if self.parallel["batch_norm"]:
+                self.ln_g = nn.BatchNorm1d(input_dim)
 
         self.num_layers = 1
+        if self.parallel["batch_norm"]:
+            self.ln_iid = nn.BatchNorm1d(input_dim)
 
-        self.ln_iid = nn.LayerNorm(input_dim)
         self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
 
         if self.parallel["bias_mapping"] == "user":
@@ -429,7 +432,8 @@ def diffusion_loss_fn_parallel(
             p_sample = p_sample_loop_x0_solver
 
         # log_embedding_stats("item_raw", iid_emb, model.global_step)
-        iid_emb = model.ln_iid(iid_emb)
+        if model.parallel["batch_norm"]:
+            iid_emb = model.ln_iid(iid_emb)
         # log_embedding_stats("item_norm", iid_emb, model.global_step)
 
         if model.aggregation == "aggregation":
@@ -449,9 +453,10 @@ def diffusion_loss_fn_parallel(
             # -------------------------
             # log_embedding_stats("user_m_proj", final_output_m_proj, model.global_step)
             # log_embedding_stats("user_g_proj", final_output_g_proj, model.global_step)
-
-            # final_output_m = model.ln_m(final_output_m_proj)
-            # final_output_g = model.ln_g(final_output_g_proj)
+            if model.parallel["batch_norm"]:
+                final_output_m = model.ln_m(final_output_m)
+                final_output_g = model.ln_g(final_output_g)
+                
 
             # -------------------------
             # Norm
@@ -466,9 +471,11 @@ def diffusion_loss_fn_parallel(
             uni_loss = uni_loss_m + uni_loss_g
 
         elif model.aggregation == "aggregation_ab1":
-            final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0)
-            final_output_m_proj = model.linear_m(final_output_m)
-            final_output_m = model.ln_m(final_output_m_proj)
+            # final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0)
+            final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
+            # final_output_m_proj = model.linear_m(final_output_m)
+            if model.parallel["batch_norm"]:
+                final_output_m = model.ln_m(final_output_m)
             base_tokens = torch.stack([final_output_m], dim=1)
 
         elif model.aggregation == "aggregation_ab2":

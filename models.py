@@ -280,8 +280,8 @@ class MFBasedModel(torch.nn.Module):
                 start1, start2 = quantized1, quantized2
             elif diff_model.rqvae["start_point"] == "noise":
                 start1, start2 = torch.randn_like(src_uid_emb1), torch.randn_like(src_uid_emb2)
-
-            iid_emb = diff_model.ln_iid(iid_emb)
+            if diff_model.parallel["batch_norm"]:
+                iid_emb = diff_model.ln_iid(iid_emb)
 
             if diff_model.aggregation == "aggregation":
                 final_output_m, iid_emb = p_sample(diff_model, cond1, iid_emb, device, diff_id=0)
@@ -289,12 +289,17 @@ class MFBasedModel(torch.nn.Module):
 
                 # final_output_m = diff_model.ln_m(diff_model.linear_m(final_output_m))
                 # final_output_g = diff_model.ln_g(diff_model.linear_g(final_output_g))
-
+                if diff_model.parallel["batch_norm"]:
+                    final_output_m = diff_model.ln_m(final_output_m)
+                    final_output_g = diff_model.ln_g(final_output_g)
                 base_tokens = torch.stack([final_output_m, final_output_g], dim=1)
 
             elif diff_model.aggregation == "aggregation_ab1":
-                final_output_m, iid_emb = p_sample(diff_model, start1, cond1, iid_emb, device, diff_id=0)
-                final_output_m = diff_model.ln_m(diff_model.linear_m(final_output_m))
+                if diff_model.parallel["batch_norm"]:
+                    # final_output_m, iid_emb = p_sample(diff_model, start1, cond1, iid_emb, device, diff_id=0)
+                    final_output_m, iid_emb = p_sample(diff_model, cond1, iid_emb, device, diff_id=0)
+                    # final_output_m = diff_model.ln_m(diff_model.linear_m(final_output_m))
+                    final_output_m = diff_model.ln_m(final_output_m)
                 base_tokens = torch.stack([final_output_m], dim=1)
 
             elif diff_model.aggregation == "aggregation_ab2":

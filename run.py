@@ -123,6 +123,7 @@ class Run:
             "mapping_lambda": config["mapping_lambda"],
             "uniformity_loss": config["uniformity_loss"],
             "zero_cond": config["zero_cond"],
+            "batch_norm": config["batch_norm"],
         }
 
         self.rqvae_setting = {
