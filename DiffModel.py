@@ -254,6 +254,9 @@ class DiffParallel(nn.Module):
             self.style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
             self.style_ln = nn.LayerNorm(input_dim)
             self.style_scale = nn.Parameter(torch.tensor(0.1))
+        
+        elif self.parallel["set_aggr"] == "item":
+            pass
 
         if self.rqvae["RQVAE"]:
             self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
@@ -466,9 +469,9 @@ def diffusion_loss_fn_parallel(
 
             base_tokens = torch.stack([final_output_m, final_output_g], dim=1)
 
-            uni_loss_m = uniformity_loss(final_output_m, t=2.0)
-            uni_loss_g = uniformity_loss(final_output_g, t=2.0)
-            uni_loss = uni_loss_m + uni_loss_g
+            # uni_loss_m = uniformity_loss(final_output_m, t=2.0)
+            # uni_loss_g = uniformity_loss(final_output_g, t=2.0)
+            # uni_loss = uni_loss_m + uni_loss_g
 
         elif model.aggregation == "aggregation_ab1":
             # final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0)
@@ -497,7 +500,7 @@ def diffusion_loss_fn_parallel(
             item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
 
             tokens = torch.cat([base_tokens, item_style_tok.unsqueeze(1)], dim=1)
-
+            
         elif model.parallel["set_aggr"] == "item_iu":
             uid = uid.long()  # (B,)
             iid = iid.squeeze(1)
@@ -538,9 +541,15 @@ def diffusion_loss_fn_parallel(
             style_tok_u = model.style_scale * style_tok  # (B, D)
 
             tokens = torch.cat([base_tokens, style_tok_u.unsqueeze(1)], dim=1)
+        
+        elif model.parallel["set_aggr"] == "item":
+            tokens = base_tokens
 
         out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
         final_output = out[:, 0, :]  # (B, D)
+        
+        uni_loss = uniformity_loss(final_output, t=2.0) ###############0414 uniformity 실험을 위해 추가
+
         y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
 
         model.global_step += 1
@@ -548,7 +557,7 @@ def diffusion_loss_fn_parallel(
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
 
-        if model.parallel["bias_mapping"] == "user":
+        if model.parallel["set_aggr"] is not "item":
             task_loss += model.parallel["mapping_lambda"] * mapping_loss
 
         if model.aggregation == "aggregation":

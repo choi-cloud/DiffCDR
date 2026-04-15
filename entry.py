@@ -41,7 +41,7 @@ def prepare_1():
     parser.add_argument("--save_path", default="/home/shared/cjp/model_save_default_10/model_mlp")
     # parser.add_argument("--save_path", default="/home/schoi/DiffCDR/model_save_default/model_mlp")
     parser.add_argument("--use_cuda", default=1)
-    parser.add_argument("--experiment", default="DiffCDR")
+    parser.add_argument("--experiment", default="0414_uni23")
 
     # parallel setting
     parser.add_argument("--set_aggr", type=str, default="item_iu", help="[item_diu, item_d, item_i, item_u, item_di, item_du, item_iu]")
