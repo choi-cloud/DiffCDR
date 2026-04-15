@@ -546,16 +546,11 @@ def diffusion_loss_fn_parallel(
             task_loss += model.parallel["mapping_lambda"] * mapping_loss
 
         if model.aggregation == "aggregation":
-            return (
-                F.mse_loss(x_0_m, final_output_m)
-                + F.mse_loss(x_0_g, final_output_g)
-                + model.task_lambda * task_loss
-                + model.parallel["uniformity_loss"] * uni_loss
-            )
+            return model.task_lambda * task_loss + model.parallel["uniformity_loss"] * uni_loss
         elif model.aggregation == "aggregation_ab1":
-            return F.mse_loss(x_0_m, final_output_m) + model.task_lambda * task_loss
+            return model.task_lambda * task_loss + model.parallel["uniformity_loss"] * uni_loss
         elif model.aggregation == "aggregation_ab2":
-            return F.mse_loss(x_0_g, final_output_g) + model.task_lambda * task_loss
+            return model.task_lambda * task_loss + model.parallel["uniformity_loss"] * uni_loss
 
 
 # generation fun
