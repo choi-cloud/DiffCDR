@@ -89,6 +89,7 @@ def log_args_table(args, max_per_line: int = 5, col_width: int = 30):
 
     logging.info("=" * (col_width * max_per_line + (max_per_line - 1)))
 
+
 def log_batch_similarity_stats(user_emb, global_step, log_every=200, prefix="train_src"):
     if global_step % log_every != 0:
         return
@@ -110,6 +111,7 @@ def log_batch_similarity_stats(user_emb, global_step, log_every=200, prefix="tra
             f"min={user_offdiag.min().item():.4f}, "
             f"max={user_offdiag.max().item():.4f}"
         )
+
 
 class AttentionLayer(nn.Module):
     def __init__(self, in_dim, out_dim):

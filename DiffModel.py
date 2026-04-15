@@ -70,25 +70,11 @@ class DiffCDR(nn.Module):
         self.mask_rate = diff_mask_rate
         # -----------------------------------------------
 
-        self.linears = nn.ModuleList(
-            [
-                nn.Linear(input_dim, diff_dim),
-                nn.Linear(diff_dim, diff_dim),
-                nn.Linear(diff_dim, input_dim),
-            ]
-        )
+        self.linears = nn.ModuleList([nn.Linear(input_dim, diff_dim), nn.Linear(diff_dim, diff_dim), nn.Linear(diff_dim, input_dim)])
 
-        self.step_emb_linear = nn.ModuleList(
-            [
-                nn.Linear(diff_dim, input_dim),
-            ]
-        )
+        self.step_emb_linear = nn.ModuleList([nn.Linear(diff_dim, input_dim)])
 
-        self.cond_emb_linear = nn.ModuleList(
-            [
-                nn.Linear(input_dim, input_dim),
-            ]
-        )
+        self.cond_emb_linear = nn.ModuleList([nn.Linear(input_dim, input_dim)])
 
         self.num_layers = 1
 
@@ -254,7 +240,7 @@ class DiffParallel(nn.Module):
             self.style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
             self.style_ln = nn.LayerNorm(input_dim)
             self.style_scale = nn.Parameter(torch.tensor(0.1))
-        
+
         elif self.parallel["set_aggr"] == "item":
             pass
 
@@ -459,7 +445,6 @@ def diffusion_loss_fn_parallel(
             if model.parallel["batch_norm"]:
                 final_output_m = model.ln_m(final_output_m)
                 final_output_g = model.ln_g(final_output_g)
-                
 
             # -------------------------
             # Norm
@@ -500,7 +485,7 @@ def diffusion_loss_fn_parallel(
             item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
 
             tokens = torch.cat([base_tokens, item_style_tok.unsqueeze(1)], dim=1)
-            
+
         elif model.parallel["set_aggr"] == "item_iu":
             uid = uid.long()  # (B,)
             iid = iid.squeeze(1)
@@ -541,14 +526,14 @@ def diffusion_loss_fn_parallel(
             style_tok_u = model.style_scale * style_tok  # (B, D)
 
             tokens = torch.cat([base_tokens, style_tok_u.unsqueeze(1)], dim=1)
-        
+
         elif model.parallel["set_aggr"] == "item":
             tokens = base_tokens
 
         out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
         final_output = out[:, 0, :]  # (B, D)
-        
-        uni_loss = uniformity_loss(final_output, t=2.0) ###############0414 uniformity 실험을 위해 추가
+
+        uni_loss = uniformity_loss(final_output, t=2.0)  ###############0414 uniformity 실험을 위해 추가
 
         y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
 
