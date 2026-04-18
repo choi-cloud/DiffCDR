@@ -442,10 +442,8 @@ class Run:
         if graph_data is None:
             return None, None
 
-        # 단순 2홉 aggr
-        # simple 2-hop aggregation (user -> items -> users) excluding 1-hop self contribution
-        uv_adj = graph_data["uv_adj"].to(self.device)
-        vu_adj = graph_data["vu_adj"].to(self.device)
+        uv_adj = graph_data["uv_adj"].cpu()
+        vu_adj = graph_data["vu_adj"].cpu()
 
         if use_target:
             model = base_model.tgt_model
@@ -453,37 +451,27 @@ class Run:
             model = base_model.src_model
 
         with torch.no_grad():
-            # 룩업 후 MLP 통과 (모든 유저)
             all_uid = torch.arange(model.uid_embedding.num_embeddings, device=self.device)
-            raw_user_feat = model.uid_embedding(all_uid)  # [num_users, D]
-            user_feat = model.user_mlp(raw_user_feat)  # [num_users, d]  ← 추가
+            raw_user_feat = model.uid_embedding(all_uid)
+            user_feat = model.user_mlp(raw_user_feat).detach().cpu()
 
-            # 1-hop: items aggregate from users
-            item_msg = torch.sparse.mm(vu_adj, user_feat)  # [num_items, d]
+            item_msg = torch.sparse.mm(vu_adj, user_feat)
+            user_2hop = torch.sparse.mm(uv_adj, item_msg)
 
-            # 2-hop: users aggregate from items
-            user_2hop = torch.sparse.mm(uv_adj, item_msg)  # [num_users, d]
-
-            # remove self 1-hop contribution (user -> item -> user)
             user_deg = torch.sparse.sum(uv_adj, dim=1).to_dense().unsqueeze(1)
-            user_2hop = user_2hop - user_deg * user_feat  # self-removal
+            user_2hop = user_2hop - user_deg * user_feat
 
-            # count real 2-hop neighbors: user -> item -> other_users
             item_deg = torch.sparse.sum(vu_adj, dim=1).to_dense()
-            item_other = torch.relu(item_deg - 1)  # max(deg-1, 0)
+            item_other = torch.relu(item_deg - 1)
             two_hop_counts = torch.sparse.mm(uv_adj, item_other[:, None]).to_dense()
 
-            # normalization (avoid division by zero)
             norm = torch.where(two_hop_counts == 0, torch.ones_like(two_hop_counts), two_hop_counts)
-
-            # final 2-hop embedding
             user_emb = user_2hop / norm
 
-            # fallback: if no 2-hop neighbors, keep original embedding
             zero_mask = two_hop_counts.squeeze(1) == 0
             user_emb[zero_mask] = user_feat[zero_mask]
 
-        return user_emb, None
+        return user_emb.to(self.device), None
 
     def get_model(self):
         if self.base_model == "MF":
