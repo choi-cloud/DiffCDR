@@ -546,11 +546,11 @@ def diffusion_loss_fn_parallel(
             task_loss += model.parallel["mapping_lambda"] * mapping_loss
 
         if model.aggregation == "aggregation":
-            return model.task_lambda * task_loss + model.parallel["uniformity_loss"] * uni_loss
+            return model.task_lambda * task_loss, model.parallel["uniformity_loss"] * uni_loss
         elif model.aggregation == "aggregation_ab1":
-            return model.task_lambda * task_loss + model.parallel["uniformity_loss"] * uni_loss
+            return model.task_lambda * task_loss, model.parallel["uniformity_loss"] * uni_loss
         elif model.aggregation == "aggregation_ab2":
-            return model.task_lambda * task_loss + model.parallel["uniformity_loss"] * uni_loss
+            return model.task_lambda * task_loss, model.parallel["uniformity_loss"] * uni_loss
 
 
 def log_prediction_stats(name, pred, global_step, log_every=200):

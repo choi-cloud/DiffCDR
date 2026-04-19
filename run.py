@@ -678,45 +678,57 @@ class Run:
             return torch.tensor(loss_ls).mean()
 
         elif diff == True:
-            diff_loss = []
-            task_loss_ls = []
+            loss1_list = []
+            loss2_list = []
+
+            task_loss_list = []
+            uni_loss_list = []
 
             for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
-                # 1️⃣ train mode
-                model[1].train()  # diff_model
-                # 2️⃣ optimizer 기준으로 grad 초기화
+                model[1].train()
 
-                # 3️⃣ forward
-                loss = model[0](
-                    X,
-                    stage,
-                    self.device,
-                    diff_model=model[1],
-                    is_task=False,
-                    style_src=style_src,
-                )
+                # ------------------------
+                # diffusion loss
+                # ------------------------
+                diff_loss = model[0](X, stage, self.device, diff_model=model[1], is_task=False, style_src=style_src)
+                loss1 = diff_loss
+
                 optimizer.zero_grad(set_to_none=True)
-                loss.backward()
+                loss1.backward()
                 torch.nn.utils.clip_grad_norm_(list(model[1].parameters()), 1.0)
                 optimizer.step()
 
-                task_loss = model[0](
-                    X,
-                    stage,
-                    self.device,
-                    diff_model=model[1],
-                    is_task=True,
-                    style_src=style_src,
-                )
+                # ------------------------
+                # task + uniformity
+                # ------------------------
+                task_loss, uni_loss = model[0](X, stage, self.device, diff_model=model[1], is_task=True, style_src=style_src)
+                loss2 = task_loss + uni_loss
+
                 optimizer.zero_grad(set_to_none=True)
-                task_loss.backward()
+                loss2.backward()
                 torch.nn.utils.clip_grad_norm_(list(model[1].parameters()), 1.0)
                 optimizer.step()
 
-                diff_loss.append(loss.item())
-                task_loss_ls.append(task_loss.item())
+                # ------------------------
+                # logging
+                # ------------------------
+                loss1_list.append(loss1.item())
+                loss2_list.append(loss2.item())
 
-            return torch.tensor(diff_loss).mean(), torch.tensor(task_loss_ls).mean()
+                task_loss_list.append(task_loss.item())
+                uni_loss_list.append(uni_loss.item())
+
+            # ------------------------
+            # epoch logging
+            # ------------------------
+            diff_mean = sum(loss1_list) / len(loss1_list)
+            total_mean = sum(loss2_list) / len(loss2_list)
+            task_mean = sum(task_loss_list) / len(task_loss_list)
+            uni_mean = sum(uni_loss_list) / len(uni_loss_list)
+
+            print(f"[Epoch {epoch+1}] diff={diff_mean:.4f} | task={task_mean:.4f} | uni={uni_mean:.4f} | total={total_mean:.4f}")
+
+            return diff_mean, total_mean
 
     def update_results(self, mae, rmse, phase):
 
@@ -914,20 +926,12 @@ class Run:
         for i in range(self.epoch):
 
             loss, task_loss = self.train(
-                data_diff,
-                [model, diff_model],
-                None,
-                optimizer,
-                i,
-                stage="train_diff_parallel",
-                mapping=False,
-                diff=True,
-                style_src=style_src,
+                data_diff, [model, diff_model], None, optimizer, i, stage="train_diff_parallel", mapping=False, diff=True, style_src=style_src
             )
 
             mae, rmse = self.eval_mae([model, diff_model], data_test, stage="test_diff_parallel", style_src=style_src)
             self.update_results(mae, rmse, "diff_parallel")
-            write(f"Epoch {i:<2} :: DIFF LOSS {loss.item():>10.6f} |  TASK LOSS {task_loss.item():>10.6f} | MAE: {mae:>10.6f} | RMSE: {rmse:>10.6f}")
+            write(f"Epoch {i+1} : MAE: {mae:>10.6f} | RMSE: {rmse:>10.6f}")
 
     def save_rqvae(self, diff_model, path):
         save_dir = os.path.dirname(path)
