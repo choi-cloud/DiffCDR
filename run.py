@@ -528,24 +528,49 @@ class Run:
             elif stage in ("test_diff_parallel"):
                 y_all = []
                 mae_all = []
+                pred_all = []
+                uid_all = []
+                degree_all = []
+
+                test_users_degree = model[1].test_users_degree  # dict: {uid: degree}
 
                 for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                     model[0].eval()
                     model[1].eval()
+
                     pred = model[0](X, stage, self.device, diff_model=model[1], style_src=style_src)
-                    y_input = X[-1]
-                    targets.extend(y_input.squeeze(1).tolist())
+
+                    meta_uid = X[0]  # [B]
+                    y_input = X[-1]  # [B, 1] or [B]
+
+                    meta_uid = meta_uid
+                    y_true = y_input.squeeze(1)
+                    pred = pred
+
+                    targets.extend(y_true.tolist())
                     predicts.extend(pred.tolist())
 
-                    mae = (pred.view(-1) - y_input.squeeze(1)).abs()
-                    y_all.append(y_input.squeeze(1).cpu())
+                    mae = (pred - y_true).abs()
+
+                    y_all.append(y_true.cpu())
                     mae_all.append(mae.cpu())
+                    pred_all.append(pred.detach().cpu())
+                    uid_all.append(meta_uid.detach().cpu())
 
-                y_all = torch.cat(y_all).numpy()
-                mae_all = torch.cat(mae_all).numpy()
+                    batch_degree = torch.tensor([test_users_degree.get(uid.item(), 0) for uid in meta_uid.detach().cpu()], dtype=torch.long)
+                    degree_all.append(batch_degree)
 
-                df_score_summary = mae_summary_by_score(y_all, mae_all)
+                y_all = torch.cat(y_all)
+                mae_all = torch.cat(mae_all)
+                pred_all = torch.cat(pred_all)
+                uid_all = torch.cat(uid_all)
+                degree_all = torch.cat(degree_all)
+
+                df_score_summary = mae_summary_by_score(y_all.numpy(), mae_all.numpy())
                 print(df_score_summary)
+
+                df_sparsity_summary = mae_rmse_summary_by_sparsity(y_true=y_all, y_pred=pred_all, user_degree=degree_all, user_uid=uid_all, n_bins=5)
+                print(df_sparsity_summary)
 
             elif stage in ("test_ss"):
                 for X, y in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
@@ -1116,6 +1141,10 @@ class Run:
 
         data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test, graph_data = self.get_data()
 
+        test_users_degree = get_test_users_degree(self.src_path, self.test_path)
+
+        print("num test users:", len(test_users_degree))
+
         print(f"\n소스 도메인 내 유저의 레이팅 스타일 정보 추출\n")
         cache_path = f"{self.stylecache_root}.pt"
         if os.path.exists(cache_path):
@@ -1187,6 +1216,7 @@ class Run:
         elif exp_part == "diff_parallel":
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
+            diff_model.test_users_degree = test_users_degree
             self.Diff_Parallel(
                 model,
                 diff_model,

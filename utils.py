@@ -9,6 +9,110 @@ import torch.nn.functional as F
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import pandas as pd
+from collections import Counter
+
+
+def mae_rmse_summary_by_sparsity(y_true, y_pred, user_degree, user_uid, n_bins=5):
+    y_true = y_true.view(-1).cpu().float()
+    y_pred = y_pred.view(-1).cpu().float()
+    user_degree = user_degree.view(-1).cpu().float()
+    user_uid = user_uid.view(-1).cpu().long()
+
+    abs_err = (y_pred - y_true).abs()
+    sq_err = (y_pred - y_true).pow(2)
+
+    unique_degree = torch.unique(user_degree)
+    if len(unique_degree) < n_bins:
+        n_bins = len(unique_degree)
+
+    if n_bins <= 1:
+        return pd.DataFrame(
+            [
+                {
+                    "group": "all",
+                    "num_samples": len(y_true),
+                    "num_users": int(len(torch.unique(user_uid))),
+                    "degree_min": float(user_degree.min().item()),
+                    "degree_max": float(user_degree.max().item()),
+                    "MAE": float(abs_err.mean().item()),
+                    "RMSE": float(torch.sqrt(sq_err.mean()).item()),
+                }
+            ]
+        )
+
+    qs = torch.linspace(0, 1, steps=n_bins + 1)
+    boundaries = torch.quantile(user_degree, qs)
+
+    rows = []
+    for i in range(n_bins):
+        left = boundaries[i]
+        right = boundaries[i + 1]
+
+        if i == 0:
+            mask = (user_degree >= left) & (user_degree <= right)
+        else:
+            mask = (user_degree > left) & (user_degree <= right)
+
+        if mask.sum() == 0:
+            continue
+
+        deg_group = user_degree[mask]
+        uid_group = user_uid[mask]
+        abs_group = abs_err[mask]
+        sq_group = sq_err[mask]
+
+        rows.append(
+            {
+                "group": f"Q{i+1}",
+                "num_samples": int(mask.sum().item()),
+                "num_users": int(len(torch.unique(uid_group))),
+                "degree_min": float(deg_group.min().item()),
+                "degree_max": float(deg_group.max().item()),
+                "MAE": float(abs_group.mean().item()),
+                "RMSE": float(torch.sqrt(sq_group.mean()).item()),
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def get_test_users_degree(src_path, test_path):
+    """
+    src_path:
+        source train csv path
+        format: [uid, iid, y]
+
+    test_path:
+        diff test csv path
+        format: [meta_uid, iid, y, pos_seq]
+
+    Returns:
+        test_users_degree: dict
+            {test_uid: degree_in_src_train}
+    """
+
+    # -----------------------------
+    # 1) src train에서 uid degree 계산
+    # -----------------------------
+    src_df = pd.read_csv(src_path, header=None)
+    src_df.columns = ["uid", "iid", "y"]
+
+    user_degree = Counter(src_df["uid"].tolist())
+
+    # -----------------------------
+    # 2) test에 등장하는 unique user 추출
+    # -----------------------------
+    test_df = pd.read_csv(test_path, header=None)
+    test_df.columns = ["meta_uid", "iid", "y", "pos_seq"]
+
+    test_users = test_df["meta_uid"].unique().tolist()
+
+    # -----------------------------
+    # 3) test user별 src degree 매핑
+    # -----------------------------
+    test_users_degree = {uid: user_degree.get(uid, 0) for uid in test_users}
+
+    return test_users_degree
 
 
 def mae_hist_by_score(y_true: np.ndarray, mae: np.ndarray, mae_bins=None):  # (N,) ground-truth score, e.g. 1~5  # (N,) |pred - y|
