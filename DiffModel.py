@@ -553,94 +553,6 @@ def diffusion_loss_fn_parallel(
             return model.task_lambda * task_loss + model.parallel["uniformity_loss"] * uni_loss
 
 
-# generation fun
-def p_sample(model, cond_emb, x, iid_emb, device, diff_id):  # ALM + task loss
-    # wrap for dpm_solver
-    classifier_scale_para = model.c_scale
-    dmp_sample_steps = model.sample_steps
-    num_steps = model.num_steps
-
-    model_kwargs = {
-        "cond_emb": cond_emb,
-        "cond_mask": torch.zeros(cond_emb.size()[0], device=device),
-        "diff_id": diff_id,  # DiffParallel.forword 처리 위해 diff id 인자 추가
-    }
-
-    model_fn = model_wrapper(
-        model,
-        noise_schedule,
-        is_cond_classifier=True,
-        classifier_scale=classifier_scale_para,
-        time_input_type="1",
-        total_N=num_steps,
-        model_kwargs=model_kwargs,
-    )
-
-    dpm_solver = DPM_Solver(model_fn, noise_schedule)  # 노이즈, 노이즈 임베딩으로부터 denoised feat 예측 모델. 내부에서 forward 호출
-
-    sample = dpm_solver.sample(  #  x_t-1 예측
-        x,
-        steps=dmp_sample_steps,
-        eps=1e-4,
-        adaptive_step_size=False,
-        fast_version=True,
-    )
-
-    return sample, iid_emb
-
-
-def p_sample_loop(model, start_emb, cond_emb, iid_input, device, diff_id):
-    cur_x, iid_emb_out = p_sample(model, cond_emb, start_emb, iid_input, device, diff_id)  # denoised embedding, item emb
-
-    return cur_x, iid_emb_out
-
-
-def p_sample_parallel(model, cond_emb, x, iid_emb, device, diff_id):
-    classifier_scale_para = model.c_scale
-    dmp_sample_steps = model.sample_steps
-    num_steps = model.num_steps
-
-    B = cond_emb.shape[1]
-    cond_mask = torch.zeros(B, device=device).int()
-
-    model_kwargs = {
-        "cond_emb": cond_emb.to(device),
-        "cond_mask": cond_mask,
-        "diff_id": diff_id,
-    }
-
-    model_fn = model_wrapper_hierarchical_cond(
-        model,
-        noise_schedule,
-        is_cond_classifier=True,
-        classifier_scale=classifier_scale_para,
-        time_input_type="1",
-        total_N=num_steps,
-        model_kwargs=model_kwargs,
-    )
-
-    dpm_solver = DPM_Solver(model_fn, noise_schedule)
-
-    sample = dpm_solver.sample(
-        x,
-        steps=dmp_sample_steps,
-        eps=1e-4,
-        adaptive_step_size=False,
-        fast_version=True,
-    )
-
-    return sample, iid_emb
-
-
-def p_sample_loop_parallel(model, start_emb, cond_emb, iid_input, device, diff_id):
-    cur_x, iid_emb_out = p_sample_parallel(model=model, cond_emb=cond_emb, x=start_emb, iid_emb=iid_input, device=device, diff_id=diff_id)
-    return cur_x, iid_emb_out
-
-
-import torch
-import torch.nn.functional as F
-
-
 def log_prediction_stats(name, pred, global_step, log_every=200):
     if global_step % log_every != 0:
         return
@@ -697,10 +609,6 @@ def log_embedding_stats(name, emb, global_step, log_every=200):
         print(f" std      | mean={std_mean:.4f}, std={std_std:.4f}")
         print(f" cosine   | mean={sim_mean:.4f}, std={sim_std:.4f}, min={sim_min:.4f}, max={sim_max:.4f}")
         print("")
-
-
-import torch
-import torch.nn.functional as F
 
 
 def uniformity_loss(z, t=2.0):
