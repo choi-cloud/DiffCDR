@@ -383,10 +383,10 @@ class MFBasedModel(torch.nn.Module):
             elif diff_model.parallel["set_aggr"] == "item":
                 tokens = base_tokens
 
-            degree_raw = diff_model.degree_by_uid[uid]
-            degree_emb = diff_model.degree_scale * diff_model.degree_encoder(degree_raw.float().unsqueeze(1))
-            degree_emb = degree_emb.unsqueeze(1)  # [B, 1, D]
-            tokens = torch.cat([tokens, degree_emb], dim=1)  # [B, N+1, D]
+            # degree_raw = diff_model.degree_by_uid[uid]
+            # degree_emb = diff_model.degree_scale * diff_model.degree_encoder(degree_raw.float().unsqueeze(1))
+            # degree_emb = degree_emb.unsqueeze(1)  # [B, 1, D]
+            # tokens = torch.cat([tokens, degree_emb], dim=1)  # [B, N+1, D]
 
             out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
             final_output = out[:, 0, :]  # (B, D)
