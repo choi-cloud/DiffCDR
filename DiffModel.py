@@ -469,9 +469,10 @@ def diffusion_loss_fn_parallel(
             base_tokens = torch.stack([final_output_m], dim=1)
 
         elif model.aggregation == "aggregation_ab2":
-            final_output_g, iid_emb = p_sample(model, start2, cond2, iid_emb, device, diff_id=0)
-            final_output_g_proj = model.linear_g(final_output_g)
-            final_output_g = model.ln_g(final_output_g_proj)
+            final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=0)
+            # final_output_g_proj = model.linear_g(final_output_g)
+            if model.parallel["batch_norm"]:
+                final_output_g = model.ln_g(final_output_g)
             base_tokens = torch.stack([final_output_g], dim=1)
 
         if model.parallel["set_aggr"] == "item":

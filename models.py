@@ -323,8 +323,11 @@ class MFBasedModel(torch.nn.Module):
                 base_tokens = torch.stack([final_output_m], dim=1)
 
             elif diff_model.aggregation == "aggregation_ab2":
-                final_output_g, iid_emb = p_sample(diff_model, start2, cond2, iid_emb, device, diff_id=0)
-                final_output_g = diff_model.ln_g(diff_model.linear_g(final_output_g))
+                final_output_g, iid_emb = p_sample(diff_model, cond2, iid_emb, device, diff_id=0)
+                if diff_model.parallel["batch_norm"]:
+                    # final_output_g, iid_emb = p_sample(diff_model, start1, cond1, iid_emb, device, diff_id=0)
+                    # final_output_g = diff_model.ln_g(diff_model.linear_m(final_output_g))
+                    final_output_g = diff_model.ln_m(final_output_g)
                 base_tokens = torch.stack([final_output_g], dim=1)
 
             if diff_model.parallel["set_aggr"] == "item":
