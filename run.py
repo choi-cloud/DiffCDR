@@ -471,7 +471,14 @@ class Run:
             zero_mask = two_hop_counts.squeeze(1) == 0
             user_emb[zero_mask] = user_feat[zero_mask]
 
-        return user_emb.to(self.device), None
+            # degree (log scale)
+            if use_target:
+                degree_by_uid = None
+            else:
+                degree_raw = user_deg.squeeze(1)
+                degree_by_uid = torch.log1p(degree_raw.float()).to(self.device)  # log(1 + degree)
+
+        return user_emb.to(self.device), degree_by_uid
 
     def get_model(self):
         if self.base_model == "MF":
@@ -931,10 +938,12 @@ class Run:
         src_graph = graph_train.get("src")
         tgt_graph = graph_train.get("tgt")
 
-        smooth_user_emb_src, _ = self.compute_user_graph_embeddings(model, diff_model, src_graph, use_target=False)
+        smooth_user_emb_src, degree_by_uid = self.compute_user_graph_embeddings(model, diff_model, src_graph, use_target=False)
         smooth_user_emb_tgt, _ = self.compute_user_graph_embeddings(model, diff_model, tgt_graph, use_target=True)
+
         diff_model.smooth_user_emb_src = smooth_user_emb_src
         diff_model.smooth_user_emb_tgt = smooth_user_emb_tgt
+        diff_model.degree_by_uid = degree_by_uid
 
         # [PRETRAIN] RQ-VAE pretraining if requested
         if self.rqvae_setting.get("pretrain_rq", False):

@@ -181,6 +181,7 @@ class DiffParallel(nn.Module):
         self.mask_rate = diff_mask_rate
         self.test_users_degree = None
         self.test_users_pop_group = None
+        self.degree_by_uid = None
         # -----------------------------------------------
 
         # Parallel setting
@@ -200,6 +201,8 @@ class DiffParallel(nn.Module):
         # time, condition, noised emb -> reverse 하는 3FC diffusion solver
         self.diff_models = nn.ModuleList()
         self.cond_emb_linear = nn.ModuleList()
+        self.degree_encoder = nn.Sequential(nn.Linear(1, input_dim), nn.SiLU(), nn.Linear(input_dim, input_dim), nn.LayerNorm(input_dim))
+        self.degree_scale = nn.Parameter(torch.tensor(0.1))
 
         if self.aggregation in ["aggregation", "aggregation_ab1"]:
             self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim)]))
@@ -532,6 +535,11 @@ def diffusion_loss_fn_parallel(
 
         elif model.parallel["set_aggr"] == "item":
             tokens = base_tokens
+
+        degree_raw = model.degree_by_uid[uid]
+        degree_emb = model.degree_scale * model.degree_encoder(degree_raw.float().unsqueeze(1))
+        degree_emb = degree_emb.unsqueeze(1)  # [B, 1, D]
+        tokens = torch.cat([tokens, degree_emb], dim=1)  # [B, N+1, D]
 
         out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
         final_output = out[:, 0, :]  # (B, D)
