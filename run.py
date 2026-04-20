@@ -533,6 +533,7 @@ class Run:
                 degree_all = []
 
                 test_users_degree = model[1].test_users_degree  # dict: {uid: degree}
+                test_users_pop_group = model[1].test_users_pop_group
 
                 for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
                     model[0].eval()
@@ -571,6 +572,11 @@ class Run:
 
                 df_sparsity_summary = mae_rmse_summary_by_sparsity(y_true=y_all, y_pred=pred_all, user_degree=degree_all, user_uid=uid_all, n_bins=5)
                 print(df_sparsity_summary)
+
+                df_pop_summary = mae_rmse_summary_by_pop_group(
+                    y_true=y_all, y_pred=pred_all, user_uid=uid_all, test_users_pop_group=test_users_pop_group
+                )
+                print(df_pop_summary)
 
             elif stage in ("test_ss"):
                 for X, y in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
@@ -1145,6 +1151,11 @@ class Run:
 
         print("num test users:", len(test_users_degree))
 
+        test_users_pop_group, user_pop_ratio, popular_items = get_test_users_pop_group(test_users_degree, self.src_path)
+
+        for group, users in test_users_pop_group.items():
+            print(group, len(users))
+
         print(f"\n소스 도메인 내 유저의 레이팅 스타일 정보 추출\n")
         cache_path = f"{self.stylecache_root}.pt"
         if os.path.exists(cache_path):
@@ -1217,6 +1228,7 @@ class Run:
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
             diff_model.test_users_degree = test_users_degree
+            diff_model.test_users_pop_group = test_users_pop_group
             self.Diff_Parallel(
                 model,
                 diff_model,

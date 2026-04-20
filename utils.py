@@ -10,6 +10,181 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import pandas as pd
 from collections import Counter
+from collections import defaultdict
+
+
+def mae_rmse_summary_by_pop_group(y_true, y_pred, user_uid, test_users_pop_group):
+    """
+    Args:
+        y_true: torch.Tensor or np.ndarray, shape [N]
+        y_pred: torch.Tensor or np.ndarray, shape [N]
+        user_uid: torch.Tensor or np.ndarray, shape [N]
+        test_users_pop_group: dict
+            {
+                "0.0~0.2": [uid1, uid2, ...],
+                "0.2~0.4": [...],
+                ...
+            }
+
+    Returns:
+        pd.DataFrame
+    """
+    if isinstance(y_true, torch.Tensor):
+        y_true = y_true.detach().cpu().numpy()
+    if isinstance(y_pred, torch.Tensor):
+        y_pred = y_pred.detach().cpu().numpy()
+    if isinstance(user_uid, torch.Tensor):
+        user_uid = user_uid.detach().cpu().numpy()
+
+    rows = []
+
+    for group_name, users in test_users_pop_group.items():
+        user_set = set(users)
+
+        mask = np.array([uid in user_set for uid in user_uid])
+
+        n_samples = int(mask.sum())
+        n_users = len(user_set)
+
+        if n_samples == 0:
+            rows.append(
+                {
+                    "group": group_name,
+                    "num_users": n_users,
+                    "num_samples": 0,
+                    "mae": None,
+                    "rmse": None,
+                }
+            )
+            continue
+
+        group_y_true = y_true[mask]
+        group_y_pred = y_pred[mask]
+
+        mae = np.mean(np.abs(group_y_pred - group_y_true))
+        rmse = np.sqrt(np.mean((group_y_pred - group_y_true) ** 2))
+
+        rows.append(
+            {
+                "group": group_name,
+                "num_users": n_users,
+                "num_samples": n_samples,
+                "mae": float(mae),
+                "rmse": float(rmse),
+            }
+        )
+
+    df = pd.DataFrame(rows)
+
+    # group 이름이 0.0~0.2, 0.2~0.4 형식일 때 순서 정렬
+    def group_order_key(x):
+        try:
+            return float(str(x).split("~")[0])
+        except:
+            return 999
+
+    df = df.sort_values(by="group", key=lambda col: col.map(group_order_key)).reset_index(drop=True)
+    return df
+
+
+def get_test_users_pop_group(test_users_degree, src_path, pop_percentile=80, bin_edges=None):
+    """
+    테스트 유저를 '인기 아이템 소비 비율' 기준으로 binning.
+
+    Args:
+        test_users_degree:
+            보통 {uid: degree} 형태를 가정.
+            만약 list/set이면 그 자체를 테스트 유저 집합으로 사용.
+        src_path:
+            uid, iid, y 형식의 csv 경로
+        pop_percentile:
+            상위 몇 퍼센트 아이템을 인기 아이템으로 볼지.
+            예: 80 -> item interaction count 기준 상위 20%를 인기 아이템으로 정의
+        bin_edges:
+            예: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+
+    Returns:
+        test_users_pop_group: dict
+            {
+                "0.0~0.2": [uid1, uid2, ...],
+                "0.2~0.4": [...],
+                ...
+            }
+
+        user_pop_ratio: dict
+            {uid: popular_item_ratio}
+
+        popular_items: set
+            인기 아이템 집합
+    """
+    if bin_edges is None:
+        bin_edges = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+
+    # -----------------------------
+    # 1. test user set 정리
+    # -----------------------------
+    if isinstance(test_users_degree, dict):
+        test_user_set = set(test_users_degree.keys())
+    else:
+        test_user_set = set(test_users_degree)
+
+    # -----------------------------
+    # 2. 데이터 로드
+    # -----------------------------
+    cols = ["uid", "iid", "y"]
+    data = pd.read_csv(src_path, header=None)
+    data.columns = cols
+
+    # -----------------------------
+    # 3. 아이템 popularity 계산
+    # -----------------------------
+    item_count = data["iid"].value_counts()
+    pop_threshold = np.percentile(item_count.values, pop_percentile)
+    popular_items = set(item_count[item_count >= pop_threshold].index.tolist())
+
+    # -----------------------------
+    # 4. 유저별 소비 아이템 목록 구성
+    # -----------------------------
+    user_items = defaultdict(list)
+    for row in data.itertuples(index=False):
+        uid = int(row.uid)
+        iid = int(row.iid)
+        if uid in test_user_set:
+            user_items[uid].append(iid)
+
+    # -----------------------------
+    # 5. 유저별 인기 아이템 소비 비율 계산
+    # -----------------------------
+    user_pop_ratio = {}
+    for uid in test_user_set:
+        items = user_items.get(uid, [])
+        if len(items) == 0:
+            user_pop_ratio[uid] = 0.0
+            continue
+
+        pop_cnt = sum(1 for iid in items if iid in popular_items)
+        ratio = pop_cnt / len(items)
+        user_pop_ratio[uid] = ratio
+
+    # -----------------------------
+    # 6. binning
+    #    [0.0,0.2), [0.2,0.4), ..., [0.8,1.0]
+    # -----------------------------
+    test_users_pop_group = {}
+    for i in range(len(bin_edges) - 1):
+        left = bin_edges[i]
+        right = bin_edges[i + 1]
+
+        if i == len(bin_edges) - 2:
+            group_name = f"{left:.1f}~{right:.1f}"
+            group_users = [uid for uid, ratio in user_pop_ratio.items() if left <= ratio <= right]
+        else:
+            group_name = f"{left:.1f}~{right:.1f}"
+            group_users = [uid for uid, ratio in user_pop_ratio.items() if left <= ratio < right]
+
+        test_users_pop_group[group_name] = group_users
+
+    return test_users_pop_group, user_pop_ratio, popular_items
 
 
 def mae_rmse_summary_by_sparsity(y_true, y_pred, user_degree, user_uid, n_bins=5):

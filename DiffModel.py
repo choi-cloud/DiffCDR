@@ -180,6 +180,7 @@ class DiffParallel(nn.Module):
         self.c_scale = c_scale
         self.mask_rate = diff_mask_rate
         self.test_users_degree = None
+        self.test_users_pop_group = None
         # -----------------------------------------------
 
         # Parallel setting
