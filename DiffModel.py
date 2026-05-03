@@ -433,6 +433,18 @@ def diffusion_loss_fn_parallel(
         if model.aggregation == "aggregation":
             final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
             final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=1)
+
+            print_debug_metrics(
+                step=model.global_step,
+                x_0_m=x_0_m,
+                x_0_g=x_0_g,
+                final_output_m=final_output_m,
+                final_output_g=final_output_g,
+                iid_emb=iid_emb,
+                y_input=y_input,
+                interval=200,
+            )
+
             # -------------------------
             # Raw
             # -------------------------
@@ -797,3 +809,73 @@ def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise"
         final_x0_pred = model(x_t, t0, cond_emb, cond_mask, diff_id=diff_id)
 
     return final_x0_pred, iid_emb
+
+
+@torch.no_grad()
+def print_debug_metrics(step, x_0_m, x_0_g, final_output_m, final_output_g, iid_emb, y_input, interval=200):
+    """
+    200 step마다:
+    - x_0_m / x_0_g 와 iid_emb로 예측한 MAE
+    - final_output_m / final_output_g 와 iid_emb로 예측한 MAE
+    - 배치 내 노드 간 cosine similarity 출력
+    """
+
+    if step % interval != 0:
+        return
+
+    y_true = y_input.squeeze().float()
+
+    # 혹시 iid_emb가 (B, 1, D)면 (B, D)로 정리
+    if iid_emb.dim() == 3:
+        iid_emb_ = iid_emb.squeeze(1)
+    else:
+        iid_emb_ = iid_emb
+
+    def pred_mae(user_emb, item_emb, y_true):
+        if user_emb.dim() == 3:
+            user_emb = user_emb[:, 0, :]  # diffusion output이 (B, token, D)인 경우
+
+        y_pred = torch.sum(user_emb * item_emb, dim=-1)
+        mae = torch.mean(torch.abs(y_pred - y_true))
+        return mae.item()
+
+    def batch_cos_sim(x):
+        if x.dim() == 3:
+            x = x[:, 0, :]
+
+        x = F.normalize(x, dim=-1)
+        sim = torch.matmul(x, x.t())  # (B, B)
+
+        B = sim.size(0)
+        if B <= 1:
+            return 0.0
+
+        # diagonal 제외 평균
+        mask = ~torch.eye(B, dtype=torch.bool, device=sim.device)
+        return sim[mask].mean().item()
+
+    # MAE
+    mae_x0_m = pred_mae(x_0_m, iid_emb_, y_true)
+    mae_x0_g = pred_mae(x_0_g, iid_emb_, y_true)
+
+    mae_final_m = pred_mae(final_output_m, iid_emb_, y_true)
+    mae_final_g = pred_mae(final_output_g, iid_emb_, y_true)
+
+    # batch node similarity
+    sim_x0_m = batch_cos_sim(x_0_m)
+    sim_x0_g = batch_cos_sim(x_0_g)
+
+    sim_final_m = batch_cos_sim(final_output_m)
+    sim_final_g = batch_cos_sim(final_output_g)
+
+    print(
+        f"[Step {step}] "
+        f"x0_m MAE: {mae_x0_m:.4f} | "
+        f"x0_g MAE: {mae_x0_g:.4f} | "
+        f"final_m MAE: {mae_final_m:.4f} | "
+        f"final_g MAE: {mae_final_g:.4f} || "
+        f"sim x0_m: {sim_x0_m:.4f} | "
+        f"sim x0_g: {sim_x0_g:.4f} | "
+        f"sim final_m: {sim_final_m:.4f} | "
+        f"sim final_g: {sim_final_g:.4f}"
+    )
