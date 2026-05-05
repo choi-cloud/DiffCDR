@@ -184,6 +184,9 @@ class DiffParallel(nn.Module):
         self.degree_by_uid = None
         # -----------------------------------------------
 
+        self.token_ln = nn.LayerNorm(input_dim)
+        self.query_ln = nn.LayerNorm(input_dim)
+
         # Parallel setting
         self.parallel = parallel
         self.aggregation = parallel.get("aggregation", "aggregation")  # 'aggregation', 'aggregation_ab1', 'aggregation_ab2'
@@ -253,15 +256,7 @@ class DiffParallel(nn.Module):
             self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
             self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
 
-    def forward(
-        self,
-        x,
-        t,
-        cond_emb,
-        cond_mask,
-        diff_id=0,
-        zero_cond=None,
-    ):
+    def forward(self, x, t, cond_emb, cond_mask, diff_id=0, zero_cond=None):
 
         for idx in range(self.num_layers):
             t_embedding = self.step_mlp(t)
@@ -553,7 +548,51 @@ def diffusion_loss_fn_parallel(
         # degree_emb = degree_emb.unsqueeze(1)  # [B, 1, D]
         # tokens = torch.cat([tokens, degree_emb], dim=1)  # [B, N+1, D]
 
-        out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+        # # step은 외부에서 넘기거나, 내부에서 카운트
+        # if model.global_step % 200 == 0:
+        #     # tokens: (B, T, D)
+        #     # 순서: mf, aggr, user_bias, item_bias
+
+        #     token_norm = tokens.norm(dim=-1)  # (B, T)
+
+        #     # 평균 norm (batch 평균)
+        #     mean_norm = token_norm.mean(dim=0)  # (T,)
+
+        #     print(f"\n[Step {model.global_step}] Token Norms:")
+        #     print(f"MF         : {mean_norm[0].item():.4f}")
+        #     print(f"AGGR       : {mean_norm[1].item():.4f}")
+        #     print(f"USER_BIAS  : {mean_norm[2].item():.4f}")
+        #     print(f"ITEM_BIAS  : {mean_norm[3].item():.4f}")
+
+        tokens = model.token_ln(tokens)
+        query = model.query_ln(iid_emb).unsqueeze(1)
+        out = model.attn_layer(tokens, query=query)
+
+        if model.global_step % 200 == 0:
+            Q = model.attn_layer.q(iid_emb.unsqueeze(1))  # (B, 1, D)
+            K = model.attn_layer.k(tokens)  # (B, T, D)
+
+            raw_score = torch.matmul(Q, K.transpose(-2, -1)) * model.attn_layer.scale
+            raw_score = raw_score[:, 0, :]  # (B, T)
+
+            mean_score = raw_score.mean(dim=0)
+            max_score = raw_score.max(dim=0).values
+            min_score = raw_score.min(dim=0).values
+
+            names = ["MF", "AGGR", "USER_BIAS", "ITEM_BIAS"]
+
+            print(f"\n[Step {model.global_step}] Attention Raw Scores (mean / min / max)")
+            for i, name in enumerate(names):
+                print(f"{name:10s}: {mean_score[i].item():.4f} / {min_score[i].item():.4f} / {max_score[i].item():.4f}")
+
+            attn = torch.softmax(raw_score, dim=-1)
+            mean_attn = attn.mean(dim=0)
+
+            print(f"\n[Step {model.global_step}] Attention Weights Mean")
+            for i, name in enumerate(names):
+                print(f"{name:10s}: {mean_attn[i].item():.6f}")
+
+        # out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
         final_output = out[:, 0, :]  # (B, D)
 
         uni_loss = uniformity_loss(final_output, t=2.0)  ###############0414 uniformity 실험을 위해 추가

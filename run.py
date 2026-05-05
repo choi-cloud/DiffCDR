@@ -538,6 +538,7 @@ class Run:
                 pred_all = []
                 uid_all = []
                 degree_all = []
+                attn_rows = []
 
                 test_users_degree = model[1].test_users_degree  # dict: {uid: degree}
                 test_users_pop_group = model[1].test_users_pop_group
@@ -546,7 +547,7 @@ class Run:
                     model[0].eval()
                     model[1].eval()
 
-                    pred = model[0](X, stage, self.device, diff_model=model[1], style_src=style_src)
+                    pred, attn_score = model[0](X, stage, self.device, diff_model=model[1], style_src=style_src)
 
                     meta_uid = X[0]  # [B]
                     y_input = X[-1]  # [B, 1] or [B]
@@ -568,6 +569,33 @@ class Run:
                     batch_degree = torch.tensor([test_users_degree.get(uid.item(), 0) for uid in meta_uid.detach().cpu()], dtype=torch.long)
                     degree_all.append(batch_degree)
 
+                    # # uid, iid 위치는 네 X 구조에 맞게 조정
+                    # uid = X[0]
+                    # iid = X[1]
+
+                    # uid_np = uid.detach().cpu().view(-1).numpy()
+                    # iid_np = iid.detach().cpu().view(-1).numpy()
+
+                    # # attn_score: (B, 1, T)면 (B, T)로 변경
+                    # if attn_score.dim() == 3:
+                    #     attn_score = attn_score[:, 0, :]
+
+                    # attn_np = attn_score.detach().cpu().numpy()  # (B, T)
+
+                    # B, T = attn_np.shape
+
+                    # batch_data = {
+                    #     "uid": uid_np,
+                    #     "iid": iid_np,
+                    #     "target": y_input.squeeze(1).detach().cpu().numpy(),
+                    #     "pred": pred.detach().cpu().view(-1).numpy(),
+                    # }
+
+                    # for t in range(T):
+                    #     batch_data[f"attn_{t}"] = attn_np[:, t]
+
+                    # attn_rows.append(pd.DataFrame(batch_data))
+
                 y_all = torch.cat(y_all)
                 mae_all = torch.cat(mae_all)
                 pred_all = torch.cat(pred_all)
@@ -584,6 +612,12 @@ class Run:
                     y_true=y_all, y_pred=pred_all, user_uid=uid_all, test_users_pop_group=test_users_pop_group
                 )
                 print(df_pop_summary)
+
+                # 전체 배치 concat
+                # attn_df = pd.concat(attn_rows, ignore_index=True)
+                # attn_df.index.name = "sample_id"
+
+                # attn_df.to_csv("attention_scores_test_diff.csv")
 
             elif stage in ("test_ss"):
                 for X, y in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):

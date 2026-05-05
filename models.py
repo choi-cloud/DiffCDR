@@ -388,11 +388,16 @@ class MFBasedModel(torch.nn.Module):
             # degree_emb = degree_emb.unsqueeze(1)  # [B, 1, D]
             # tokens = torch.cat([tokens, degree_emb], dim=1)  # [B, N+1, D]
 
-            out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
-            final_output = out[:, 0, :]  # (B, D)
+            tokens = diff_model.token_ln(tokens)
+            query = diff_model.query_ln(iid_emb).unsqueeze(1)
+            out, attn = diff_model.attn_layer(tokens, query=query, return_attn=True)
+
+            final_output = out[:, 0, :]
+            attn_score = attn[:, 0, :]  # (B, T)
+
             y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
 
-            return y_pred
+            return y_pred, attn_score
 
     def _fetch_vbge_user_embedding(self, diff_model, tgt_uid, use_target=False):
 

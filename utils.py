@@ -648,24 +648,26 @@ class AttentionLayer(nn.Module):
         self.v = nn.Linear(in_dim, out_dim, bias=False)
         self.scale = in_dim**-0.5
 
-    def forward(self, x, mask=None, query=None):
-        """
-        x: (B, T, D)
-        mask: (B, T) or None
-        """
+    def forward(self, x, mask=None, query=None, return_attn=False):
         if query is not None:
             Q = self.q(query)
         else:
             Q = self.q(x)
+
         K = self.k(x)
         V = self.v(x)
 
-        score = torch.matmul(Q, K.transpose(-2, -1)) * self.scale  # (B, T, T)
+        score = torch.matmul(Q, K.transpose(-2, -1)) * self.scale  # (B, 1, T) or (B, T, T)
+
         if mask is not None:
             score = score.masked_fill(mask[:, None, :] == 0, -1e9)
 
-        attn = F.softmax(score, dim=-1)
-        out = torch.matmul(attn, V)  # (B, T, D)
+        attn = F.softmax(score, dim=-1)  # ⭐ 이게 토큰별 attention score
+
+        out = torch.matmul(attn, V)
+
+        if return_attn:
+            return out, attn
         return out
 
 
