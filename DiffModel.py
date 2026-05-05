@@ -184,6 +184,9 @@ class DiffParallel(nn.Module):
         self.degree_by_uid = None
         # -----------------------------------------------
 
+        self.proj_m = nn.Linear(input_dim, input_dim)
+        self.proj_g = nn.Linear(input_dim, input_dim)
+
         self.token_ln = nn.LayerNorm(input_dim)
         self.query_ln = nn.LayerNorm(input_dim)
 
@@ -428,6 +431,9 @@ def diffusion_loss_fn_parallel(
         if model.aggregation == "aggregation":
             final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
             final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=1)
+
+            final_output_m = model.proj_m(final_output_m)
+            final_output_g = model.proj_g(final_output_g)
 
             print_debug_metrics(
                 step=model.global_step,

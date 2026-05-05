@@ -307,6 +307,9 @@ class MFBasedModel(torch.nn.Module):
                 final_output_m, iid_emb = p_sample(diff_model, cond1, iid_emb, device, diff_id=0)
                 final_output_g, iid_emb = p_sample(diff_model, cond2, iid_emb, device, diff_id=1)
 
+                final_output_m = diff_model.proj_m(final_output_m)
+                final_output_g = diff_model.proj_g(final_output_g)
+
                 # final_output_m = diff_model.ln_m(diff_model.linear_m(final_output_m))
                 # final_output_g = diff_model.ln_g(diff_model.linear_g(final_output_g))
                 if diff_model.parallel["batch_norm"]:
@@ -411,7 +414,14 @@ class MFBasedModel(torch.nn.Module):
 
             y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
 
-            return y_pred, attn_score
+            # 🔥 cosine similarity 계산
+            sim_mf = F.cosine_similarity(src_uid_emb1, iid_emb, dim=-1)  # (B,)
+            sim_aggr = F.cosine_similarity(src_uid_emb2, iid_emb, dim=-1)  # (B,)
+
+            # 필요하면 stack해서 넘기기
+            sim_score = torch.stack([sim_mf, sim_aggr], dim=1)  # (B, 2)
+
+            return y_pred, attn_score, sim_score
 
     def _fetch_vbge_user_embedding(self, diff_model, tgt_uid, use_target=False):
 

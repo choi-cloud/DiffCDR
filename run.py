@@ -539,6 +539,8 @@ class Run:
                 uid_all = []
                 degree_all = []
                 attn_rows = []
+                sim_mf_list = []
+                attn_list = []
 
                 test_users_degree = model[1].test_users_degree  # dict: {uid: degree}
                 test_users_pop_group = model[1].test_users_pop_group
@@ -547,7 +549,7 @@ class Run:
                     model[0].eval()
                     model[1].eval()
 
-                    pred, attn_score = model[0](X, stage, self.device, diff_model=model[1], style_src=style_src)
+                    pred, attn_score, sim_score = model[0](X, stage, self.device, diff_model=model[1], style_src=style_src)
 
                     meta_uid = X[0]  # [B]
                     y_input = X[-1]  # [B, 1] or [B]
@@ -568,6 +570,13 @@ class Run:
 
                     batch_degree = torch.tensor([test_users_degree.get(uid.item(), 0) for uid in meta_uid.detach().cpu()], dtype=torch.long)
                     degree_all.append(batch_degree)
+
+                    # 🔥 MF similarity만 사용
+                    sim_mf = sim_score[:, 0]  # (B,)
+                    sim_mf_list.extend(sim_mf.detach().cpu().tolist())
+
+                    # attn 전체 저장 (B, T)
+                    attn_list.append(attn_score.detach().cpu())
 
                     # # uid, iid 위치는 네 X 구조에 맞게 조정
                     # uid = X[0]
@@ -618,6 +627,34 @@ class Run:
                 # attn_df.index.name = "sample_id"
 
                 # attn_df.to_csv("attention_scores_test_diff.csv")
+
+                attn_all = torch.cat(attn_list, dim=0)  # (N, T)
+                sim_all = torch.tensor(sim_mf_list)  # (N,)
+
+                # 예: 10개 구간
+                num_bins = 10
+                bins = torch.linspace(sim_all.min(), sim_all.max(), steps=num_bins + 1)
+
+                bin_attn_mean = []
+
+                for i in range(num_bins):
+                    mask = (sim_all >= bins[i]) & (sim_all < bins[i + 1])
+
+                    if mask.sum() == 0:
+                        continue
+
+                    attn_mean = attn_all[mask].mean(dim=0)  # (T,)
+                    bin_attn_mean.append(attn_mean)
+
+                bin_attn_mean = torch.stack(bin_attn_mean)  # (num_bins, T)
+
+                names = ["MF", "AGGR", "USER_BIAS", "ITEM_BIAS"]
+
+                print("\n=== Bin-wise Attention ===")
+                for i in range(len(bin_attn_mean)):
+                    print(f"\nBin {i} (sim range: {bins[i]:.3f} ~ {bins[i+1]:.3f})")
+                    for t, name in enumerate(names):
+                        print(f"{name:10s}: {bin_attn_mean[i][t].item():.4f}")
 
             elif stage in ("test_ss"):
                 for X, y in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
