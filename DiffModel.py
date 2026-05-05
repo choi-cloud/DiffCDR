@@ -570,6 +570,7 @@ def diffusion_loss_fn_parallel(
             tokens_normed = F.normalize(tokens, dim=-1)  # cosine용
 
             names = ["MF", "AGGR", "USER_BIAS", "ITEM_BIAS"]
+            # names = ["MF", "AGGR"]
 
             print(f"\n[Step {model.global_step}] Intra-batch Token Similarity")
 
@@ -607,6 +608,7 @@ def diffusion_loss_fn_parallel(
             min_score = raw_score.min(dim=0).values
 
             names = ["MF", "AGGR", "USER_BIAS", "ITEM_BIAS"]
+            # names = ["MF", "AGGR"]
 
             print(f"\n[Step {model.global_step}] Attention Raw Scores (mean / min / max)")
             for i, name in enumerate(names):
