@@ -500,26 +500,48 @@ def diffusion_loss_fn_parallel(
             tokens = torch.cat([base_tokens, item_style_tok.unsqueeze(1)], dim=1)
 
         elif model.parallel["set_aggr"] == "item_iu":
-            uid = uid.long()  # (B,)
+            uid = uid.long()
             iid = iid.squeeze(1)
 
-            style_src = style_src.to(base_tokens.device)
-            style_u = style_src[uid][:, :2]  # (B, F)
+            style_src = style_src.to(start1.device)
+            style_u = style_src[uid][:, :2].float()  # (B, 2)
+
+            # 🔥 batch-wise normalization (feature-wise)
+            mean_u = style_u.mean(dim=0, keepdim=True)
+            std_u = style_u.std(dim=0, keepdim=True).clamp_min(1e-6)
+            style_u = (style_u - mean_u) / std_u
 
             if model.parallel["bias_mapping"] == "user":
                 style_u = model.user_style_mapper(style_u)
-                mapping_loss = F.mse_loss(style_u, model.style_tgt_user[uid, :2])
+
+                style_tgt_u = model.style_tgt_user.to(start1.device)
+                style_u_tgt = style_tgt_u[uid][:, :2].float()
+
+                # 🔥 target도 batch-wise feature normalization
+                mean_tgt_u = style_u_tgt.mean(dim=0, keepdim=True)
+                std_tgt_u = style_u_tgt.std(dim=0, keepdim=True).clamp_min(1e-6)
+                style_u_tgt = (style_u_tgt - mean_tgt_u) / std_tgt_u
+
+                mapping_loss = F.mse_loss(style_u, style_u_tgt)
+
                 style_u = style_u.detach()
+            style_tok = model.style_encoder(style_u)
+            style_tok = model.style_ln(style_tok)
+            style_tok_u = model.style_scale * style_tok
 
-            style_tok = model.style_encoder(style_u)  # (B, D)
-            style_tok = model.style_ln(style_tok)  # (B, D)
-            style_tok_u = model.style_scale * style_tok  # (B, D)
+            # --------------------------
 
-            style_tgt_item = model.style_tgt_item.to(base_tokens.device)  # [I_total, F_item]
-            style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
-            item_style_tok = model.item_style_encoder(style_i)  # (B, D)
-            item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
-            item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
+            style_tgt_item = model.style_tgt_item.to(start1.device)
+            style_i = style_tgt_item[iid][:, :2].float()  # (B, 2)
+
+            # 🔥 batch-wise normalization
+            mean_i = style_i.mean(dim=0, keepdim=True)
+            std_i = style_i.std(dim=0, keepdim=True).clamp_min(1e-6)
+            style_i = (style_i - mean_i) / std_i
+
+            item_style_tok = model.item_style_encoder(style_i)
+            item_style_tok = model.item_style_ln(item_style_tok)
+            item_style_tok = model.item_style_scale * item_style_tok
 
             tokens = torch.cat([base_tokens, style_tok_u.unsqueeze(1), item_style_tok.unsqueeze(1)], dim=1)
 
@@ -543,26 +565,31 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_aggr"] == "item":
             tokens = base_tokens
 
-        # degree_raw = model.degree_by_uid[uid]
-        # degree_emb = model.degree_scale * model.degree_encoder(degree_raw.float().unsqueeze(1))
-        # degree_emb = degree_emb.unsqueeze(1)  # [B, 1, D]
-        # tokens = torch.cat([tokens, degree_emb], dim=1)  # [B, N+1, D]
+        if model.global_step % 200 == 0:
+            # tokens: (B, T, D)
+            tokens_normed = F.normalize(tokens, dim=-1)  # cosine용
 
-        # # step은 외부에서 넘기거나, 내부에서 카운트
-        # if model.global_step % 200 == 0:
-        #     # tokens: (B, T, D)
-        #     # 순서: mf, aggr, user_bias, item_bias
+            names = ["MF", "AGGR", "USER_BIAS", "ITEM_BIAS"]
 
-        #     token_norm = tokens.norm(dim=-1)  # (B, T)
+            print(f"\n[Step {model.global_step}] Intra-batch Token Similarity")
 
-        #     # 평균 norm (batch 평균)
-        #     mean_norm = token_norm.mean(dim=0)  # (T,)
+            for t in range(tokens.shape[1]):
+                tok = tokens_normed[:, t, :]  # (B, D)
 
-        #     print(f"\n[Step {model.global_step}] Token Norms:")
-        #     print(f"MF         : {mean_norm[0].item():.4f}")
-        #     print(f"AGGR       : {mean_norm[1].item():.4f}")
-        #     print(f"USER_BIAS  : {mean_norm[2].item():.4f}")
-        #     print(f"ITEM_BIAS  : {mean_norm[3].item():.4f}")
+                # (B, B) similarity matrix
+                sim = torch.matmul(tok, tok.t())
+
+                # 자기 자신 제외
+                B = sim.size(0)
+                mask = ~torch.eye(B, dtype=torch.bool, device=sim.device)
+                sim_offdiag = sim[mask]
+
+                print(
+                    f"{names[t]:10s}: mean={sim_offdiag.mean().item():.4f}, "
+                    f"std={sim_offdiag.std().item():.4f}, "
+                    f"max={sim_offdiag.max().item():.4f}, "
+                    f"min={sim_offdiag.min().item():.4f}"
+                )
 
         tokens = model.token_ln(tokens)
         query = model.query_ln(iid_emb).unsqueeze(1)

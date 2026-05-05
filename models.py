@@ -344,24 +344,38 @@ class MFBasedModel(torch.nn.Module):
                 tokens = torch.cat([base_tokens, item_style_tok.unsqueeze(1)], dim=1)
 
             elif diff_model.parallel["set_aggr"] == "item_iu":
-                uid = tgt_uid.long()  # (B,)
+                uid = tgt_uid.long()
                 iid = iid_input.squeeze(1)
+
                 style_src = style_src.to(start1.device)
-                style_u = style_src[uid][:, :2]  # (B, F)
+                style_u = style_src[uid][:, :2].float()  # (B, 2)
+
+                # 🔥 batch-wise normalization (feature-wise)
+                mean_u = style_u.mean(dim=0, keepdim=True)
+                std_u = style_u.std(dim=0, keepdim=True).clamp_min(1e-6)
+                style_u = (style_u - mean_u) / std_u
 
                 if diff_model.parallel["bias_mapping"] == "user":
                     style_u = diff_model.user_style_mapper(style_u)
                     style_u = style_u.detach()
 
-                style_tok = diff_model.style_encoder(style_u)  # (B, D)
-                style_tok = diff_model.style_ln(style_tok)  # (B, D)
-                style_tok_u = diff_model.style_scale * style_tok  # (B, D)
+                style_tok = diff_model.style_encoder(style_u)
+                style_tok = diff_model.style_ln(style_tok)
+                style_tok_u = diff_model.style_scale * style_tok
 
-                style_tgt_item = diff_model.style_tgt_item.to(start1.device)  # [I_total, F_item]
-                style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
-                item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
-                item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
-                item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
+                # --------------------------
+
+                style_tgt_item = diff_model.style_tgt_item.to(start1.device)
+                style_i = style_tgt_item[iid][:, :2].float()  # (B, 2)
+
+                # 🔥 batch-wise normalization
+                mean_i = style_i.mean(dim=0, keepdim=True)
+                std_i = style_i.std(dim=0, keepdim=True).clamp_min(1e-6)
+                style_i = (style_i - mean_i) / std_i
+
+                item_style_tok = diff_model.item_style_encoder(style_i)
+                item_style_tok = diff_model.item_style_ln(item_style_tok)
+                item_style_tok = diff_model.item_style_scale * item_style_tok
 
                 tokens = torch.cat([base_tokens, style_tok_u.unsqueeze(1), item_style_tok.unsqueeze(1)], dim=1)
 
