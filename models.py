@@ -83,7 +83,7 @@ class MFBasedModel(torch.nn.Module):
     def clear_graph_cache(self):
         self.graph_emb_cache = {}
 
-    def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False, item_cond=False, style_src=None):
+    def forward(self, x, stage, device, diff_model=None, ss_model=None, la_model=None, is_task=False, item_cond=False, style_src=None, ep=None,):
         if stage == "train_src":
             emb, uni_loss = self.src_model.forward(x, return_loss=True)  # [B, 2, d]
 
@@ -266,6 +266,7 @@ class MFBasedModel(torch.nn.Module):
                     iid=iid_input,
                     Q_emb1=quantized1,
                     Q_emb2=quantized2,
+                    ep=ep,
                 )
                 return task_loss, uni_loss
 
@@ -287,8 +288,12 @@ class MFBasedModel(torch.nn.Module):
                 quantized1, all_level_vectors1, _ = diff_model.rq_mf(cond_emb1)  # [L, B, D]
                 quantized2, all_level_vectors2, _ = diff_model.rq_aggr(cond_emb2)
 
-                cond1, cond2 = all_level_vectors1, all_level_vectors2
                 p_sample = Diff.p_sample_loop_x0_solver
+
+                if diff_model.rqvae["rq_exp"] != 'same': 
+                    cond1, cond2 = all_level_vectors1, all_level_vectors2
+                else:
+                    cond1, cond2 = quantized1, quantized2
 
             else:
                 cond1, cond2 = src_uid_emb1, src_uid_emb2
@@ -304,8 +309,8 @@ class MFBasedModel(torch.nn.Module):
                 iid_emb = diff_model.ln_iid(iid_emb)
 
             if diff_model.aggregation == "aggregation":
-                final_output_m, iid_emb = p_sample(diff_model, cond1, iid_emb, device, diff_id=0)
-                final_output_g, iid_emb = p_sample(diff_model, cond2, iid_emb, device, diff_id=1)
+                final_output_m, iid_emb = p_sample(diff_model, start1, cond1, iid_emb, device, diff_id=0)
+                final_output_g, iid_emb = p_sample(diff_model, start2, cond2, iid_emb, device, diff_id=1)
 
                 final_output_m = diff_model.proj_m(final_output_m)
                 final_output_g = diff_model.proj_g(final_output_g)
@@ -318,7 +323,7 @@ class MFBasedModel(torch.nn.Module):
                 base_tokens = torch.stack([final_output_m, final_output_g], dim=1)
 
             elif diff_model.aggregation == "aggregation_ab1":
-                final_output_m, iid_emb = p_sample(diff_model, cond1, iid_emb, device, diff_id=0)
+                final_output_m, iid_emb = p_sample(diff_model, start1, cond1, iid_emb, device, diff_id=0)
                 if diff_model.parallel["batch_norm"]:
                     # final_output_m, iid_emb = p_sample(diff_model, start1, cond1, iid_emb, device, diff_id=0)
                     # final_output_m = diff_model.ln_m(diff_model.linear_m(final_output_m))
@@ -326,7 +331,7 @@ class MFBasedModel(torch.nn.Module):
                 base_tokens = torch.stack([final_output_m], dim=1)
 
             elif diff_model.aggregation == "aggregation_ab2":
-                final_output_g, iid_emb = p_sample(diff_model, cond2, iid_emb, device, diff_id=0)
+                final_output_g, iid_emb = p_sample(diff_model, start2, cond2, iid_emb, device, diff_id=0)
                 if diff_model.parallel["batch_norm"]:
                     # final_output_g, iid_emb = p_sample(diff_model, start1, cond1, iid_emb, device, diff_id=0)
                     # final_output_g = diff_model.ln_g(diff_model.linear_m(final_output_g))

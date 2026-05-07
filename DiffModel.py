@@ -8,6 +8,7 @@ from dpm_solver_pytorch import model_wrapper, model_wrapper_hierarchical_cond, N
 from utils import AttentionLayer, SimilarityProjector
 
 from rqvae import ResidualQuantizer
+import matplotlib.pyplot as plt
 
 noise_schedule = NoiseScheduleVP(schedule="linear")
 
@@ -361,6 +362,7 @@ def diffusion_loss_fn_parallel(
     iid=None,
     Q_emb1=None,
     Q_emb2=None,
+    ep=None,
 ):
 
     num_steps = model.num_steps
@@ -389,11 +391,13 @@ def diffusion_loss_fn_parallel(
         cond_mask2 = 1 * (torch.rand(cond_emb2.shape[0], device=device) <= mask_rate)
         cond_mask2 = 1 - cond_mask2.int()
 
-        if model.rqvae["RQVAE"] == True and q_embs1 is not None:
+        if model.rqvae["RQVAE"] == True and model.rqvae["rq_exp"] != 'same':
             ns = NoiseScheduleVP(schedule="linear")
             t_cont = t.squeeze(-1).float() / model.num_steps
-            c1 = hierarchical_cond_from_levels(q_embs1, t_cont, ns)
-            c2 = hierarchical_cond_from_levels(q_embs2, t_cont, ns) if q_embs2 is not None else cond_emb2
+            c1 = hierarchical_cond_from_levels(q_embs1, t_cont, ns, rq_exp=model.rqvae["rq_exp"], rq_div=model.rqvae["rq_div"], rq_accu=model.rqvae["rq_accu"])
+            c2 = hierarchical_cond_from_levels(q_embs2, t_cont, ns, rq_exp=model.rqvae["rq_exp"], rq_div=model.rqvae["rq_div"], rq_accu=model.rqvae["rq_accu"]) if q_embs2 is not None else cond_emb2
+        elif model.rqvae["RQVAE"] == True and model.rqvae["rq_exp"] == 'same': 
+            c1, c2  = Q_emb1, Q_emb2 # 전체 양자화 결과만 사용 (e1+e2+e3+e4)
         else:
             c1, c2 = cond_emb1, cond_emb2
 
@@ -416,8 +420,11 @@ def diffusion_loss_fn_parallel(
         elif model.rqvae["start_point"] == "noise":
             start1, start2 = torch.randn_like(cond_emb1), torch.randn_like(cond_emb2)
 
-        if model.rqvae["RQVAE"] == True:
+        if model.rqvae["RQVAE"] == True and model.rqvae["rq_exp"] != "same":
             cond1, cond2 = q_embs1, q_embs2
+            p_sample = p_sample_loop_x0_solver
+        elif  model.rqvae["RQVAE"] == True and model.rqvae["rq_exp"] == "same":
+            cond1, cond2 = Q_emb1, Q_emb2
             p_sample = p_sample_loop_x0_solver
         else:
             cond1, cond2 = cond_emb1, cond_emb2
@@ -429,8 +436,8 @@ def diffusion_loss_fn_parallel(
         # log_embedding_stats("item_norm", iid_emb, model.global_step)
 
         if model.aggregation == "aggregation":
-            final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
-            final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=1)
+            final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0)
+            final_output_g, iid_emb = p_sample(model, start2, cond2, iid_emb, device, diff_id=1)
 
             final_output_m = model.proj_m(final_output_m)
             final_output_g = model.proj_g(final_output_g)
@@ -478,14 +485,14 @@ def diffusion_loss_fn_parallel(
 
         elif model.aggregation == "aggregation_ab1":
             # final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0)
-            final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
+            final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0)
             # final_output_m_proj = model.linear_m(final_output_m)
             if model.parallel["batch_norm"]:
                 final_output_m = model.ln_m(final_output_m)
             base_tokens = torch.stack([final_output_m], dim=1)
 
         elif model.aggregation == "aggregation_ab2":
-            final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=0)
+            final_output_g, iid_emb = p_sample(model, start2, cond2, iid_emb, device, diff_id=0)
             # final_output_g_proj = model.linear_g(final_output_g)
             if model.parallel["batch_norm"]:
                 final_output_g = model.ln_g(final_output_g)
@@ -571,61 +578,61 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_aggr"] == "item":
             tokens = base_tokens
 
-        if model.global_step % 200 == 0:
-            # tokens: (B, T, D)
-            tokens_normed = F.normalize(tokens, dim=-1)  # cosine용
+        # if model.global_step % 200 == 0:
+        #     # tokens: (B, T, D)
+        #     tokens_normed = F.normalize(tokens, dim=-1)  # cosine용
 
-            names = ["MF", "AGGR", "USER_BIAS", "ITEM_BIAS"]
-            # names = ["MF", "AGGR"]
+        #     names = ["MF", "AGGR", "USER_BIAS", "ITEM_BIAS"]
+        #     # names = ["MF", "AGGR"]
 
-            print(f"\n[Step {model.global_step}] Intra-batch Token Similarity")
+        #     print(f"\n[Step {model.global_step}] Intra-batch Token Similarity")
 
-            for t in range(tokens.shape[1]):
-                tok = tokens_normed[:, t, :]  # (B, D)
+        #     for t in range(tokens.shape[1]):
+        #         tok = tokens_normed[:, t, :]  # (B, D)
 
-                # (B, B) similarity matrix
-                sim = torch.matmul(tok, tok.t())
+        #         # (B, B) similarity matrix
+        #         sim = torch.matmul(tok, tok.t())
 
-                # 자기 자신 제외
-                B = sim.size(0)
-                mask = ~torch.eye(B, dtype=torch.bool, device=sim.device)
-                sim_offdiag = sim[mask]
+        #         # 자기 자신 제외
+        #         B = sim.size(0)
+        #         mask = ~torch.eye(B, dtype=torch.bool, device=sim.device)
+        #         sim_offdiag = sim[mask]
 
-                print(
-                    f"{names[t]:10s}: mean={sim_offdiag.mean().item():.4f}, "
-                    f"std={sim_offdiag.std().item():.4f}, "
-                    f"max={sim_offdiag.max().item():.4f}, "
-                    f"min={sim_offdiag.min().item():.4f}"
-                )
+        #         print(
+        #             f"{names[t]:10s}: mean={sim_offdiag.mean().item():.4f}, "
+        #             f"std={sim_offdiag.std().item():.4f}, "
+        #             f"max={sim_offdiag.max().item():.4f}, "
+        #             f"min={sim_offdiag.min().item():.4f}"
+        #         )
 
         tokens = model.token_ln(tokens)
         query = model.query_ln(iid_emb).unsqueeze(1)
         out = model.attn_layer(tokens, query=query)
 
-        if model.global_step % 200 == 0:
-            Q = model.attn_layer.q(iid_emb.unsqueeze(1))  # (B, 1, D)
-            K = model.attn_layer.k(tokens)  # (B, T, D)
+        # if model.global_step % 200 == 0:
+        #     Q = model.attn_layer.q(iid_emb.unsqueeze(1))  # (B, 1, D)
+        #     K = model.attn_layer.k(tokens)  # (B, T, D)
 
-            raw_score = torch.matmul(Q, K.transpose(-2, -1)) * model.attn_layer.scale
-            raw_score = raw_score[:, 0, :]  # (B, T)
+        #     raw_score = torch.matmul(Q, K.transpose(-2, -1)) * model.attn_layer.scale
+        #     raw_score = raw_score[:, 0, :]  # (B, T)
 
-            mean_score = raw_score.mean(dim=0)
-            max_score = raw_score.max(dim=0).values
-            min_score = raw_score.min(dim=0).values
+        #     mean_score = raw_score.mean(dim=0)
+        #     max_score = raw_score.max(dim=0).values
+        #     min_score = raw_score.min(dim=0).values
 
-            names = ["MF", "AGGR", "USER_BIAS", "ITEM_BIAS"]
-            # names = ["MF", "AGGR"]
+        #     names = ["MF", "AGGR", "USER_BIAS", "ITEM_BIAS"]
+        #     # names = ["MF", "AGGR"]
 
-            print(f"\n[Step {model.global_step}] Attention Raw Scores (mean / min / max)")
-            for i, name in enumerate(names):
-                print(f"{name:10s}: {mean_score[i].item():.4f} / {min_score[i].item():.4f} / {max_score[i].item():.4f}")
+        #     print(f"\n[Step {model.global_step}] Attention Raw Scores (mean / min / max)")
+        #     for i, name in enumerate(names):
+        #         print(f"{name:10s}: {mean_score[i].item():.4f} / {min_score[i].item():.4f} / {max_score[i].item():.4f}")
 
-            attn = torch.softmax(raw_score, dim=-1)
-            mean_attn = attn.mean(dim=0)
+        #     attn = torch.softmax(raw_score, dim=-1)
+        #     mean_attn = attn.mean(dim=0)
 
-            print(f"\n[Step {model.global_step}] Attention Weights Mean")
-            for i, name in enumerate(names):
-                print(f"{name:10s}: {mean_attn[i].item():.6f}")
+        #     print(f"\n[Step {model.global_step}] Attention Weights Mean")
+        #     for i, name in enumerate(names):
+        #         print(f"{name:10s}: {mean_attn[i].item():.6f}")
 
         # out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
         final_output = out[:, 0, :]  # (B, D)
@@ -806,9 +813,17 @@ def make_ddim_timesteps(num_steps, sample_steps, device):
 
     return step_indices
 
+def cosine(a, b):
+    return F.cosine_similarity(a, b, dim=-1).mean().detach().cpu().item() # 배치 평균
+
+def mae_batch(a, b):
+    return (a - b).abs().mean().detach().cpu().item()  # L1
+
+def l2_batch(a, b):
+    return (a - b).pow(2).sum(dim=-1).sqrt().mean().detach().cpu().item()  # L2
 
 @torch.no_grad()
-def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise", sample_steps=20, eta=0.0, diff_id=0):
+def p_sample_loop_x0_solver(model, start_emb, cond_emb, iid_emb, device, sample_steps=20, eta=0.0, diff_id=0):
     """
     solver-style sampling for x0-prediction model
 
@@ -823,56 +838,52 @@ def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise"
         0.0 -> deterministic DDIM / ODE-like
         >0  -> stochastic DDIM
     """
-    if model.rqvae["RQVAE"]:  # cond_emb:  [L, B, D]
-        q_embs = cond_emb  # [L, B, D] 원본 보존
-        x_init = cond_emb[0]  # [B, D]
-    else:  # cond_emb: [B, D]
-        x_init = cond_emb
 
-    batch_size = x_init.shape[0]
+    if model.rqvae["RQVAE"] and model.rqvae["rq_exp"] != 'same':
+        q_embs = cond_emb  # [L, B, D]
 
-    if start_mode == "noise":
-        x_t = torch.randn_like(x_init).to(device)  # [B, D]
-    elif start_mode == "cond":
-        x_t = x_init.clone().to(device)
-    else:
-        raise ValueError(f"Unknown start_mode: {start_mode}")
-
+    batch_size = start_emb.shape[0]
+    x_t = start_emb
     cond_mask = torch.ones(batch_size, device=device, dtype=torch.int)
-
     timesteps = make_ddim_timesteps(model.num_steps, sample_steps, device)
-
     final_x0_pred = None
 
     for i in range(len(timesteps) - 1):
-        t = torch.full((batch_size,), timesteps[i].item(), device=device, dtype=torch.long)
-        t_prev = torch.full((batch_size,), timesteps[i + 1].item(), device=device, dtype=torch.long)
+        t      = torch.full((batch_size,), timesteps[i].item(),   device=device, dtype=torch.long)
+        t_prev = torch.full((batch_size,), timesteps[i+1].item(), device=device, dtype=torch.long)
 
-        if model.rqvae["RQVAE"]:
-            ns = NoiseScheduleVP(schedule="linear")
+        if model.rqvae["RQVAE"] and model.rqvae["rq_exp"] != 'same':
+            ns     = NoiseScheduleVP(schedule="linear")
             t_cont = t.float() / model.num_steps
-            cond_emb = hierarchical_cond_from_levels(q_embs, t_cont, ns)  # [L, B, D] -> [B, D]
+            cond_emb, active_num = hierarchical_cond_from_levels(
+                q_embs, t_cont, ns,
+                rq_exp=model.rqvae["rq_exp"],
+                rq_div=model.rqvae["rq_div"],
+                rq_accu=model.rqvae["rq_accu"],
+                use_active_num=True,
+            )
 
         x_t, x0_pred = ddim_step_from_x0(
-            model=model,
-            x_t=x_t,
-            t=t,
-            t_prev=t_prev,
-            cond_emb=cond_emb,
-            device=device,
-            cond_mask=cond_mask,
-            eta=eta,
-            diff_id=diff_id,
+            model=model, x_t=x_t, t=t, t_prev=t_prev,
+            cond_emb=cond_emb, device=device,
+            cond_mask=cond_mask, eta=eta, diff_id=diff_id,
         )
         final_x0_pred = x0_pred
 
-    # 마지막 t=0에서 한 번 더 x0 prediction 정리
+
+    # 마지막 t=0
     t0 = torch.zeros(batch_size, device=device, dtype=torch.long)
 
-    if model.rqvae["RQVAE"]:
-        ns = NoiseScheduleVP(schedule="linear")
+    if model.rqvae["RQVAE"] and model.rqvae["rq_exp"] != 'same':
+        ns     = NoiseScheduleVP(schedule="linear")
         t_cont = t0.float() / model.num_steps
-        cond_emb = hierarchical_cond_from_levels(q_embs, t_cont, ns)  # [L, B, D] -> [B, D]
+        cond_emb, active_num = hierarchical_cond_from_levels(
+            q_embs, t_cont, ns,
+            rq_exp=model.rqvae["rq_exp"],
+            rq_div=model.rqvae["rq_div"],
+            rq_accu=model.rqvae["rq_accu"],
+            use_active_num=True,
+        )
 
     if model.parallel["zero_cond"]:
         final_x0_pred = model(x_t, t0, cond_emb, cond_mask, diff_id=diff_id, zero_cond=True)
@@ -880,7 +891,6 @@ def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise"
         final_x0_pred = model(x_t, t0, cond_emb, cond_mask, diff_id=diff_id)
 
     return final_x0_pred, iid_emb
-
 
 @torch.no_grad()
 def print_debug_metrics(step, x_0_m, x_0_g, final_output_m, final_output_g, iid_emb, y_input, interval=200):

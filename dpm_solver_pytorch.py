@@ -73,7 +73,8 @@ def model_wrapper_hierarchical_cond(
     return model_fn
 
 
-def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous: torch.Tensor, noise_schedule):
+
+def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous: torch.Tensor, noise_schedule, rq_exp="None", rq_div="even", rq_accu="sum", use_active_num=None):
     """
     all_level_vectors: [L, B, D]  (RQ-VAE 코드북 레벨별 벡터)
     t_continuous: [B]  (DPM-Solver가 넘겨주는 연속 시간)
@@ -82,6 +83,9 @@ def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous:
     초기 타임스텝: 추상 레벨 위주
     후기 타임스텝: 구체 레벨까지 모두 포함
     """
+    if rq_exp == "reverse": 
+        all_level_vectors = all_level_vectors.flip(0)
+        
     L, B, D = all_level_vectors.shape
     device = all_level_vectors.device
 
@@ -96,7 +100,20 @@ def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous:
     # ---------------------------
     # 1) 구간 길이(weights) 설정
     # --------------------------
-    widths = torch.ones(L, device=device, dtype=torch.float32)
+    if rq_div == "even":
+        # 균등 분할
+        widths = torch.ones(L, device=device, dtype=torch.float32)
+
+    elif rq_div == "incre":
+        # 뒤로 갈수록 구간이 커짐
+        # 예: L=4 -> [1,2,3,4] / 10 => 0.1, 0.2, 0.3, 0.4 비율 => [0.1, 0.3, 0.6, 1.0]
+        widths = torch.arange(1, L + 1, device=device, dtype=torch.float32)
+
+    elif rq_div == "decre":
+        # 뒤로 갈수록 구간이 작아짐
+        # 예: L=4 -> [4,3,2,1] / 10
+        widths = torch.arange(L, 0, -1, device=device, dtype=torch.float32)
+    
     widths = widths / widths.sum()   # 합이 1이 되도록 정규화
 
     # boundary: 각 구간의 끝점
@@ -113,13 +130,30 @@ def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous:
     # ---------------------------
     # 3) 앞에서부터 num_active개 레벨 평균
     # ---------------------------
-    level_ids = torch.arange(L, device=device).view(L, 1)         # [L, 1]
-    mask = (level_ids < num_active.view(1, B)).float().unsqueeze(-1)  # [L, B, 1]
-    weighted = all_level_vectors * mask        # [L, B, D]
-    cond_emb = weighted.sum(dim=0)             # [B, D]
-    cond_emb = cond_emb / num_active.view(B, 1).float()
+     # ---------------------------
+    # 3) rq_exp에 따라 conditioning 구성
+    # ---------------------------
+    if rq_accu == "separate":
+        # num_active=1 -> 0번 레벨
+        # num_active=2 -> 1번 레벨
+        # ...
+        selected_level = num_active - 1   # [B]
 
+        batch_idx = torch.arange(B, device=device)
+        cond_emb = all_level_vectors[selected_level, batch_idx]   # [B, D]
+
+    else:
+        level_ids = torch.arange(L, device=device).view(L, 1)         # [L, 1]
+        mask = (level_ids < num_active.view(1, B)).float().unsqueeze(-1)  # [L, B, 1]
+
+        weighted = all_level_vectors * mask        # [L, B, D]
+        cond_emb = weighted.sum(dim=0)             # [B, D]
+        cond_emb = cond_emb / num_active.view(B, 1).float()
+
+    if use_active_num: 
+        return cond_emb, num_active
     return cond_emb
+
 
 
 def model_wrapper(

@@ -136,6 +136,10 @@ class Run:
             "freeze_rq": config["freeze_rq"],
             "rqvae_lr": config["rqvae_lr"],
             "cross_cond": config["cross_cond"],
+            "rq_exp": config["rq_exp"],
+            "rq_div": config["rq_div"],
+            "residual": config["residual"],
+            "rq_accu": config["rq_accu"]
         }
 
         self.device = "cuda" if config["use_cuda"] else "cpu"
@@ -611,16 +615,16 @@ class Run:
                 uid_all = torch.cat(uid_all)
                 degree_all = torch.cat(degree_all)
 
-                df_score_summary = mae_summary_by_score(y_all.numpy(), mae_all.numpy())
-                print(df_score_summary)
+                # df_score_summary = mae_summary_by_score(y_all.numpy(), mae_all.numpy())
+                # print(df_score_summary)
 
-                df_sparsity_summary = mae_rmse_summary_by_sparsity(y_true=y_all, y_pred=pred_all, user_degree=degree_all, user_uid=uid_all, n_bins=5)
-                print(df_sparsity_summary)
+                # df_sparsity_summary = mae_rmse_summary_by_sparsity(y_true=y_all, y_pred=pred_all, user_degree=degree_all, user_uid=uid_all, n_bins=5)
+                # print(df_sparsity_summary)
 
-                df_pop_summary = mae_rmse_summary_by_pop_group(
-                    y_true=y_all, y_pred=pred_all, user_uid=uid_all, test_users_pop_group=test_users_pop_group
-                )
-                print(df_pop_summary)
+                # df_pop_summary = mae_rmse_summary_by_pop_group(
+                #     y_true=y_all, y_pred=pred_all, user_uid=uid_all, test_users_pop_group=test_users_pop_group
+                # )
+                # print(df_pop_summary)
 
                 # 전체 배치 concat
                 # attn_df = pd.concat(attn_rows, ignore_index=True)
@@ -687,7 +691,7 @@ class Run:
         return loss(targets, predicts).item(), torch.sqrt(mse_loss(targets, predicts)).item()
 
     def train(
-        self, data_loader, model, criterion, optimizer, epoch, stage, mapping=False, diff=False, ss=False, la=False, graph_train=None, style_src=None
+        self, data_loader, model, criterion, optimizer, epoch, stage, mapping=False, diff=False, ss=False, la=False, graph_train=None, style_src=None, i=None,
     ):
         print("Training Epoch {}:".format(epoch + 1))
 
@@ -793,7 +797,7 @@ class Run:
             task_loss_list = []
             uni_loss_list = []
 
-            for X in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
+            for batch_idx, X in enumerate(tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0)):
                 model[1].train()
 
                 # ------------------------
@@ -810,7 +814,8 @@ class Run:
                 # ------------------------
                 # task + uniformity
                 # ------------------------
-                task_loss, uni_loss = model[0](X, stage, self.device, diff_model=model[1], is_task=True, style_src=style_src)
+                # task_loss, uni_loss = model[0](X, stage, self.device, diff_model=model[1], is_task=True, style_src=style_src, ep=i if batch_idx==1 else -1)
+                task_loss, uni_loss = model[0](X, stage, self.device, diff_model=model[1], is_task=True, style_src=style_src, ep=-1)
                 loss2 = task_loss + uni_loss
 
                 optimizer.zero_grad(set_to_none=True)
@@ -1037,12 +1042,12 @@ class Run:
         for i in range(self.epoch):
 
             loss, task_loss = self.train(
-                data_diff, [model, diff_model], None, optimizer, i, stage="train_diff_parallel", mapping=False, diff=True, style_src=style_src
+                data_diff, [model, diff_model], None, optimizer, i, stage="train_diff_parallel", mapping=False, diff=True, style_src=style_src, i=i,
             )
 
             mae, rmse = self.eval_mae([model, diff_model], data_test, stage="test_diff_parallel", style_src=style_src)
             self.update_results(mae, rmse, "diff_parallel")
-            write(f"Epoch {i+1} : MAE: {mae:>10.6f} | RMSE: {rmse:>10.6f}")
+            write(f"Epoch {i+1} : DIM LOSS: {loss:>10.6f} | TASK LOSS: {task_loss:>10.6f} | MAE: {mae:>10.6f} | RMSE: {rmse:>10.6f}")
 
     def save_rqvae(self, diff_model, path):
         save_dir = os.path.dirname(path)

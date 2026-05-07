@@ -34,7 +34,7 @@
             "batchsize_map": 128,
             "batchsize_ss": 128,
             "batchsize_la": 128,
-            "batchsize_diff": 512,
+            "batchsize_diff": 128,
             "batchsize_test": 10240,
             "batchsize_diff_test": 10240
         },
