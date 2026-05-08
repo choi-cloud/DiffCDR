@@ -442,16 +442,16 @@ def diffusion_loss_fn_parallel(
             final_output_m = model.proj_m(final_output_m)
             final_output_g = model.proj_g(final_output_g)
 
-            print_debug_metrics(
-                step=model.global_step,
-                x_0_m=x_0_m,
-                x_0_g=x_0_g,
-                final_output_m=final_output_m,
-                final_output_g=final_output_g,
-                iid_emb=iid_emb,
-                y_input=y_input,
-                interval=200,
-            )
+            # print_debug_metrics(
+            #     step=model.global_step,
+            #     x_0_m=x_0_m,
+            #     x_0_g=x_0_g,
+            #     final_output_m=final_output_m,
+            #     final_output_g=final_output_g,
+            #     iid_emb=iid_emb,
+            #     y_input=y_input,
+            #     interval=200,
+            # )
 
             # -------------------------
             # Raw
@@ -646,13 +646,22 @@ def diffusion_loss_fn_parallel(
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
 
-        if model.aggregation == "aggregation":
-            return task_loss + model.parallel["mapping_lambda"] * mapping_loss, model.parallel["uniformity_loss"] * uni_loss
-        elif model.aggregation == "aggregation_ab1":
-            return task_loss + model.parallel["mapping_lambda"] * mapping_loss, model.parallel["uniformity_loss"] * uni_loss
-        elif model.aggregation == "aggregation_ab2":
-            return task_loss + model.parallel["mapping_lambda"] * mapping_loss, model.parallel["uniformity_loss"] * uni_loss
+        if model.parallel["set_aggr"] != "item" and  model.parallel["set_aggr"] != "item_i":
+            if model.aggregation == "aggregation":
+                return task_loss + model.parallel["mapping_lambda"] * mapping_loss, model.parallel["uniformity_loss"] * uni_loss
+            elif model.aggregation == "aggregation_ab1":
+                return task_loss + model.parallel["mapping_lambda"] * mapping_loss, model.parallel["uniformity_loss"] * uni_loss
+            elif model.aggregation == "aggregation_ab2":
+                return task_loss + model.parallel["mapping_lambda"] * mapping_loss, model.parallel["uniformity_loss"] * uni_loss
 
+        else: 
+            if model.aggregation == "aggregation":
+                return task_loss, model.parallel["uniformity_loss"] * uni_loss
+            elif model.aggregation == "aggregation_ab1":
+                return task_loss, model.parallel["uniformity_loss"] * uni_loss
+            elif model.aggregation == "aggregation_ab2":
+                return task_loss, model.parallel["uniformity_loss"] * uni_loss
+            
 
 def log_prediction_stats(name, pred, global_step, log_every=200):
     if global_step % log_every != 0:

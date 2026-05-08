@@ -69,6 +69,9 @@ class Run:
             self.root + "stylecache/_" + str(int(self.ratio[0] * 10)) + "_" + str(int(self.ratio[1] * 10)) + "/tgt_" + self.tgt + "_src_" + self.src
         )
 
+        self.csvfile = config["csvfile"]
+        self.seed = config["seed"]
+
         isResidual = "residual"
         aggregaion_name = str(True)
         self.rqvae_ckpt_root = (
@@ -95,6 +98,8 @@ class Run:
             + "_tgt_"
             + self.tgt
             + "MF_MLP"
+            + "_0506ver"
+            +"" if self.seed == 1 else str(self.seed)
         )
 
         self.results = {
@@ -553,7 +558,8 @@ class Run:
                     model[0].eval()
                     model[1].eval()
 
-                    pred, attn_score, sim_score = model[0](X, stage, self.device, diff_model=model[1], style_src=style_src)
+                    # pred, attn_score, sim_score = model[0](X, stage, self.device, diff_model=model[1], style_src=style_src)
+                    pred = model[0](X, stage, self.device, diff_model=model[1], style_src=style_src)
 
                     meta_uid = X[0]  # [B]
                     y_input = X[-1]  # [B, 1] or [B]
@@ -565,22 +571,22 @@ class Run:
                     targets.extend(y_true.tolist())
                     predicts.extend(pred.tolist())
 
-                    mae = (pred - y_true).abs()
+                    # mae = (pred - y_true).abs()
 
-                    y_all.append(y_true.cpu())
-                    mae_all.append(mae.cpu())
-                    pred_all.append(pred.detach().cpu())
-                    uid_all.append(meta_uid.detach().cpu())
+                    # y_all.append(y_true.cpu())
+                    # mae_all.append(mae.cpu())
+                    # pred_all.append(pred.detach().cpu())
+                    # uid_all.append(meta_uid.detach().cpu())
 
-                    batch_degree = torch.tensor([test_users_degree.get(uid.item(), 0) for uid in meta_uid.detach().cpu()], dtype=torch.long)
-                    degree_all.append(batch_degree)
+                    # batch_degree = torch.tensor([test_users_degree.get(uid.item(), 0) for uid in meta_uid.detach().cpu()], dtype=torch.long)
+                    # degree_all.append(batch_degree)
 
-                    # 🔥 MF similarity만 사용
-                    sim_mf = sim_score[:, 0]  # (B,)
-                    sim_mf_list.extend(sim_mf.detach().cpu().tolist())
+                    # # 🔥 MF similarity만 사용
+                    # sim_mf = sim_score[:, 0]  # (B,)
+                    # sim_mf_list.extend(sim_mf.detach().cpu().tolist())
 
-                    # attn 전체 저장 (B, T)
-                    attn_list.append(attn_score.detach().cpu())
+                    # # attn 전체 저장 (B, T)
+                    # attn_list.append(attn_score.detach().cpu())
 
                     # # uid, iid 위치는 네 X 구조에 맞게 조정
                     # uid = X[0]
@@ -609,11 +615,11 @@ class Run:
 
                     # attn_rows.append(pd.DataFrame(batch_data))
 
-                y_all = torch.cat(y_all)
-                mae_all = torch.cat(mae_all)
-                pred_all = torch.cat(pred_all)
-                uid_all = torch.cat(uid_all)
-                degree_all = torch.cat(degree_all)
+                # y_all = torch.cat(y_all)
+                # mae_all = torch.cat(mae_all)
+                # pred_all = torch.cat(pred_all)
+                # uid_all = torch.cat(uid_all)
+                # degree_all = torch.cat(degree_all)
 
                 # df_score_summary = mae_summary_by_score(y_all.numpy(), mae_all.numpy())
                 # print(df_score_summary)
@@ -632,33 +638,33 @@ class Run:
 
                 # attn_df.to_csv("attention_scores_test_diff.csv")
 
-                attn_all = torch.cat(attn_list, dim=0)  # (N, T)
-                sim_all = torch.tensor(sim_mf_list)  # (N,)
+                # attn_all = torch.cat(attn_list, dim=0)  # (N, T)
+                # sim_all = torch.tensor(sim_mf_list)  # (N,)
 
-                # 예: 10개 구간
-                num_bins = 10
-                bins = torch.linspace(sim_all.min(), sim_all.max(), steps=num_bins + 1)
+                # # 예: 10개 구간
+                # num_bins = 10
+                # bins = torch.linspace(sim_all.min(), sim_all.max(), steps=num_bins + 1)
 
-                bin_attn_mean = []
+                # bin_attn_mean = []
 
-                for i in range(num_bins):
-                    mask = (sim_all >= bins[i]) & (sim_all < bins[i + 1])
+                # for i in range(num_bins):
+                #     mask = (sim_all >= bins[i]) & (sim_all < bins[i + 1])
 
-                    if mask.sum() == 0:
-                        continue
+                #     if mask.sum() == 0:
+                #         continue
 
-                    attn_mean = attn_all[mask].mean(dim=0)  # (T,)
-                    bin_attn_mean.append(attn_mean)
+                #     attn_mean = attn_all[mask].mean(dim=0)  # (T,)
+                #     bin_attn_mean.append(attn_mean)
 
-                bin_attn_mean = torch.stack(bin_attn_mean)  # (num_bins, T)
+                # bin_attn_mean = torch.stack(bin_attn_mean)  # (num_bins, T)
 
-                names = ["MF", "AGGR", "USER_BIAS", "ITEM_BIAS"]
+                # names = ["MF", "AGGR", "USER_BIAS", "ITEM_BIAS"]
 
-                print("\n=== Bin-wise Attention ===")
-                for i in range(len(bin_attn_mean)):
-                    print(f"\nBin {i} (sim range: {bins[i]:.3f} ~ {bins[i+1]:.3f})")
-                    for t, name in enumerate(names):
-                        print(f"{name:10s}: {bin_attn_mean[i][t].item():.4f}")
+                # print("\n=== Bin-wise Attention ===")
+                # for i in range(len(bin_attn_mean)):
+                #     print(f"\nBin {i} (sim range: {bins[i]:.3f} ~ {bins[i+1]:.3f})")
+                #     for t, name in enumerate(names):
+                #         print(f"{name:10s}: {bin_attn_mean[i][t].item():.4f}")
 
             elif stage in ("test_ss"):
                 for X, y in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
@@ -1049,6 +1055,7 @@ class Run:
             self.update_results(mae, rmse, "diff_parallel")
             write(f"Epoch {i+1} : DIM LOSS: {loss:>10.6f} | TASK LOSS: {task_loss:>10.6f} | MAE: {mae:>10.6f} | RMSE: {rmse:>10.6f}")
 
+
     def save_rqvae(self, diff_model, path):
         save_dir = os.path.dirname(path)
         if save_dir:
@@ -1169,18 +1176,29 @@ class Run:
         if self.device == "cuda":
             # model.load_state_dict(torch.load(path))
             state = torch.load(path, map_location=self.device)
-            model.load_state_dict(state, strict=False)
+            model.load_state_dict(state, strict=True)
         else:
             model.load_state_dict(torch.load(path, map_location="cpu"))
 
-    def result_print(self, phase):
+    def result_print(self, phase, exp_part):
         print_str = ""
         for p in phase:
             write(f"⬇️ Eval {p}: MAE & RMSE ")
-            for m in ["_mae", "_rmse"]:
-                metric_name = p + m
-                print_str += metric_name + ": {:.6f} ".format(self.results[metric_name])
-                write(f"{self.results[metric_name]:.6f}")
+            with open(self.csvfile, 'a', newline='') as f:
+                writer = csv.writer(f)
+                for m in ["_mae", "_rmse"]:
+                    metric_name = p + m
+                    print_str += metric_name + ": {:.6f} ".format(self.results[metric_name])
+                    write(f"{self.results[metric_name]:.6f}")
+                    writer.writerow([
+                        self.seed,
+                        p,
+                        self.task,
+                        self.ratio[0] * 10, 
+                        self.ratio[1] * 10,
+                        m.strip("_"),
+                        self.results[metric_name]
+                    ])
 
     def main(self, exp_part="None_CDR", save_path=None):
         # exp_part 에 따라 모델, 옵티마이져 초기화하고 학습.
@@ -1278,36 +1296,38 @@ class Run:
 
         if exp_part == "None_CDR":
             self.TgtOnly(model, data_tgt, data_test, criterion, optimizer_tgt)
-            self.SrcOnly(model, data_src, criterion, optimizer_src)
+            # self.SrcOnly(model, data_src, criterion, optimizer_src)
             # CMF
             if self.base_model == "CMF":
                 self.DataAug(model, data_aug, data_test, criterion, optimizer_aug)
-            self.result_print(["tgt", "aug"])
+                self.result_print(["tgt", "aug"], exp_part)
+            else: 
+                self.result_print(["tgt"], exp_part)
             self.model_save(model, path=save_path)
 
         elif exp_part == "CDR":
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
             self.CDR(model, data_map, data_meta, data_test, criterion, optimizer_map, optimizer_meta)
-            self.result_print(["emcdr", "ptupcdr"])
+            self.result_print(["emcdr", "ptupcdr"], exp_part)
 
         elif exp_part == "ss_CDR":
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
             self.SS_CDR(model, ss_model, data_ss, data_test, optimizer_ss)
-            self.result_print(["sscdr"])
+            self.result_print(["sscdr"], exp_part)
 
         elif exp_part == "la_CDR":
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
             self.LA_CDR(model, la_model, data_la, data_test, optimizer_la)
-            self.result_print(["lacdr"])
+            self.result_print(["lacdr"], exp_part)
 
         elif exp_part == "diff_CDR":
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
             self.Diff_CDR(model, diff_model, data_diff, data_diff_test, optimizer_diff)
-            self.result_print(["diff"])
+            self.result_print(["diff"], exp_part)
 
         elif exp_part == "diff_parallel":
             self.model_load(model, path=save_path)
@@ -1327,4 +1347,4 @@ class Run:
                 style_tgt_item,
                 style_tgt_user,
             )
-            self.result_print(["diff_parallel"])
+            self.result_print(["diff_parallel"], exp_part)

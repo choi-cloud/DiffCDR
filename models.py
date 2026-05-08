@@ -420,13 +420,14 @@ class MFBasedModel(torch.nn.Module):
             y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
 
             # 🔥 cosine similarity 계산
-            sim_mf = F.cosine_similarity(src_uid_emb1, iid_emb, dim=-1)  # (B,)
-            sim_aggr = F.cosine_similarity(src_uid_emb2, iid_emb, dim=-1)  # (B,)
+            # sim_mf = F.cosine_similarity(src_uid_emb1, iid_emb, dim=-1)  # (B,)
+            # sim_aggr = F.cosine_similarity(src_uid_emb2, iid_emb, dim=-1)  # (B,)
 
-            # 필요하면 stack해서 넘기기
-            sim_score = torch.stack([sim_mf, sim_aggr], dim=1)  # (B, 2)
+            # # 필요하면 stack해서 넘기기
+            # sim_score = torch.stack([sim_mf, sim_aggr], dim=1)  # (B, 2)
 
-            return y_pred, attn_score, sim_score
+            return y_pred
+            # return y_pred, attn_score, sim_score
 
     def _fetch_vbge_user_embedding(self, diff_model, tgt_uid, use_target=False):
 

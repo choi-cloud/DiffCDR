@@ -57,6 +57,12 @@ def prepare_1():
     parser.add_argument("--cross_cond", type=str2bool, default=False, help="MF vs Aggr 컨디션 교차 여부")
     parser.add_argument("--start_point", default="noise", help="[src_u, quant_u, noise]")
     parser.add_argument("--rqvae_lr", type=float, default=0.001, help="rqvae pretrain lr")
+    
+    
+    parser.add_argument("--rq_exp", type=str, default="None", help="[None, same, reverse]")
+    parser.add_argument("--rq_div", type=str, default="even", help="[even, incre, decre]")
+    parser.add_argument("--rq_accu", type=str, default="sum", help="[sum, separate]")
+    parser.add_argument("--residual", type=str2bool, default=True, help="RQVAE or 코드북 개별적으로 사이즈만 커지게")
 
     # item cond
     parser.add_argument("--diff_task_lambda", type=float, default=1.0, help="Task loss weight")
@@ -112,6 +118,10 @@ def prepare_2(args, config_path):
         config["uniformity_loss"] = args.uniformity_loss
         config["zero_cond"] = args.zero_cond
         config["batch_norm"] = args.batch_norm
+        config["rq_exp"] = args.rq_exp
+        config["rq_div"] = args.rq_div
+        config["rq_accu"] = args.rq_accu
+        config["residual"] = args.residual
 
     return config
 
@@ -155,21 +165,27 @@ if __name__ == "__main__":
         encoding="utf-8",
     )
 
+    headers = ["seed", "baseline", "task", "ratio0", "ratio1", "metric", "result"]
+    csvfile = utils.make_csv_dir(f"{args.experiment}", headers)
+    config["csvfile"] = csvfile
+    config["seed"] = args.seed
+
     utils.log_args_table(args, max_per_line=5, col_width=30)
     write(f"{' '+args.experiment+' ':=^{30}}")
     write(f"✅ Task  {args.task}")
     write(f"✅ Ratio {args.ratio}")
     write(f"✅ Model {args.exp_part}")
 
-    write(f"🍎 emb dim     : {args.emb_dim}")
-    write(f"🍎 bias  : {args.set_aggr}")
-    write(f"🍎 aggregation  : {args.aggregation}")
-    write(f"🍎 RQVAE       : {args.RQVAE}")
-    write(f"🍎 start_point : {args.start_point}")
-
-    write(f"🍏 cross cond   : {args.cross_cond}")
-    write(f"🍏 bias mapping : {args.bias_mapping}")
+    # write(f"🍎 aggregation  : {args.aggregation}")
+    # write(f"🍎 RQVAE       : {args.RQVAE}")
+    # write(f"🍎 RQ num, size : {args.codebook_num}, {args.codebook_size}")
+    # write(f"🍎 residual     : {args.residual}")
+    write(f"🍎 rq exp       : {args.rq_exp}")
+    write(f"🍎 rq div       : {args.rq_div}")
+    write(f"🍎 rq accu      : {args.rq_accu}")
+    write(f"🍎 mapping loss     : {args.mapping_lambda}")
+    write(f"🍎 uniformity loss  : {args.uniformity_loss}")
 
     if not args.process_data_mid and not args.process_data_ready:
-        Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth")
+        Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth" if args.seed == 1 else  f"{args.save_path}_{args.seed}_{args.task}_{args.ratio}.pth")
         write(f"{'':=^{30}}")
