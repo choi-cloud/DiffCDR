@@ -593,6 +593,9 @@ def diffusion_loss_fn_parallel(
                 score_log = score.squeeze(1)
                 attn_log = attn.squeeze(1)
 
+                # token norm: (B, T, D) -> (B, T)
+                token_norms = tokens.norm(dim=-1)
+
                 num_tokens = score_log.shape[1]
 
                 print(f"\n[Step {model.task_step}] Attention Statistics")
@@ -601,6 +604,7 @@ def diffusion_loss_fn_parallel(
 
                     token_score = score_log[:, token_idx]
                     token_attn = attn_log[:, token_idx]
+                    token_norm = token_norms[:, token_idx]
 
                     print(
                         f"[TOKEN {token_idx}] "
@@ -617,6 +621,15 @@ def diffusion_loss_fn_parallel(
                         f"{token_attn.std().item():.6f} / "
                         f"{token_attn.min().item():.6f} / "
                         f"{token_attn.max().item():.6f}"
+                    )
+
+                    print(
+                        f"[TOKEN {token_idx}] "
+                        f"NORM mean/std/min/max: "
+                        f"{token_norm.mean().item():.6f} / "
+                        f"{token_norm.std().item():.6f} / "
+                        f"{token_norm.min().item():.6f} / "
+                        f"{token_norm.max().item():.6f}"
                     )
 
         final_output = out[:, 0, :]  # (B, D)
