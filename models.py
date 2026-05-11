@@ -303,9 +303,14 @@ class MFBasedModel(torch.nn.Module):
             if diff_model.parallel["batch_norm"]:
                 iid_emb = diff_model.ln_iid(iid_emb)
 
+            query = diff_model.query_proj(iid_emb).unsqueeze(1)
+
             if diff_model.aggregation == "aggregation":
                 final_output_m, iid_emb = p_sample(diff_model, cond1, iid_emb, device, diff_id=0)
                 final_output_g, iid_emb = p_sample(diff_model, cond2, iid_emb, device, diff_id=1)
+
+                final_output_m = diff_model.mf_norm(diff_model.mf_proj(final_output_m))
+                final_output_g = diff_model.aggr_norm(diff_model.aggr_proj(final_output_g))
 
                 if diff_model.parallel["batch_norm"]:
                     final_output_m = diff_model.ln_m(final_output_m)
@@ -374,7 +379,7 @@ class MFBasedModel(torch.nn.Module):
 
                 tokens = torch.cat([base_tokens, style_tok_u.unsqueeze(1)], dim=1)
 
-            out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+            out = diff_model.attn_layer(tokens, query=query)  # (B, 1, D)
             final_output = out[:, 0, :]  # (B, D)
 
             if diff_model.aggregation == "aggregation":

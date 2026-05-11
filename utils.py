@@ -643,29 +643,44 @@ def log_batch_similarity_stats(user_emb, global_step, log_every=200, prefix="tra
 class AttentionLayer(nn.Module):
     def __init__(self, in_dim, out_dim):
         super().__init__()
+
         self.q = nn.Linear(in_dim, in_dim, bias=False)
         self.k = nn.Linear(in_dim, in_dim, bias=False)
         self.v = nn.Linear(in_dim, out_dim, bias=False)
+
         self.scale = in_dim**-0.5
 
-    def forward(self, x, mask=None, query=None):
+    def forward(self, x, mask=None, query=None, return_score=False):
         """
-        x: (B, T, D)
-        mask: (B, T) or None
+        x:     (B, T, D)
+        query: (B, Q, D) or None
+        mask:  (B, T) or None
         """
+
         if query is not None:
             Q = self.q(query)
         else:
             Q = self.q(x)
+
         K = self.k(x)
         V = self.v(x)
 
-        score = torch.matmul(Q, K.transpose(-2, -1)) * self.scale  # (B, T, T)
+        # raw attention score
+        # (B, Q, T)
+        score = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
+
         if mask is not None:
             score = score.masked_fill(mask[:, None, :] == 0, -1e9)
 
+        # normalized attention weight
         attn = F.softmax(score, dim=-1)
-        out = torch.matmul(attn, V)  # (B, T, D)
+
+        # attention output
+        out = torch.matmul(attn, V)
+
+        if return_score:
+            return out, score, attn
+
         return out
 
 

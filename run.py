@@ -438,7 +438,9 @@ class Run:
 
         return data_src, data_tgt, data_meta, data_map, data_diff, data_aug, data_ss, data_la, data_test, data_diff_test, graph_data
 
-    def compute_user_graph_embeddings(self, base_model, diff_model, graph_data, use_target=False):
+    def compute_user_graph_embeddings(
+        self, base_model, diff_model, graph_data, use_target=False, low_deg=5, high_deg=30, min_aggr_ratio=0.1, max_aggr_ratio=0.9
+    ):
         if graph_data is None:
             return None, None
 
@@ -452,31 +454,65 @@ class Run:
 
         with torch.no_grad():
             all_uid = torch.arange(model.uid_embedding.num_embeddings, device=self.device)
+
             raw_user_feat = model.uid_embedding(all_uid)
             user_feat = model.user_mlp(raw_user_feat).detach().cpu()
 
+            # --------------------------------------------------
+            # 2-hop aggregation
+            # user -> item -> user
+            # --------------------------------------------------
             item_msg = torch.sparse.mm(vu_adj, user_feat)
             user_2hop = torch.sparse.mm(uv_adj, item_msg)
 
             user_deg = torch.sparse.sum(uv_adj, dim=1).to_dense().unsqueeze(1)
+
+            # remove self contribution
             user_2hop = user_2hop - user_deg * user_feat
 
             item_deg = torch.sparse.sum(vu_adj, dim=1).to_dense()
             item_other = torch.relu(item_deg - 1)
+
             two_hop_counts = torch.sparse.mm(uv_adj, item_other[:, None]).to_dense()
 
-            norm = torch.where(two_hop_counts == 0, torch.ones_like(two_hop_counts), two_hop_counts)
-            user_emb = user_2hop / norm
+            norm = torch.where(
+                two_hop_counts == 0,
+                torch.ones_like(two_hop_counts),
+                two_hop_counts,
+            )
+
+            aggr_user_feat = user_2hop / norm
 
             zero_mask = two_hop_counts.squeeze(1) == 0
+            aggr_user_feat[zero_mask] = user_feat[zero_mask]
+
+            # --------------------------------------------------
+            # degree-adaptive mixing
+            # low degree  -> use aggregation more
+            # high degree -> keep own embedding more
+            # --------------------------------------------------
+            degree_raw = user_deg.squeeze(1).float()
+
+            # degree가 low_deg 이하이면 ratio ≈ max_aggr_ratio
+            # degree가 high_deg 이상이면 ratio ≈ min_aggr_ratio
+            deg_clamped = torch.clamp(degree_raw, min=low_deg, max=high_deg)
+
+            aggr_ratio = 1.0 - (deg_clamped - low_deg) / (high_deg - low_deg + 1e-8)
+
+            aggr_ratio = min_aggr_ratio + aggr_ratio * (max_aggr_ratio - min_aggr_ratio)
+
+            aggr_ratio = aggr_ratio.unsqueeze(1)
+
+            user_emb = aggr_ratio * aggr_user_feat + (1.0 - aggr_ratio) * user_feat
+
+            # two-hop neighbor 없는 유저는 무조건 자기 embedding 유지
             user_emb[zero_mask] = user_feat[zero_mask]
 
-            # degree (log scale)
+            # degree info
             if use_target:
                 degree_by_uid = None
             else:
-                degree_raw = user_deg.squeeze(1)
-                degree_by_uid = torch.log1p(degree_raw.float()).to(self.device)  # log(1 + degree)
+                degree_by_uid = torch.log1p(degree_raw).to(self.device)
 
         return user_emb.to(self.device), degree_by_uid
 

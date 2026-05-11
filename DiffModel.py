@@ -212,6 +212,12 @@ class DiffParallel(nn.Module):
             # self.linear_m = nn.Linear(input_dim, input_dim, False)
             if self.parallel["batch_norm"]:
                 self.ln_m = nn.BatchNorm1d(input_dim)
+            if self.aggregation == "aggregation":
+                self.mf_proj = nn.Linear(input_dim, input_dim)
+                self.aggr_proj = nn.Linear(input_dim, input_dim)
+                self.mf_norm = nn.LayerNorm(input_dim)
+                self.aggr_norm = nn.LayerNorm(input_dim)
+                self.query_proj = nn.Sequential(nn.Linear(input_dim, input_dim), nn.LayerNorm(input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
 
         if self.aggregation in ["aggregation", "aggregation_ab2"]:
             self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim)]))
@@ -459,20 +465,14 @@ def diffusion_loss_fn_parallel(
         if model.parallel["batch_norm"]:
             iid_emb = model.ln_iid(iid_emb)
 
+        query = model.query_proj(iid_emb).unsqueeze(1)
+
         if model.aggregation == "aggregation":
             final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
             final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=1)
 
-            print_debug_metrics(
-                step=model.global_step,
-                x_0_m=x_0_m,
-                x_0_g=x_0_g,
-                final_output_m=final_output_m,
-                final_output_g=final_output_g,
-                iid_emb=iid_emb,
-                y_input=y_input,
-                interval=200,
-            )
+            final_output_m = model.mf_norm(model.mf_proj(final_output_m))
+            final_output_g = model.aggr_norm(model.aggr_proj(final_output_g))
 
             if model.parallel["batch_norm"]:
                 final_output_m = model.ln_m(final_output_m)
@@ -555,7 +555,44 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_aggr"] == "item":
             tokens = base_tokens
 
-        out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
+        out, score, attn = model.attn_layer(tokens, query=query, return_score=True)  # (B, 1, D)
+
+        # --------------------------------------------------
+        # attention logging (dynamic token version)
+        # --------------------------------------------------
+        if model.task_step % 200 == 0:
+            with torch.no_grad():
+
+                # score/attn: (B, 1, T) -> (B, T)
+                score_log = score.squeeze(1)
+                attn_log = attn.squeeze(1)
+
+                num_tokens = score_log.shape[1]
+
+                print(f"\n[Step {model.task_step}] Attention Statistics")
+
+                for token_idx in range(num_tokens):
+
+                    token_score = score_log[:, token_idx]
+                    token_attn = attn_log[:, token_idx]
+
+                    print(
+                        f"[TOKEN {token_idx}] "
+                        f"SCORE mean/min/max: "
+                        f"{token_score.mean().item():.6f} / "
+                        f"{token_score.min().item():.6f} / "
+                        f"{token_score.max().item():.6f}"
+                    )
+
+                    print(
+                        f"[TOKEN {token_idx}] "
+                        f"ATTN mean/std/min/max: "
+                        f"{token_attn.mean().item():.6f} / "
+                        f"{token_attn.std().item():.6f} / "
+                        f"{token_attn.min().item():.6f} / "
+                        f"{token_attn.max().item():.6f}"
+                    )
+
         final_output = out[:, 0, :]  # (B, D)
 
         print_batch_node_similarity(emb=final_output, step=model.task_step, prefix="final_output", interval=200)
@@ -578,7 +615,8 @@ def diffusion_loss_fn_parallel(
             task_loss += model.parallel["mapping_lambda"] * mapping_loss
 
         if model.aggregation == "aggregation":
-            return model.task_lambda * task_loss, model.parallel["uniformity_loss"] * uni_loss
+            # return model.task_lambda * task_loss, model.parallel["uniformity_loss"] * uni_loss
+            return model.task_lambda * task_loss, 0 * uni_loss
         elif model.aggregation == "aggregation_ab1":
             return model.task_lambda * task_loss, 0 * uni_loss
         elif model.aggregation == "aggregation_ab2":
