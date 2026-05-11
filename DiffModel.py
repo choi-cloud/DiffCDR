@@ -392,9 +392,6 @@ def diffusion_loss_fn_parallel(
             t = t.unsqueeze(-1)
 
         if model.aggregation in ["aggregation_ab1", "aggregation_ab2"]:
-            perm = torch.randperm(batch_size, device=device)
-            t = t[perm]
-
             batch_size = x_0_m.shape[0]
 
             t = torch.randint(0, num_steps, size=(batch_size // 2,), device=device)
@@ -491,7 +488,10 @@ def diffusion_loss_fn_parallel(
         if model.parallel["batch_norm"]:
             iid_emb = model.ln_iid(iid_emb)
 
-        query = model.query_proj(iid_emb).unsqueeze(1)
+        if model.aggregation == "aggregation":
+            query = model.query_proj(iid_emb).unsqueeze(1)
+        else:
+            query = iid_emb.unsqueeze(1)
 
         if model.aggregation == "aggregation":
             final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)

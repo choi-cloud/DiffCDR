@@ -303,7 +303,10 @@ class MFBasedModel(torch.nn.Module):
             if diff_model.parallel["batch_norm"]:
                 iid_emb = diff_model.ln_iid(iid_emb)
 
-            query = diff_model.query_proj(iid_emb).unsqueeze(1)
+            if diff_model.aggregation == "aggregation":
+                query = diff_model.query_proj(iid_emb).unsqueeze(1)
+            else:
+                query = iid_emb.unsqueeze(1)
 
             if diff_model.aggregation == "aggregation":
                 final_output_m, iid_emb = p_sample(diff_model, cond1, iid_emb, device, diff_id=0)
