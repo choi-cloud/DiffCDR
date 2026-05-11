@@ -427,7 +427,7 @@ def diffusion_loss_fn_parallel(
 
             alpha = torch.sigmoid(model.rq_alpha_logit)
             c1 = (1.0 - alpha) * cond_emb1 + alpha * c1
-            c2 = (1.0 - alpha) * cond_emb1 + alpha * c2
+            c2 = (1.0 - alpha) * cond_emb2 + alpha * c2
 
         else:
             c1, c2 = cond_emb1, cond_emb2
