@@ -73,10 +73,13 @@ def model_wrapper_hierarchical_cond(
     return model_fn
 
 
-def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous: torch.Tensor, noise_schedule):
+def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous: torch.Tensor, noise_schedule, temperature: float = 0.08):
     """
     all_level_vectors: [L, B, D]
     t_continuous: [B]
+
+    high noise -> coarse level 중심
+    low noise  -> fine level까지 soft하게 포함
     """
     L, B, D = all_level_vectors.shape
     device = all_level_vectors.device
@@ -88,19 +91,19 @@ def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous:
 
     # high noise: 0, low noise: 1
     t_norm = 1.0 - t_continuous / T
-    t_norm = torch.clamp(t_norm, 0.0, 1.0)
+    t_norm = torch.clamp(t_norm, 0.0, 1.0)  # [B]
 
-    widths = torch.ones(L, device=device, dtype=torch.float32)
-    widths = widths / widths.sum()
+    # 각 level이 켜지기 시작하는 위치
+    # L=4 -> [0.0, 0.25, 0.5, 0.75]
+    level_pos = torch.arange(L, device=device, dtype=torch.float32) / L  # [L]
 
-    boundaries = torch.cumsum(widths, dim=0)[:-1]  # [L-1]
+    # q1은 항상 거의 켜짐
+    # q2,q3,q4는 t_norm이 커질수록 부드럽게 켜짐
+    gates = torch.sigmoid((t_norm.unsqueeze(0) - level_pos.view(L, 1)) / temperature)  # [L, B]
 
-    num_active = 1 + (t_norm.unsqueeze(1) >= boundaries.unsqueeze(0)).sum(dim=1)  # [B]
+    gates[0, :] = 1.0
 
-    level_ids = torch.arange(L, device=device).view(L, 1)
-    mask = (level_ids < num_active.view(1, B)).float().unsqueeze(-1)
-
-    cond_emb = (all_level_vectors * mask).sum(dim=0)  # [B, D]
+    cond_emb = (all_level_vectors * gates.unsqueeze(-1)).sum(dim=0)  # [B, D]
 
     return cond_emb
 

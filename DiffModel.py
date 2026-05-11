@@ -422,6 +422,7 @@ def diffusion_loss_fn_parallel(
             t_cont = t.squeeze(-1).float() / model.num_steps
             c1 = hierarchical_cond_from_levels(q_embs1, t_cont, ns)
             c2 = hierarchical_cond_from_levels(q_embs2, t_cont, ns) if q_embs2 is not None else cond_emb2
+
         else:
             c1, c2 = cond_emb1, cond_emb2
 
@@ -797,15 +798,7 @@ def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise"
             cond_emb = hierarchical_cond_from_levels(q_embs, t_cont, ns)  # [L, B, D] -> [B, D]
 
         x_t, x0_pred = ddim_step_from_x0(
-            model=model,
-            x_t=x_t,
-            t=t,
-            t_prev=t_prev,
-            cond_emb=cond_emb,
-            device=device,
-            cond_mask=cond_mask,
-            eta=eta,
-            diff_id=diff_id,
+            model=model, x_t=x_t, t=t, t_prev=t_prev, cond_emb=cond_emb, device=device, cond_mask=cond_mask, eta=eta, diff_id=diff_id
         )
         final_x0_pred = x0_pred
 
