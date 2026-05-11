@@ -372,13 +372,38 @@ def diffusion_loss_fn_parallel(
 
         batch_size = x_0_m.shape[0]
 
-        t = torch.randint(0, num_steps, size=(batch_size // 2,), device=device)
-        if batch_size % 2 == 0:
-            t = torch.cat([t, num_steps - 1 - t], dim=0)
-        else:
-            extra_t = torch.randint(0, num_steps, size=(1,), device=device)
-            t = torch.cat([t, num_steps - 1 - t, extra_t], dim=0)
-        t = t.unsqueeze(-1)
+        # -------------------------------------------------
+        # high-t biased sampling
+        # cond_emb 의존도를 높이기 위해 noisy timestep을 더 많이 샘플링
+        # -------------------------------------------------
+        if model.aggregation in ["aggregation"]:
+            high_ratio = 0.7
+            high_start = int(num_steps * 0.6)
+
+            num_high = int(batch_size * high_ratio)
+            num_rand = batch_size - num_high
+
+            t_high = torch.randint(low=high_start, high=num_steps, size=(num_high,), device=device)
+
+            t_rand = torch.randint(low=0, high=num_steps, size=(num_rand,), device=device)
+
+            t = torch.cat([t_high, t_rand], dim=0)
+
+            t = t.unsqueeze(-1)
+
+        if model.aggregation in ["aggregation_ab1", "aggregation_ab2"]:
+            perm = torch.randperm(batch_size, device=device)
+            t = t[perm]
+
+            batch_size = x_0_m.shape[0]
+
+            t = torch.randint(0, num_steps, size=(batch_size // 2,), device=device)
+            if batch_size % 2 == 0:
+                t = torch.cat([t, num_steps - 1 - t], dim=0)
+            else:
+                extra_t = torch.randint(0, num_steps, size=(1,), device=device)
+                t = torch.cat([t, num_steps - 1 - t, extra_t], dim=0)
+            t = t.unsqueeze(-1)
 
         if model.aggregation in ["aggregation", "aggregation_ab1"]:
             x_m, e_m = q_x_fn(model, x_0_m, t, device)
