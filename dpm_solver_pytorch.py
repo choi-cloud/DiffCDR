@@ -75,12 +75,8 @@ def model_wrapper_hierarchical_cond(
 
 def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous: torch.Tensor, noise_schedule):
     """
-    all_level_vectors: [L, B, D]  (RQ-VAE 코드북 레벨별 벡터)
-    t_continuous: [B]  (DPM-Solver가 넘겨주는 연속 시간)
-    noise_schedule: NoiseScheduleVP (T 값을 쓰기 위해)
-
-    초기 타임스텝: 추상 레벨 위주
-    후기 타임스텝: 구체 레벨까지 모두 포함
+    all_level_vectors: [L, B, D]
+    t_continuous: [B]
     """
     L, B, D = all_level_vectors.shape
     device = all_level_vectors.device
@@ -89,35 +85,22 @@ def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous:
         t_continuous = t_continuous.squeeze(-1)
 
     T = noise_schedule.T
-    # t_norm: 0(초기) ~ 1(마지막)
+
+    # high noise: 0, low noise: 1
     t_norm = 1.0 - t_continuous / T
-    t_norm = torch.clamp(t_norm, 0.0, 1.0)  # [B]
+    t_norm = torch.clamp(t_norm, 0.0, 1.0)
 
-    # ---------------------------
-    # 1) 구간 길이(weights) 설정
-    # --------------------------
     widths = torch.ones(L, device=device, dtype=torch.float32)
-    widths = widths / widths.sum()   # 합이 1이 되도록 정규화
+    widths = widths / widths.sum()
 
-    # boundary: 각 구간의 끝점
-    # 예: widths=[0.25,0.25,0.25,0.25] -> boundaries=[0.25,0.5,0.75]
-    boundaries = torch.cumsum(widths, dim=0)[:-1]   # [L-1]
+    boundaries = torch.cumsum(widths, dim=0)[:-1]  # [L-1]
 
-    # ---------------------------
-    # 2) 현재 시점에서 활성화할 레벨 수 결정
-    # ---------------------------
-    # boundary를 몇 개 넘었는지 + 1 = active level 수
-    # 결과 범위: 1 ~ L
     num_active = 1 + (t_norm.unsqueeze(1) >= boundaries.unsqueeze(0)).sum(dim=1)  # [B]
 
-    # ---------------------------
-    # 3) 앞에서부터 num_active개 레벨 평균
-    # ---------------------------
-    level_ids = torch.arange(L, device=device).view(L, 1)         # [L, 1]
-    mask = (level_ids < num_active.view(1, B)).float().unsqueeze(-1)  # [L, B, 1]
-    weighted = all_level_vectors * mask        # [L, B, D]
-    cond_emb = weighted.sum(dim=0)             # [B, D]
-    cond_emb = cond_emb / num_active.view(B, 1).float()
+    level_ids = torch.arange(L, device=device).view(L, 1)
+    mask = (level_ids < num_active.view(1, B)).float().unsqueeze(-1)
+
+    cond_emb = (all_level_vectors * mask).sum(dim=0)  # [B, D]
 
     return cond_emb
 

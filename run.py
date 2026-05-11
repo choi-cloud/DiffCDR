@@ -73,7 +73,7 @@ class Run:
         aggregaion_name = str(True)
         self.rqvae_ckpt_root = (
             self.root
-            + "rqvae_ckpt/"
+            + "rqvae_ckpt1/"
             + self.src
             + "_"
             + str(int(self.ratio[0] * 10))
@@ -1035,6 +1035,56 @@ class Run:
         if "rq_aggr" in ckpt and hasattr(diff_model, "rq_aggr"):
             diff_model.rq_aggr.load_state_dict(ckpt["rq_aggr"])
 
+    def debug_rqvae_quantizer(self, name, quantizer, z, epoch=None):
+        """
+        z: [N, D] or [B, D]
+        """
+        quantizer.eval()
+
+        with torch.no_grad():
+            quantized, all_level_vectors, rq_loss = quantizer(z)
+
+            # reconstruction
+            recon_mse = F.mse_loss(quantized, z).item()
+            recon_mae = torch.mean(torch.abs(quantized - z)).item()
+
+            # cosine similarity
+            cos = F.cosine_similarity(quantized, z, dim=1)
+            cos_mean = cos.mean().item()
+            cos_std = cos.std().item()
+
+            # norm
+            z_norm = z.norm(dim=1).mean().item()
+            q_norm = quantized.norm(dim=1).mean().item()
+
+            # level별 norm: [L]
+            level_norms = all_level_vectors.norm(dim=-1).mean(dim=1)
+
+            # level별 contribution ratio
+            level_ratios = level_norms / (level_norms.sum() + 1e-8)
+
+            title = f"[{name}] RQ-VAE Debug"
+            if epoch is not None:
+                title += f" | Epoch {epoch}"
+
+            print("\n" + title)
+            print(f"Recon MSE : {recon_mse:.6f}")
+            print(f"Recon MAE : {recon_mae:.6f}")
+            print(f"Cos Mean  : {cos_mean:.6f}")
+            print(f"Cos Std   : {cos_std:.6f}")
+            print(f"Z Norm    : {z_norm:.6f}")
+            print(f"Q Norm    : {q_norm:.6f}")
+
+            print("Level Norms:")
+            for l, v in enumerate(level_norms):
+                print(f"  L{l+1}: {v.item():.6f}")
+
+            print("Level Ratios:")
+            for l, v in enumerate(level_ratios):
+                print(f"  L{l+1}: {v.item():.4f}")
+
+        quantizer.train()
+
     def pretrain_rqvae(self, model, diff_model, data_diff):
         write(f"{' RQ-VAE Pretraining ':=^{30}}")
 
@@ -1078,7 +1128,7 @@ class Run:
 
         z_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(all_z), batch_size=self.batchsize_diff, shuffle=True)
 
-        for epoch in range(pretrain_epochs):
+        for epoch in tqdm.tqdm(range(pretrain_epochs)):
             total_loss = 0.0
 
             for (z_batch,) in z_loader:
@@ -1089,7 +1139,13 @@ class Run:
                 total_loss += loss.item()
 
             if (epoch + 1) % 10 == 0 or epoch == 0:
-                write(f"{name} Epoch {epoch+1}/{pretrain_epochs} | Loss: {total_loss/len(data_diff):.6f}")
+                avg_loss = total_loss / len(z_loader)
+
+                write(f"{name} Epoch {epoch+1}/{pretrain_epochs} | Loss: {avg_loss:.6f}")
+
+                # 전체가 너무 크면 일부만 디버깅
+                debug_z = all_z[: min(4096, all_z.size(0))]
+                self.debug_rqvae_quantizer(name=name, quantizer=quantizer, z=debug_z, epoch=epoch + 1)
 
     def SS_CDR(self, model, ss_model, data_ss, data_test, optimizer_ss):
         write("==========SS_CDR==========")
