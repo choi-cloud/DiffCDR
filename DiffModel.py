@@ -182,6 +182,8 @@ class DiffParallel(nn.Module):
         self.test_users_degree = None
         self.test_users_pop_group = None
         self.degree_by_uid = None
+        self.diff_step = 0
+        self.task_step = 0
         # -----------------------------------------------
 
         # Parallel setting
@@ -253,15 +255,7 @@ class DiffParallel(nn.Module):
             self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
             self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
 
-    def forward(
-        self,
-        x,
-        t,
-        cond_emb,
-        cond_mask,
-        diff_id=0,
-        zero_cond=None,
-    ):
+    def forward(self, x, t, cond_emb, cond_mask, diff_id=0, zero_cond=None):
 
         for idx in range(self.num_layers):
             t_embedding = self.step_mlp(t)
@@ -270,9 +264,10 @@ class DiffParallel(nn.Module):
 
             if zero_cond:
                 cond_embedding = torch.zeros_like(cond_embedding)
-            x = torch.cat([t_embedding, cond_embedding * cond_mask.unsqueeze(-1), x], axis=1)  # * cond_mask.unsqueeze(-1)
 
-            x = self.diff_models[diff_id][0](x)  # reverse -- 3 FC를 통해 denosing.
+            x = torch.cat([t_embedding, cond_embedding, x], axis=1)
+
+            x = self.diff_models[diff_id][0](x)
 
         return x
 
@@ -445,55 +440,29 @@ def diffusion_loss_fn_parallel(
                 interval=200,
             )
 
-            # -------------------------
-            # Raw
-            # -------------------------
-            # log_embedding_stats("user_m_raw", final_output_m, model.global_step)
-            # log_embedding_stats("user_g_raw", final_output_g, model.global_step)
-
-            # final_output_m_proj = model.linear_m(final_output_m)
-            # final_output_g_proj = model.linear_g(final_output_g)
-
-            # -------------------------
-            # Proj
-            # -------------------------
-            # log_embedding_stats("user_m_proj", final_output_m_proj, model.global_step)
-            # log_embedding_stats("user_g_proj", final_output_g_proj, model.global_step)
             if model.parallel["batch_norm"]:
                 final_output_m = model.ln_m(final_output_m)
                 final_output_g = model.ln_g(final_output_g)
 
-            # -------------------------
-            # Norm
-            # -------------------------
-            # log_embedding_stats("user_m_norm", final_output_m, model.global_step)
-            # log_embedding_stats("user_g_norm", final_output_g, model.global_step)
-
             base_tokens = torch.stack([final_output_m, final_output_g], dim=1)
 
-            # uni_loss_m = uniformity_loss(final_output_m, t=2.0)
-            # uni_loss_g = uniformity_loss(final_output_g, t=2.0)
-            # uni_loss = uni_loss_m + uni_loss_g
-
         elif model.aggregation == "aggregation_ab1":
-            # final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0)
             final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
-            # final_output_m_proj = model.linear_m(final_output_m)
+
             if model.parallel["batch_norm"]:
                 final_output_m = model.ln_m(final_output_m)
+
             base_tokens = torch.stack([final_output_m], dim=1)
 
         elif model.aggregation == "aggregation_ab2":
             final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=0)
-            # final_output_g_proj = model.linear_g(final_output_g)
+
             if model.parallel["batch_norm"]:
                 final_output_g = model.ln_g(final_output_g)
+
             base_tokens = torch.stack([final_output_g], dim=1)
 
-        if model.parallel["set_aggr"] == "item":
-            tokens = base_tokens
-
-        elif model.parallel["set_aggr"] == "item_i":
+        if model.parallel["set_aggr"] == "item_i":
             iid = iid.squeeze(1)
 
             style_tgt_item = model.style_tgt_item.to(base_tokens.device)  # [I_total, F_item]
@@ -548,19 +517,16 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_aggr"] == "item":
             tokens = base_tokens
 
-        # degree_raw = model.degree_by_uid[uid]
-        # degree_emb = model.degree_scale * model.degree_encoder(degree_raw.float().unsqueeze(1))
-        # degree_emb = degree_emb.unsqueeze(1)  # [B, 1, D]
-        # tokens = torch.cat([tokens, degree_emb], dim=1)  # [B, N+1, D]
-
         out = model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
         final_output = out[:, 0, :]  # (B, D)
 
-        uni_loss = uniformity_loss(final_output, t=2.0)  ###############0414 uniformity 실험을 위해 추가
+        print_batch_node_similarity(emb=final_output, step=model.task_step, prefix="final_output", interval=200)
 
-        y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+        uni_loss = uniformity_loss(final_output, t=2.0)
 
-        model.global_step += 1
+        y_pred = torch.sum(final_output * iid_emb, dim=1)
+
+        model.task_step += 1
 
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
@@ -571,7 +537,7 @@ def diffusion_loss_fn_parallel(
         if model.aggregation == "aggregation":
             return model.task_lambda * task_loss, model.parallel["uniformity_loss"] * uni_loss
         elif model.aggregation == "aggregation_ab1":
-            return model.task_lambda * task_loss, model.parallel["uniformity_loss"] * uni_loss
+            return model.task_lambda * task_loss, 0 * uni_loss
         elif model.aggregation == "aggregation_ab2":
             return model.task_lambda * task_loss, model.parallel["uniformity_loss"] * uni_loss
 
@@ -879,3 +845,28 @@ def print_debug_metrics(step, x_0_m, x_0_g, final_output_m, final_output_g, iid_
         f"sim final_m: {sim_final_m:.4f} | "
         f"sim final_g: {sim_final_g:.4f}"
     )
+
+
+def print_batch_node_similarity(emb, step, prefix="Embedding", interval=200):
+    """
+    emb    : [B, D]
+    step   : 현재 step, 예: model.task_step
+    prefix : 출력 이름
+    """
+    if step % interval != 0:
+        return
+
+    with torch.no_grad():
+        normed = F.normalize(emb, dim=1)
+        sim_matrix = torch.matmul(normed, normed.t())  # [B, B]
+
+        batch_size = sim_matrix.size(0)
+        mask = ~torch.eye(batch_size, dtype=torch.bool, device=sim_matrix.device)
+
+        sims = sim_matrix[mask]
+
+        print(f"\n[Step {step}] {prefix} Similarity")
+        print(f"Mean : {sims.mean().item():.6f}")
+        print(f"Std  : {sims.std().item():.6f}")
+        print(f"Min  : {sims.min().item():.6f}")
+        print(f"Max  : {sims.max().item():.6f}")

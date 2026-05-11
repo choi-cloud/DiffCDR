@@ -307,8 +307,6 @@ class MFBasedModel(torch.nn.Module):
                 final_output_m, iid_emb = p_sample(diff_model, cond1, iid_emb, device, diff_id=0)
                 final_output_g, iid_emb = p_sample(diff_model, cond2, iid_emb, device, diff_id=1)
 
-                # final_output_m = diff_model.ln_m(diff_model.linear_m(final_output_m))
-                # final_output_g = diff_model.ln_g(diff_model.linear_g(final_output_g))
                 if diff_model.parallel["batch_norm"]:
                     final_output_m = diff_model.ln_m(final_output_m)
                     final_output_g = diff_model.ln_g(final_output_g)
@@ -317,16 +315,12 @@ class MFBasedModel(torch.nn.Module):
             elif diff_model.aggregation == "aggregation_ab1":
                 final_output_m, iid_emb = p_sample(diff_model, cond1, iid_emb, device, diff_id=0)
                 if diff_model.parallel["batch_norm"]:
-                    # final_output_m, iid_emb = p_sample(diff_model, start1, cond1, iid_emb, device, diff_id=0)
-                    # final_output_m = diff_model.ln_m(diff_model.linear_m(final_output_m))
                     final_output_m = diff_model.ln_m(final_output_m)
                 base_tokens = torch.stack([final_output_m], dim=1)
 
             elif diff_model.aggregation == "aggregation_ab2":
                 final_output_g, iid_emb = p_sample(diff_model, cond2, iid_emb, device, diff_id=0)
                 if diff_model.parallel["batch_norm"]:
-                    # final_output_g, iid_emb = p_sample(diff_model, start1, cond1, iid_emb, device, diff_id=0)
-                    # final_output_g = diff_model.ln_g(diff_model.linear_m(final_output_g))
                     final_output_g = diff_model.ln_m(final_output_g)
                 base_tokens = torch.stack([final_output_g], dim=1)
 
@@ -379,14 +373,6 @@ class MFBasedModel(torch.nn.Module):
                 style_tok_u = diff_model.style_scale * style_tok  # (B, D)
 
                 tokens = torch.cat([base_tokens, style_tok_u.unsqueeze(1)], dim=1)
-
-            elif diff_model.parallel["set_aggr"] == "item":
-                tokens = base_tokens
-
-            # degree_raw = diff_model.degree_by_uid[uid]
-            # degree_emb = diff_model.degree_scale * diff_model.degree_encoder(degree_raw.float().unsqueeze(1))
-            # degree_emb = degree_emb.unsqueeze(1)  # [B, 1, D]
-            # tokens = torch.cat([tokens, degree_emb], dim=1)  # [B, N+1, D]
 
             out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
             final_output = out[:, 0, :]  # (B, D)
