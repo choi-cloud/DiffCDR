@@ -637,12 +637,12 @@ def diffusion_loss_fn_parallel(
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
 
-        if model.parallel["set_aggr"] != "item":
-            task_loss += model.parallel["mapping_lambda"] * mapping_loss
+        # if model.parallel["set_aggr"] != "item":
+        #     task_loss += model.parallel["mapping_lambda"] * mapping_loss
 
         if model.aggregation == "aggregation":
             # return model.task_lambda * task_loss, model.parallel["uniformity_loss"] * uni_loss
-            return model.task_lambda * task_loss, 0.1 * uni_loss
+            return (model.task_lambda * task_loss) + (10 * mapping_loss), 0.1 * uni_loss
         elif model.aggregation == "aggregation_ab1":
             return model.task_lambda * task_loss, 0 * uni_loss
         elif model.aggregation == "aggregation_ab2":
