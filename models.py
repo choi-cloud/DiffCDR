@@ -376,7 +376,13 @@ class MFBasedModel(torch.nn.Module):
 
             out = diff_model.attn_layer(tokens, query=iid_emb.unsqueeze(1))  # (B, 1, D)
             final_output = out[:, 0, :]  # (B, D)
-            y_pred = torch.sum(final_output * iid_emb, dim=1)  # user, item emb 내적해서 예측
+
+            if diff_model.aggregation == "aggregation":
+                y_pred = torch.sum(final_output * iid_emb, dim=1)
+            elif diff_model.aggregation == "aggregation_ab1":
+                y_pred = torch.sum(final_output_m * iid_emb, dim=1)
+            elif diff_model.aggregation == "aggregation_ab2":
+                y_pred = torch.sum(final_output_g * iid_emb, dim=1)
 
             return y_pred
 

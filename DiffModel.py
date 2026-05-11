@@ -394,15 +394,51 @@ def diffusion_loss_fn_parallel(
         else:
             c1, c2 = cond_emb1, cond_emb2
 
+        model.diff_step += 1
+
         if model.aggregation == "aggregation":
             output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)
             output2 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=1)
             return F.smooth_l1_loss(x_0_m, output1) + F.smooth_l1_loss(x_0_g, output2)
+
         elif model.aggregation == "aggregation_ab1":
             output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)
+
+            # -------------------------------------------------
+            # debug: x0_pred rating MAE + batch similarity
+            # -------------------------------------------------
+            if model.diff_step % 200 == 0:
+                with torch.no_grad():
+                    x0_pred = output1
+
+                    y_pred = torch.sum(x0_pred * iid_emb, dim=1)
+                    mae = torch.mean(torch.abs(y_pred - y_input.squeeze().float()))
+
+                    print(f"\n[Step {model.diff_step}] x0_pred Rating MAE")
+                    print(f"MAE : {mae.item():.6f}")
+
+                    print_batch_node_similarity(emb=x0_pred, step=model.diff_step, prefix="x0_pred", interval=200)
+
             return F.smooth_l1_loss(x_0_m, output1)
+
         elif model.aggregation == "aggregation_ab2":
             output1 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=0)
+
+            # -------------------------------------------------
+            # debug: x0_pred rating MAE + batch similarity
+            # -------------------------------------------------
+            if model.diff_step % 200 == 0:
+                with torch.no_grad():
+                    x0_pred = output1
+
+                    y_pred = torch.sum(x0_pred * iid_emb, dim=1)
+                    mae = torch.mean(torch.abs(y_pred - y_input.squeeze().float()))
+
+                    print(f"\n[Step {model.diff_step}] x0_pred Rating MAE")
+                    print(f"MAE : {mae.item():.6f}")
+
+                    print_batch_node_similarity(emb=x0_pred, step=model.diff_step, prefix="x0_pred", interval=200)
+
             return F.smooth_l1_loss(x_0_g, output1)
 
     elif is_task:
@@ -420,10 +456,8 @@ def diffusion_loss_fn_parallel(
             cond1, cond2 = cond_emb1, cond_emb2
             p_sample = p_sample_loop_x0_solver
 
-        # log_embedding_stats("item_raw", iid_emb, model.global_step)
         if model.parallel["batch_norm"]:
             iid_emb = model.ln_iid(iid_emb)
-        # log_embedding_stats("item_norm", iid_emb, model.global_step)
 
         if model.aggregation == "aggregation":
             final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
@@ -449,6 +483,8 @@ def diffusion_loss_fn_parallel(
         elif model.aggregation == "aggregation_ab1":
             final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
 
+            print_batch_node_similarity(emb=final_output_m, step=model.task_step, prefix="final_output_m", interval=200)
+
             if model.parallel["batch_norm"]:
                 final_output_m = model.ln_m(final_output_m)
 
@@ -456,6 +492,8 @@ def diffusion_loss_fn_parallel(
 
         elif model.aggregation == "aggregation_ab2":
             final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=0)
+
+            print_batch_node_similarity(emb=final_output_g, step=model.task_step, prefix="final_output_g", interval=200)
 
             if model.parallel["batch_norm"]:
                 final_output_g = model.ln_g(final_output_g)
@@ -524,7 +562,12 @@ def diffusion_loss_fn_parallel(
 
         uni_loss = uniformity_loss(final_output, t=2.0)
 
-        y_pred = torch.sum(final_output * iid_emb, dim=1)
+        if model.aggregation == "aggregation":
+            y_pred = torch.sum(final_output * iid_emb, dim=1)
+        elif model.aggregation == "aggregation_ab1":
+            y_pred = torch.sum(final_output_m * iid_emb, dim=1)
+        elif model.aggregation == "aggregation_ab2":
+            y_pred = torch.sum(final_output_g * iid_emb, dim=1)
 
         model.task_step += 1
 
@@ -539,65 +582,7 @@ def diffusion_loss_fn_parallel(
         elif model.aggregation == "aggregation_ab1":
             return model.task_lambda * task_loss, 0 * uni_loss
         elif model.aggregation == "aggregation_ab2":
-            return model.task_lambda * task_loss, model.parallel["uniformity_loss"] * uni_loss
-
-
-def log_prediction_stats(name, pred, global_step, log_every=200):
-    if global_step % log_every != 0:
-        return
-
-    with torch.no_grad():
-        print(f"[{name}] pred")
-        print(f" mean={pred.mean().item():.4f}, std={pred.std().item():.4f}, " f"min={pred.min().item():.4f}, max={pred.max().item():.4f}")
-        print("")
-
-
-def log_embedding_stats(name, emb, global_step, log_every=200):
-    if global_step % log_every != 0:
-        return
-
-    with torch.no_grad():
-        B, D = emb.shape
-
-        # -----------------------------
-        # norm stats
-        # -----------------------------
-        norm = emb.norm(dim=1)  # [B]
-        norm_mean = norm.mean().item()
-        norm_std = norm.std().item()
-        norm_min = norm.min().item()
-        norm_max = norm.max().item()
-
-        # -----------------------------
-        # per-sample mean/std (중요!!)
-        # -----------------------------
-        mean = emb.mean(dim=1)
-        std = emb.std(dim=1)
-
-        mean_mean = mean.mean().item()
-        mean_std = mean.std().item()
-
-        std_mean = std.mean().item()
-        std_std = std.std().item()
-
-        # -----------------------------
-        # cosine similarity (batch 내)
-        # -----------------------------
-        emb_unit = F.normalize(emb, p=2, dim=1)
-        sim_matrix = torch.matmul(emb_unit, emb_unit.t())  # [B, B]
-
-        offdiag = sim_matrix[~torch.eye(B, dtype=bool, device=emb.device)]
-        sim_mean = offdiag.mean().item()
-        sim_std = offdiag.std().item()
-        sim_min = offdiag.min().item()
-        sim_max = offdiag.max().item()
-
-        print(f"[{name}]")
-        print(f" norm     | mean={norm_mean:.4f}, std={norm_std:.4f}, min={norm_min:.4f}, max={norm_max:.4f}")
-        print(f" mean     | mean={mean_mean:.4f}, std={mean_std:.4f}")
-        print(f" std      | mean={std_mean:.4f}, std={std_std:.4f}")
-        print(f" cosine   | mean={sim_mean:.4f}, std={sim_std:.4f}, min={sim_min:.4f}, max={sim_max:.4f}")
-        print("")
+            return model.task_lambda * task_loss, 0 * uni_loss
 
 
 def uniformity_loss(z, t=2.0):
