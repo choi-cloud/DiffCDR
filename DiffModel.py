@@ -616,7 +616,7 @@ def diffusion_loss_fn_parallel(
 
         if model.aggregation == "aggregation":
             # return model.task_lambda * task_loss, model.parallel["uniformity_loss"] * uni_loss
-            return model.task_lambda * task_loss, 0 * uni_loss
+            return model.task_lambda * task_loss, 0.1 * uni_loss
         elif model.aggregation == "aggregation_ab1":
             return model.task_lambda * task_loss, 0 * uni_loss
         elif model.aggregation == "aggregation_ab2":
