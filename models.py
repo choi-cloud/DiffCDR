@@ -348,24 +348,76 @@ class MFBasedModel(torch.nn.Module):
             elif diff_model.parallel["set_aggr"] == "item_iu":
                 uid = tgt_uid.long()  # (B,)
                 iid = iid_input.squeeze(1)
-                style_src = style_src.to(start1.device)
-                style_u = style_src[uid][:, :2]  # (B, F)
+
+                style_src = style_src.to(base_tokens.device)
+
+                # --------------------------------------------------
+                # user bias: raw -> normalize
+                # --------------------------------------------------
+                style_u_raw = style_src[uid][:, :2]  # (B, 2)
+
+                style_u_mean = style_u_raw.mean(dim=0, keepdim=True)
+                style_u_std = style_u_raw.std(dim=0, keepdim=True)
+                style_u_norm = (style_u_raw - style_u_mean) / (style_u_std + 1e-8)
 
                 if diff_model.parallel["bias_mapping"] == "user":
-                    style_u = diff_model.user_style_mapper(style_u)
-                    style_u = style_u.detach()
+                    style_u = diff_model.user_style_mapper(style_u_norm)
 
+                    target_u_raw = diff_model.style_tgt_user[uid, :2].to(base_tokens.device)
+
+                    target_u_mean = target_u_raw.mean(dim=0, keepdim=True)
+                    target_u_std = target_u_raw.std(dim=0, keepdim=True)
+                    target_u_norm = (target_u_raw - target_u_mean) / (target_u_std + 1e-8)
+
+                    mapping_loss = F.mse_loss(style_u, target_u_norm)
+
+                    style_u = style_u.detach()
+                else:
+                    style_u = style_u_norm
+
+                # --------------------------------------------------
+                # user encoder-decoder
+                # --------------------------------------------------
                 style_tok = diff_model.style_encoder(style_u)  # (B, D)
-                style_tok = diff_model.style_ln(style_tok)  # (B, D)
+                style_recon = diff_model.style_decoder(style_tok)  # (B, 2)
+
+                user_style_recon_loss = F.mse_loss(style_recon, style_u.detach())
+
+                style_tok = diff_model.style_ln(style_tok.detach())  # (B, D)
                 style_tok_u = diff_model.style_scale * style_tok  # (B, D)
 
-                style_tgt_item = diff_model.style_tgt_item.to(start1.device)  # [I_total, F_item]
-                style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
-                item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
-                item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
+                # --------------------------------------------------
+                # item bias: raw -> normalize
+                # --------------------------------------------------
+                style_tgt_item = diff_model.style_tgt_item.to(base_tokens.device)
+                style_i_raw = style_tgt_item[iid][:, :2]  # (B, 2)
+
+                style_i_mean = style_i_raw.mean(dim=0, keepdim=True)
+                style_i_std = style_i_raw.std(dim=0, keepdim=True)
+                style_i_norm = (style_i_raw - style_i_mean) / (style_i_std + 1e-8)
+
+                # --------------------------------------------------
+                # item encoder-decoder
+                # --------------------------------------------------
+                item_style_tok = diff_model.item_style_encoder(style_i_norm)  # (B, D)
+                item_style_recon = diff_model.item_style_decoder(item_style_tok)  # (B, 2)
+
+                item_style_recon_loss = F.mse_loss(item_style_recon, style_i_norm.detach())
+
+                item_style_tok = diff_model.item_style_ln(item_style_tok.detach())  # (B, D)
                 item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
 
-                tokens = torch.cat([base_tokens, style_tok_u.unsqueeze(1), item_style_tok.unsqueeze(1)], dim=1)
+                # --------------------------------------------------
+                # key/value tokens: MF, AGGR only
+                # --------------------------------------------------
+                tokens = base_tokens  # (B, 2, D)
+
+                # --------------------------------------------------
+                # query: encoded user bias + encoded item bias
+                # --------------------------------------------------
+                query_bias = style_tok_u + item_style_tok  # (B, D)
+
+                query = diff_model.query_proj(query_bias).unsqueeze(1)  # (B, 1, D)
 
             elif diff_model.parallel["set_aggr"] == "item_u":
                 uid = tgt_uid.long()  # (B,)

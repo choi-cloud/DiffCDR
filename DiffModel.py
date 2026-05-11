@@ -249,6 +249,9 @@ class DiffParallel(nn.Module):
             self.item_style_ln = nn.LayerNorm(input_dim)
             self.item_style_scale = nn.Parameter(torch.tensor(0.1))
 
+            self.style_decoder = nn.Linear(input_dim, 2)
+            self.item_style_decoder = nn.Linear(input_dim, 2)
+
         elif self.parallel["set_aggr"] == "item_u":
             self.style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
             self.style_ln = nn.LayerNorm(input_dim)
@@ -488,10 +491,11 @@ def diffusion_loss_fn_parallel(
         if model.parallel["batch_norm"]:
             iid_emb = model.ln_iid(iid_emb)
 
-        if model.aggregation == "aggregation":
-            query = model.query_proj(iid_emb).unsqueeze(1)
-        else:
-            query = iid_emb.unsqueeze(1)
+        if model.parallel["set_aggr"] != "item_iu":
+            if model.aggregation == "aggregation":
+                query = model.query_proj(iid_emb).unsqueeze(1)
+            else:
+                query = iid_emb.unsqueeze(1)
 
         if model.aggregation == "aggregation":
             final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
@@ -542,24 +546,79 @@ def diffusion_loss_fn_parallel(
             iid = iid.squeeze(1)
 
             style_src = style_src.to(base_tokens.device)
-            style_u = style_src[uid][:, :2]  # (B, F)
+
+            # --------------------------------------------------
+            # user bias: raw -> normalize
+            # --------------------------------------------------
+            style_u_raw = style_src[uid][:, :2]  # (B, 2)
+
+            style_u_mean = style_u_raw.mean(dim=0, keepdim=True)
+            style_u_std = style_u_raw.std(dim=0, keepdim=True)
+            style_u_norm = (style_u_raw - style_u_mean) / (style_u_std + 1e-8)
 
             if model.parallel["bias_mapping"] == "user":
-                style_u = model.user_style_mapper(style_u)
-                mapping_loss = F.mse_loss(style_u, model.style_tgt_user[uid, :2])
-                style_u = style_u.detach()
+                style_u = model.user_style_mapper(style_u_norm)
 
+                target_u_raw = model.style_tgt_user[uid, :2].to(base_tokens.device)
+
+                target_u_mean = target_u_raw.mean(dim=0, keepdim=True)
+                target_u_std = target_u_raw.std(dim=0, keepdim=True)
+                target_u_norm = (target_u_raw - target_u_mean) / (target_u_std + 1e-8)
+
+                mapping_loss = F.mse_loss(style_u, target_u_norm)
+
+                style_u = style_u.detach()
+            else:
+                style_u = style_u_norm
+
+            # --------------------------------------------------
+            # user encoder-decoder
+            # --------------------------------------------------
             style_tok = model.style_encoder(style_u)  # (B, D)
-            style_tok = model.style_ln(style_tok)  # (B, D)
+            style_recon = model.style_decoder(style_tok)  # (B, 2)
+
+            user_style_recon_loss = F.mse_loss(style_recon, style_u.detach())
+
+            style_tok = model.style_ln(style_tok.detach())  # (B, D)
             style_tok_u = model.style_scale * style_tok  # (B, D)
 
-            style_tgt_item = model.style_tgt_item.to(base_tokens.device)  # [I_total, F_item]
-            style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
-            item_style_tok = model.item_style_encoder(style_i)  # (B, D)
-            item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
+            # --------------------------------------------------
+            # item bias: raw -> normalize
+            # --------------------------------------------------
+            style_tgt_item = model.style_tgt_item.to(base_tokens.device)
+            style_i_raw = style_tgt_item[iid][:, :2]  # (B, 2)
+
+            style_i_mean = style_i_raw.mean(dim=0, keepdim=True)
+            style_i_std = style_i_raw.std(dim=0, keepdim=True)
+            style_i_norm = (style_i_raw - style_i_mean) / (style_i_std + 1e-8)
+
+            # --------------------------------------------------
+            # item encoder-decoder
+            # --------------------------------------------------
+            item_style_tok = model.item_style_encoder(style_i_norm)  # (B, D)
+            item_style_recon = model.item_style_decoder(item_style_tok)  # (B, 2)
+
+            item_style_recon_loss = F.mse_loss(item_style_recon, style_i_norm.detach())
+
+            item_style_tok = model.item_style_ln(item_style_tok.detach())  # (B, D)
             item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
 
-            tokens = torch.cat([base_tokens, style_tok_u.unsqueeze(1), item_style_tok.unsqueeze(1)], dim=1)
+            # --------------------------------------------------
+            # total style reconstruction loss
+            # --------------------------------------------------
+            style_recon_loss = user_style_recon_loss + item_style_recon_loss
+
+            # --------------------------------------------------
+            # key/value tokens: MF, AGGR only
+            # --------------------------------------------------
+            tokens = base_tokens  # (B, 2, D)
+
+            # --------------------------------------------------
+            # query: encoded user bias + encoded item bias
+            # --------------------------------------------------
+            query_bias = style_tok_u + item_style_tok  # (B, D)
+
+            query = model.query_proj(query_bias).unsqueeze(1)  # (B, 1, D)
 
         elif model.parallel["set_aggr"] == "item_u":
             uid = uid.long()  # (B,)
@@ -655,7 +714,10 @@ def diffusion_loss_fn_parallel(
 
         if model.aggregation == "aggregation":
             # return model.task_lambda * task_loss, model.parallel["uniformity_loss"] * uni_loss
-            return (model.task_lambda * task_loss) + (10 * mapping_loss), 0.1 * uni_loss
+            if model.parallel["set_aggr"] == "item_iu":
+                return (model.task_lambda * task_loss) + (10 * mapping_loss) + (0.1 * style_recon_loss), 0.1 * uni_loss
+            else:
+                return model.task_lambda * task_loss, 0.1 * uni_loss
         elif model.aggregation == "aggregation_ab1":
             return model.task_lambda * task_loss, 0 * uni_loss
         elif model.aggregation == "aggregation_ab2":
