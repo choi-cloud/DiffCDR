@@ -207,22 +207,36 @@ class DiffParallel(nn.Module):
         # self.degree_scale = nn.Parameter(torch.tensor(0.1))
 
         if self.aggregation in ["aggregation", "aggregation_ab1"]:
-            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim)]))
+            self.diff_models.append(
+                nn.ModuleList([nn.Sequential(nn.Linear(input_dim * 3, input_dim), nn.Linear(input_dim, input_dim), nn.Linear(input_dim, input_dim))])
+            )
+
             self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
-            # self.linear_m = nn.Linear(input_dim, input_dim, False)
+
             if self.parallel["batch_norm"]:
                 self.ln_m = nn.BatchNorm1d(input_dim)
+
             if self.aggregation == "aggregation":
                 self.mf_proj = nn.Linear(input_dim, input_dim)
                 self.aggr_proj = nn.Linear(input_dim, input_dim)
+
                 self.mf_norm = nn.LayerNorm(input_dim)
                 self.aggr_norm = nn.LayerNorm(input_dim)
-                self.query_proj = nn.Sequential(nn.Linear(input_dim, input_dim), nn.LayerNorm(input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+
+                self.query_proj = nn.Sequential(
+                    nn.Linear(input_dim, input_dim),
+                    nn.LayerNorm(input_dim),
+                    nn.ReLU(),
+                    nn.Linear(input_dim, input_dim),
+                )
 
         if self.aggregation in ["aggregation", "aggregation_ab2"]:
-            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim)]))
+            self.diff_models.append(
+                nn.ModuleList([nn.Sequential(nn.Linear(input_dim * 3, input_dim), nn.Linear(input_dim, input_dim), nn.Linear(input_dim, input_dim))])
+            )
+
             self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
-            # self.linear_g = nn.Linear(input_dim, input_dim, False)
+
             if self.parallel["batch_norm"]:
                 self.ln_g = nn.BatchNorm1d(input_dim)
 
@@ -264,18 +278,65 @@ class DiffParallel(nn.Module):
             self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
             self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
             self.rq_alpha_logit = nn.Parameter(torch.tensor(-2.0))
+            self.rq_attn = nn.MultiheadAttention(embed_dim=self.input_dim, num_heads=1, batch_first=True)  # D
+            self.rq_attn_ln = nn.LayerNorm(self.input_dim)
+            self.rq_q_ln = nn.LayerNorm(self.input_dim)
+            self.rq_k_ln = nn.LayerNorm(self.input_dim)
+            self.rq_v_ln = nn.LayerNorm(self.input_dim)
+            self.rq_attn_out_ln = nn.LayerNorm(self.input_dim)
+
+            self.rq_query_proj = nn.Linear(self.input_dim, self.input_dim)
+            self.rq_key_proj = nn.Linear(self.input_dim, self.input_dim)
+            self.rq_value_proj = nn.Linear(self.input_dim, self.input_dim)
+
+            self.rq_query_fusion = nn.Sequential(nn.Linear(self.input_dim * 2, self.input_dim), nn.SiLU(), nn.Linear(self.input_dim, self.input_dim))
 
     def forward(self, x, t, cond_emb, cond_mask, diff_id=0, zero_cond=None):
 
         for idx in range(self.num_layers):
-            t_embedding = self.step_mlp(t)
+            t_embedding = self.step_mlp(t)  # [B, D]
 
-            # cond_embedding = self.cond_emb_linear[diff_id](cond_emb)
+            if self.rqvae["RQVAE"] == True:
+                # cond_emb: [B, L, D]
+                if cond_emb.dim() == 3 and cond_emb.shape[0] != x.shape[0]:
+                    cond_emb = cond_emb.permute(1, 0, 2).contiguous()
+
+                # ------------------------
+                # query = f(x_t, t)
+                # ------------------------
+                query_input = torch.cat([x, t_embedding], dim=-1)  # [B, 2D]
+
+                query = self.rq_query_fusion(query_input).unsqueeze(1)  # [B, 1, D]
+
+                q = self.rq_q_ln(query)
+                q = self.rq_query_proj(q)
+
+                # ------------------------
+                # key / value
+                # ------------------------
+                k = self.rq_k_ln(cond_emb)
+                k = self.rq_key_proj(k)
+
+                v = self.rq_v_ln(cond_emb)
+                v = self.rq_value_proj(v)
+
+                # ------------------------
+                # attention
+                # ------------------------
+                cond_attn, attn_weight = self.rq_attn(query=q, key=k, value=v, need_weights=True, average_attn_weights=False)
+
+                cond_embedding = cond_attn.squeeze(1)  # [B, D]
+                cond_embedding = self.rq_attn_out_ln(cond_embedding)
+
+                self.last_rq_attn = attn_weight.detach()
+
+            else:
+                cond_embedding = cond_emb  # [B, D]
 
             if zero_cond:
                 cond_embedding = torch.zeros_like(cond_embedding)
 
-            x = torch.cat([t_embedding, cond_emb, x], axis=1)
+            x = torch.cat([t_embedding, cond_embedding, x], dim=1)
 
             x = self.diff_models[diff_id][0](x)
 
@@ -419,15 +480,7 @@ def diffusion_loss_fn_parallel(
         cond_mask2 = 1 - cond_mask2.int()
 
         if model.rqvae["RQVAE"] == True and q_embs1 is not None:
-            ns = NoiseScheduleVP(schedule="linear")
-            t_cont = t.squeeze(-1).float() / model.num_steps
-
-            c1 = hierarchical_cond_from_levels(q_embs1, t_cont, ns)
-            c2 = hierarchical_cond_from_levels(q_embs2, t_cont, ns) if q_embs2 is not None else cond_emb2
-
-            alpha = torch.sigmoid(model.rq_alpha_logit)
-            c1 = (1.0 - alpha) * cond_emb1 + alpha * c1
-            c2 = (1.0 - alpha) * cond_emb2 + alpha * c2
+            c1, c2 = q_embs1, q_embs2
 
         else:
             c1, c2 = cond_emb1, cond_emb2
@@ -873,11 +926,7 @@ def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise"
         t_prev = torch.full((batch_size,), timesteps[i + 1].item(), device=device, dtype=torch.long)
 
         if model.rqvae["RQVAE"]:
-            ns = NoiseScheduleVP(schedule="linear")
-            t_cont = t.float() / model.num_steps
-            cond_emb = hierarchical_cond_from_levels(q_embs, t_cont, ns)  # [L, B, D] -> [B, D]
-            alpha = torch.sigmoid(model.rq_alpha_logit)
-            cond_emb = (1.0 - alpha) * cond_ori + alpha * cond_emb
+            cond_emb = q_embs
 
         x_t, x0_pred = ddim_step_from_x0(
             model=model, x_t=x_t, t=t, t_prev=t_prev, cond_emb=cond_emb, device=device, cond_mask=cond_mask, eta=eta, diff_id=diff_id
@@ -888,11 +937,7 @@ def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise"
     t0 = torch.zeros(batch_size, device=device, dtype=torch.long)
 
     if model.rqvae["RQVAE"]:
-        ns = NoiseScheduleVP(schedule="linear")
-        t_cont = t0.float() / model.num_steps
-        cond_emb = hierarchical_cond_from_levels(q_embs, t_cont, ns)  # [L, B, D] -> [B, D]
-        alpha = torch.sigmoid(model.rq_alpha_logit)
-        cond_emb = (1.0 - alpha) * cond_ori + alpha * cond_emb
+        cond_emb = q_embs
 
     if model.parallel["zero_cond"]:
         final_x0_pred = model(x_t, t0, cond_emb, cond_mask, diff_id=diff_id, zero_cond=True)
