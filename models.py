@@ -309,8 +309,8 @@ class MFBasedModel(torch.nn.Module):
                 query = iid_emb.unsqueeze(1)
 
             if diff_model.aggregation == "aggregation":
-                final_output_m, iid_emb = p_sample(diff_model, cond1, iid_emb, device, diff_id=0)
-                final_output_g, iid_emb = p_sample(diff_model, cond2, iid_emb, device, diff_id=1)
+                final_output_m, iid_emb = p_sample(diff_model, cond1, iid_emb, device, diff_id=0, cond_ori=cond_emb1)
+                final_output_g, iid_emb = p_sample(diff_model, cond2, iid_emb, device, diff_id=1, cond_ori=cond_emb2)
 
                 final_output_m = diff_model.mf_norm(diff_model.mf_proj(final_output_m))
                 final_output_g = diff_model.aggr_norm(diff_model.aggr_proj(final_output_g))

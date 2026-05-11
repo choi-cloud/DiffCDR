@@ -73,13 +73,13 @@ def model_wrapper_hierarchical_cond(
     return model_fn
 
 
-def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous: torch.Tensor, noise_schedule, temperature: float = 0.08):
+def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous: torch.Tensor, noise_schedule=None, temperature: float = 0.08):
     """
     all_level_vectors: [L, B, D]
-    t_continuous: [B]
+    t_continuous: [B], already normalized to [0, 1]
 
-    high noise -> coarse level 중심
-    low noise  -> fine level까지 soft하게 포함
+    high noise / large error -> q1+q2+q3+q4
+    low noise / small error   -> q1 중심
     """
     L, B, D = all_level_vectors.shape
     device = all_level_vectors.device
@@ -87,23 +87,19 @@ def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous:
     if t_continuous.dim() == 2:
         t_continuous = t_continuous.squeeze(-1)
 
-    T = noise_schedule.T
+    # high noise: 1, low noise: 0
+    # 이미 t / num_steps로 들어왔다고 가정
+    t_norm = torch.clamp(t_continuous, 0.0, 1.0)  # [B]
 
-    # high noise: 0, low noise: 1
-    t_norm = 1.0 - t_continuous / T
-    t_norm = torch.clamp(t_norm, 0.0, 1.0)  # [B]
-
-    # 각 level이 켜지기 시작하는 위치
     # L=4 -> [0.0, 0.25, 0.5, 0.75]
     level_pos = torch.arange(L, device=device, dtype=torch.float32) / L  # [L]
 
-    # q1은 항상 거의 켜짐
-    # q2,q3,q4는 t_norm이 커질수록 부드럽게 켜짐
     gates = torch.sigmoid((t_norm.unsqueeze(0) - level_pos.view(L, 1)) / temperature)  # [L, B]
 
+    # q1은 항상 사용
     gates[0, :] = 1.0
 
-    cond_emb = (all_level_vectors * gates.unsqueeze(-1)).sum(dim=0)  # [B, D]
+    cond_emb = (all_level_vectors * gates.unsqueeze(-1)).sum(dim=0)
 
     return cond_emb
 

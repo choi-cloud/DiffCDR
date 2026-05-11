@@ -263,6 +263,7 @@ class DiffParallel(nn.Module):
         if self.rqvae["RQVAE"]:
             self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
             self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
+            self.rq_alpha_logit = nn.Parameter(torch.tensor(-2.0))
 
     def forward(self, x, t, cond_emb, cond_mask, diff_id=0, zero_cond=None):
 
@@ -420,8 +421,13 @@ def diffusion_loss_fn_parallel(
         if model.rqvae["RQVAE"] == True and q_embs1 is not None:
             ns = NoiseScheduleVP(schedule="linear")
             t_cont = t.squeeze(-1).float() / model.num_steps
+
             c1 = hierarchical_cond_from_levels(q_embs1, t_cont, ns)
             c2 = hierarchical_cond_from_levels(q_embs2, t_cont, ns) if q_embs2 is not None else cond_emb2
+
+            alpha = torch.sigmoid(model.rq_alpha_logit)
+            c1 = (1.0 - alpha) * cond_emb1 + alpha * c1
+            c2 = (1.0 - alpha) * cond_emb1 + alpha * c2
 
         else:
             c1, c2 = cond_emb1, cond_emb2
@@ -498,9 +504,8 @@ def diffusion_loss_fn_parallel(
                 query = iid_emb.unsqueeze(1)
 
         if model.aggregation == "aggregation":
-            final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
-            final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=1)
-
+            final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0, cond_ori=cond_emb1)
+            final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=1, cond_ori=cond_emb2)
             final_output_m = model.mf_norm(model.mf_proj(final_output_m))
             final_output_g = model.aggr_norm(model.aggr_proj(final_output_g))
 
@@ -827,7 +832,7 @@ def make_ddim_timesteps(num_steps, sample_steps, device):
 
 
 @torch.no_grad()
-def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise", sample_steps=20, eta=0.0, diff_id=0):
+def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise", sample_steps=20, eta=0.0, diff_id=0, cond_ori=None):
     """
     solver-style sampling for x0-prediction model
 
@@ -871,6 +876,8 @@ def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise"
             ns = NoiseScheduleVP(schedule="linear")
             t_cont = t.float() / model.num_steps
             cond_emb = hierarchical_cond_from_levels(q_embs, t_cont, ns)  # [L, B, D] -> [B, D]
+            alpha = torch.sigmoid(model.rq_alpha_logit)
+            cond_emb = (1.0 - alpha) * cond_ori + alpha * cond_emb
 
         x_t, x0_pred = ddim_step_from_x0(
             model=model, x_t=x_t, t=t, t_prev=t_prev, cond_emb=cond_emb, device=device, cond_mask=cond_mask, eta=eta, diff_id=diff_id
@@ -884,6 +891,8 @@ def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise"
         ns = NoiseScheduleVP(schedule="linear")
         t_cont = t0.float() / model.num_steps
         cond_emb = hierarchical_cond_from_levels(q_embs, t_cont, ns)  # [L, B, D] -> [B, D]
+        alpha = torch.sigmoid(model.rq_alpha_logit)
+        cond_emb = (1.0 - alpha) * cond_ori + alpha * cond_emb
 
     if model.parallel["zero_cond"]:
         final_x0_pred = model(x_t, t0, cond_emb, cond_mask, diff_id=diff_id, zero_cond=True)
