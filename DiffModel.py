@@ -269,12 +269,12 @@ class DiffParallel(nn.Module):
         for idx in range(self.num_layers):
             t_embedding = self.step_mlp(t)
 
-            cond_embedding = self.cond_emb_linear[diff_id](cond_emb)
+            # cond_embedding = self.cond_emb_linear[diff_id](cond_emb)
 
             if zero_cond:
                 cond_embedding = torch.zeros_like(cond_embedding)
 
-            x = torch.cat([t_embedding, cond_embedding, x], axis=1)
+            x = torch.cat([t_embedding, cond_emb, x], axis=1)
 
             x = self.diff_models[diff_id][0](x)
 
