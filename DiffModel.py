@@ -184,6 +184,7 @@ class DiffParallel(nn.Module):
         self.degree_by_uid = None
         self.diff_step = 0
         self.task_step = 0
+        self.forward_step = 0
         # -----------------------------------------------
 
         # Parallel setting
@@ -291,7 +292,7 @@ class DiffParallel(nn.Module):
 
             self.rq_query_fusion = nn.Sequential(nn.Linear(self.input_dim * 2, self.input_dim), nn.SiLU(), nn.Linear(self.input_dim, self.input_dim))
 
-    def forward(self, x, t, cond_emb, cond_mask, diff_id=0, zero_cond=None):
+    def forward(self, x, t, cond_emb, cond_mask, diff_id=0, zero_cond=None, log_attn=False):
 
         for idx in range(self.num_layers):
             t_embedding = self.step_mlp(t)  # [B, D]
@@ -329,6 +330,47 @@ class DiffParallel(nn.Module):
                 cond_embedding = self.rq_attn_out_ln(cond_embedding)
 
                 self.last_rq_attn = attn_weight.detach()
+
+                # ------------------------
+                # RQ attention logging by t-bin
+                # ------------------------
+                if log_attn == True:
+                    self.forward_step += 1
+
+                    if self.forward_step % 200 == 0:
+                        with torch.no_grad():
+                            # attn_weight: [B, H, 1, L]
+                            attn = attn_weight.detach()
+
+                            # head/query 평균 -> [B, L]
+                            attn_per_sample = attn.mean(dim=(1, 2))
+
+                            # t: [B] or [B, 1] 대응
+                            t_flat = t.detach().view(-1).long()
+
+                            num_bins = 5
+                            max_t = self.num_steps - 1
+                            bin_size = (self.num_steps + num_bins - 1) // num_bins
+
+                            print(f"\n[Forward Step {self.forward_step}] RQ Attention by t-bin")
+
+                            for b in range(num_bins):
+                                lo = b * bin_size
+                                hi = min((b + 1) * bin_size - 1, max_t)
+
+                                mask = (t_flat >= lo) & (t_flat <= hi)
+
+                                if mask.sum() == 0:
+                                    continue
+
+                                bin_attn = attn_per_sample[mask]  # [N_bin, L]
+                                mean_attn = bin_attn.mean(dim=0)
+                                std_attn = bin_attn.std(dim=0)
+
+                                print(f"\nBin {b} | t range: {lo} ~ {hi} | count: {mask.sum().item()}")
+
+                                for l in range(mean_attn.size(0)):
+                                    print(f"RQ-{l+1:<2} | " f"mean: {mean_attn[l].item():.6f} | " f"std: {std_attn[l].item():.6f}")
 
             else:
                 cond_embedding = cond_emb  # [B, D]
@@ -489,7 +531,7 @@ def diffusion_loss_fn_parallel(
 
         if model.aggregation == "aggregation":
             output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)
-            output2 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=1)
+            output2 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=1, log_attn=True)
             return F.smooth_l1_loss(x_0_m, output1) + F.smooth_l1_loss(x_0_g, output2)
 
         elif model.aggregation == "aggregation_ab1":
