@@ -69,6 +69,9 @@ class Run:
             self.root + "stylecache/_" + str(int(self.ratio[0] * 10)) + "_" + str(int(self.ratio[1] * 10)) + "/tgt_" + self.tgt + "_src_" + self.src
         )
 
+        self.csvfile = config["csvfile"]
+        self.seed = config["seed"]
+
         isResidual = "residual"
         aggregaion_name = str(True)
         self.rqvae_ckpt_root = (
@@ -95,6 +98,7 @@ class Run:
             + "_tgt_"
             + self.tgt
             + "MF_MLP"
+            +"" if self.seed == 1 else str(self.seed)
         )
 
         self.results = {
@@ -124,6 +128,7 @@ class Run:
             "uniformity_loss": config["uniformity_loss"],
             "zero_cond": config["zero_cond"],
             "batch_norm": config["batch_norm"],
+            "recon_loss": config["recon_loss"]
         }
 
         self.rqvae_setting = {
@@ -1155,7 +1160,7 @@ class Run:
             self.update_results(mae, rmse, "sscdr")
             write("MAE: {} RMSE: {}".format(mae, rmse))
 
-    def LA_CDR(self, model, la_model, data_la, data_test, test_uid, optimizer_la):
+    def LA_CDR(self, model, la_model, data_la, data_test, optimizer_la):
         write("==========LA_CDR==========")
         for i in range(self.epoch):
             loss = self.train(data_la, [model, la_model], None, optimizer_la, i, stage="train_la", mapping=False, diff=False, ss=False, la=True)
@@ -1189,14 +1194,25 @@ class Run:
         else:
             model.load_state_dict(torch.load(path, map_location="cpu"))
 
-    def result_print(self, phase):
+    def result_print(self, phase, exp_part):
         print_str = ""
         for p in phase:
             write(f"⬇️ Eval {p}: MAE & RMSE ")
-            for m in ["_mae", "_rmse"]:
-                metric_name = p + m
-                print_str += metric_name + ": {:.6f} ".format(self.results[metric_name])
-                write(f"{self.results[metric_name]:.6f}")
+            with open(self.csvfile, 'a', newline='') as f:
+                writer = csv.writer(f)
+                for m in ["_mae", "_rmse"]:
+                    metric_name = p + m
+                    print_str += metric_name + ": {:.6f} ".format(self.results[metric_name])
+                    write(f"{self.results[metric_name]:.6f}")
+                    writer.writerow([
+                        self.seed,
+                        p,
+                        self.task,
+                        self.ratio[0] * 10, 
+                        self.ratio[1] * 10,
+                        m.strip("_"),
+                        self.results[metric_name]
+                    ])
 
     def main(self, exp_part="None_CDR", save_path=None):
         # exp_part 에 따라 모델, 옵티마이져 초기화하고 학습.
@@ -1298,32 +1314,34 @@ class Run:
             # CMF
             if self.base_model == "CMF":
                 self.DataAug(model, data_aug, data_test, criterion, optimizer_aug)
-            self.result_print(["tgt", "aug"])
+                self.result_print(["CMF", "aug"], exp_part)
+            else: 
+                self.result_print(["tgt"], exp_part)
             self.model_save(model, path=save_path)
 
         elif exp_part == "CDR":
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
             self.CDR(model, data_map, data_meta, data_test, criterion, optimizer_map, optimizer_meta)
-            self.result_print(["emcdr", "ptupcdr"])
+            self.result_print(["emcdr", "ptupcdr"], exp_part)
 
         elif exp_part == "ss_CDR":
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
             self.SS_CDR(model, ss_model, data_ss, data_test, optimizer_ss)
-            self.result_print(["sscdr"])
+            self.result_print(["sscdr"], exp_part)
 
         elif exp_part == "la_CDR":
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
             self.LA_CDR(model, la_model, data_la, data_test, optimizer_la)
-            self.result_print(["lacdr"])
+            self.result_print(["lacdr"], exp_part)
 
         elif exp_part == "diff_CDR":
             self.model_load(model, path=save_path)
             print("None_CDR model loaded")
             self.Diff_CDR(model, diff_model, data_diff, data_diff_test, optimizer_diff)
-            self.result_print(["diff"])
+            self.result_print(["diff"], exp_part)
 
         elif exp_part == "diff_parallel":
             self.model_load(model, path=save_path)
@@ -1343,4 +1361,4 @@ class Run:
                 style_tgt_item,
                 style_tgt_user,
             )
-            self.result_print(["diff_parallel"])
+            self.result_print(["diff_parallel"], exp_part)

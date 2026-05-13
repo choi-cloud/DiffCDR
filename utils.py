@@ -552,7 +552,19 @@ def make_dir(log_name):
     logfile = os.path.join(save_dir, f"{log_name}_log.txt")
     return logfile
 
+def make_csv_dir(log_name, headers):
+    parent_dir, current_dir = get_parent_curr_dir()
+    save_dir = os.path.join(current_dir, "results")
+    os.makedirs(save_dir, exist_ok=True)
+    logfile = os.path.join(save_dir, f"{log_name}_result.csv")
 
+    if not os.path.exists(logfile) and headers is not None:
+        with open(logfile, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+
+    return logfile
+    
 def get_save_name(args, pretrain_dataset_names, save_dir, result_dir):
     pretrain_dataset_str = ""
     for strs in pretrain_dataset_names:

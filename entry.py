@@ -68,6 +68,7 @@ def prepare_1():
     parser.add_argument("--uniformity_loss", type=float, default=0.1, help="uniformity loss 가중치")
     parser.add_argument("--zero_cond", type=str2bool, default=False, help="cond zero 실험")
     parser.add_argument("--batch_norm", type=str2bool, default=False, help="batch norm 사용 여부")
+    parser.add_argument("--recon_loss", type=float, default=0.1, help="bias reconstruction loss")
 
     args = parser.parse_args()
 
@@ -112,6 +113,7 @@ def prepare_2(args, config_path):
         config["uniformity_loss"] = args.uniformity_loss
         config["zero_cond"] = args.zero_cond
         config["batch_norm"] = args.batch_norm
+        config["recon_loss"] = args.recon_loss
 
     return config
 
@@ -155,6 +157,11 @@ if __name__ == "__main__":
         encoding="utf-8",
     )
 
+    headers = ["seed", "baseline", "task", "ratio0", "ratio1", "metric", "result"]
+    csvfile = utils.make_csv_dir(f"{args.experiment}", headers)
+    config["csvfile"] = csvfile
+    config["seed"] = args.seed
+
     utils.log_args_table(args, max_per_line=5, col_width=30)
     write(f"{' '+args.experiment+' ':=^{30}}")
     write(f"✅ Task  {args.task}")
@@ -171,5 +178,5 @@ if __name__ == "__main__":
     write(f"🍏 bias mapping : {args.bias_mapping}")
 
     if not args.process_data_mid and not args.process_data_ready:
-        Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth")
+        Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth" if args.seed == 1 else  f"{args.save_path}_{args.seed}_{args.task}_{args.ratio}.pth")
         write(f"{'':=^{30}}")

@@ -809,22 +809,18 @@ def diffusion_loss_fn_parallel(
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
 
-        # if model.parallel["set_aggr"] != "item":
-        #     task_loss += model.parallel["mapping_lambda"] * mapping_loss
-
         if model.aggregation == "aggregation":
-            # return model.task_lambda * task_loss, model.parallel["uniformity_loss"] * uni_loss
             if model.parallel["set_aggr"] == "item_iu":
                 return (
-                    (model.task_lambda * task_loss) + (model.parallel["mapping_lambda"] * mapping_loss) + (0.1 * style_recon_loss),
+                    task_loss + (model.parallel["mapping_lambda"] * mapping_loss) + (model.parallel["recon_loss"] * style_recon_loss),
                     model.parallel["uniformity_loss"] * uni_loss,
                 )
             else:
-                return model.task_lambda * task_loss, model.parallel["uniformity_loss"] * uni_loss
+                return task_loss, model.parallel["uniformity_loss"] * uni_loss
         elif model.aggregation == "aggregation_ab1":
-            return model.task_lambda * task_loss, 0 * uni_loss
+            return task_loss, 0 * uni_loss
         elif model.aggregation == "aggregation_ab2":
-            return model.task_lambda * task_loss, 0 * uni_loss
+            return task_loss, 0 * uni_loss
 
 
 def uniformity_loss(z, t=2.0):
@@ -957,8 +953,6 @@ def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise"
         x_t = torch.randn_like(x_init).to(device)  # [B, D]
     elif start_mode == "cond":
         x_t = x_init.clone().to(device)
-    else:
-        raise ValueError(f"Unknown start_mode: {start_mode}")
 
     cond_mask = torch.ones(batch_size, device=device, dtype=torch.int)
 
