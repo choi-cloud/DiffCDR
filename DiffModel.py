@@ -279,18 +279,24 @@ class DiffParallel(nn.Module):
             self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
             self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
             self.rq_alpha_logit = nn.Parameter(torch.tensor(-2.0))
-            self.rq_attn = nn.MultiheadAttention(embed_dim=self.input_dim, num_heads=1, batch_first=True)  # D
-            self.rq_attn_ln = nn.LayerNorm(self.input_dim)
-            self.rq_q_ln = nn.LayerNorm(self.input_dim)
-            self.rq_k_ln = nn.LayerNorm(self.input_dim)
-            self.rq_v_ln = nn.LayerNorm(self.input_dim)
-            self.rq_attn_out_ln = nn.LayerNorm(self.input_dim)
+            self.rq_attn = nn.ModuleList([
+                                            nn.MultiheadAttention(embed_dim=self.input_dim, num_heads=1, batch_first=True), 
+                                            nn.MultiheadAttention(embed_dim=self.input_dim, num_heads=1, batch_first=True)
+                                        ])  # D
+            self.rq_attn_ln = nn.ModuleList([nn.LayerNorm(self.input_dim), nn.LayerNorm(self.input_dim)])
+            self.rq_q_ln =  nn.ModuleList([nn.LayerNorm(self.input_dim), nn.LayerNorm(self.input_dim)])
+            self.rq_k_ln = nn.ModuleList([nn.LayerNorm(self.input_dim), nn.LayerNorm(self.input_dim)])
+            self.rq_v_ln = nn.ModuleList([nn.LayerNorm(self.input_dim), nn.LayerNorm(self.input_dim)])
+            self.rq_attn_out_ln = nn.ModuleList([nn.LayerNorm(self.input_dim), nn.LayerNorm(self.input_dim)])
 
-            self.rq_query_proj = nn.Linear(self.input_dim, self.input_dim)
-            self.rq_key_proj = nn.Linear(self.input_dim, self.input_dim)
-            self.rq_value_proj = nn.Linear(self.input_dim, self.input_dim)
+            self.rq_query_proj = nn.ModuleList([nn.Linear(self.input_dim, self.input_dim), nn.Linear(self.input_dim, self.input_dim)])
+            self.rq_key_proj = nn.ModuleList([nn.Linear(self.input_dim, self.input_dim), nn.Linear(self.input_dim, self.input_dim)])
+            self.rq_value_proj = nn.ModuleList([nn.Linear(self.input_dim, self.input_dim), nn.Linear(self.input_dim, self.input_dim)])
 
-            self.rq_query_fusion = nn.Sequential(nn.Linear(self.input_dim * 2, self.input_dim), nn.SiLU(), nn.Linear(self.input_dim, self.input_dim))
+            self.rq_query_fusion = nn.ModuleList([
+                                        nn.Sequential(nn.Linear(self.input_dim * 2, self.input_dim), nn.SiLU(), nn.Linear(self.input_dim, self.input_dim)),
+                                        nn.Sequential(nn.Linear(self.input_dim * 2, self.input_dim), nn.SiLU(), nn.Linear(self.input_dim, self.input_dim))
+                                        ])
 
     def forward(self, x, t, cond_emb, cond_mask, diff_id=0, zero_cond=None, log_attn=False):
 
@@ -307,27 +313,27 @@ class DiffParallel(nn.Module):
                 # ------------------------
                 query_input = torch.cat([x, t_embedding], dim=-1)  # [B, 2D]
 
-                query = self.rq_query_fusion(query_input).unsqueeze(1)  # [B, 1, D]
+                query = self.rq_query_fusion[diff_id](query_input).unsqueeze(1)  # [B, 1, D]
 
-                q = self.rq_q_ln(query)
-                q = self.rq_query_proj(q)
+                q = self.rq_q_ln[diff_id](query)
+                q = self.rq_query_proj[diff_id](q)
 
                 # ------------------------
                 # key / value
                 # ------------------------
-                k = self.rq_k_ln(cond_emb)
-                k = self.rq_key_proj(k)
+                k = self.rq_k_ln[diff_id](cond_emb)
+                k = self.rq_key_proj[diff_id](k)
 
-                v = self.rq_v_ln(cond_emb)
-                v = self.rq_value_proj(v)
+                v = self.rq_v_ln[diff_id](cond_emb)
+                v = self.rq_value_proj[diff_id](v)
 
                 # ------------------------
                 # attention
                 # ------------------------
-                cond_attn, attn_weight = self.rq_attn(query=q, key=k, value=v, need_weights=True, average_attn_weights=False)
+                cond_attn, attn_weight = self.rq_attn[diff_id](query=q, key=k, value=v, need_weights=True, average_attn_weights=False)
 
                 cond_embedding = cond_attn.squeeze(1)  # [B, D]
-                cond_embedding = self.rq_attn_out_ln(cond_embedding)
+                cond_embedding = self.rq_attn_out_ln[diff_id](cond_embedding)
 
                 self.last_rq_attn = attn_weight.detach()
 
