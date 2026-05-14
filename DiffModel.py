@@ -209,20 +209,22 @@ class DiffParallel(nn.Module):
         if self.aggregation in ["aggregation", "aggregation_ab1"]:
             self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim)]))
             self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
-            # self.linear_m = nn.Linear(input_dim, input_dim, False)
+            self.mf_proj = nn.Linear(input_dim, input_dim)
+            self.mf_norm = nn.LayerNorm(input_dim)
+
             if self.parallel["batch_norm"]:
                 self.ln_m = nn.BatchNorm1d(input_dim)
+
             if self.aggregation == "aggregation":
-                self.mf_proj = nn.Linear(input_dim, input_dim)
-                self.aggr_proj = nn.Linear(input_dim, input_dim)
-                self.mf_norm = nn.LayerNorm(input_dim)
-                self.aggr_norm = nn.LayerNorm(input_dim)
                 self.query_proj = nn.Sequential(nn.Linear(input_dim, input_dim), nn.LayerNorm(input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
 
         if self.aggregation in ["aggregation", "aggregation_ab2"]:
             self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim)]))
             self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
-            # self.linear_g = nn.Linear(input_dim, input_dim, False)
+            self.linear_g = nn.Linear(input_dim, input_dim, False)
+            self.aggr_proj = nn.Linear(input_dim, input_dim)
+            self.aggr_norm = nn.LayerNorm(input_dim)
+
             if self.parallel["batch_norm"]:
                 self.ln_g = nn.BatchNorm1d(input_dim)
 
@@ -474,6 +476,8 @@ def diffusion_loss_fn_parallel(
             return F.smooth_l1_loss(x_0_g, output1)
 
     elif is_task:
+        model.task_step += 1
+
         if model.rqvae["start_point"] == "src_u":
             start1, start2 = cond_emb1, cond_emb2
         elif model.rqvae["start_point"] == "quant_u":
@@ -515,6 +519,15 @@ def diffusion_loss_fn_parallel(
 
             print_batch_node_similarity(emb=final_output_m, step=model.task_step, prefix="final_output_m", interval=200)
 
+            # final_output_m = model.mf_norm(model.mf_proj(final_output_m))
+            final_output_m = model.mf_proj(final_output_m)
+
+            y_pred = torch.sum(final_output_m * iid_emb, dim=1)
+            task_loss = (y_pred - y_input.squeeze().float()).square().mean()
+            uni_loss = uniformity_loss(final_output_m, t=2.0)
+
+            return task_loss, model.parallel["uniformity_loss"] * uni_loss
+
             if model.parallel["batch_norm"]:
                 final_output_m = model.ln_m(final_output_m)
 
@@ -524,6 +537,15 @@ def diffusion_loss_fn_parallel(
             final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=0)
 
             print_batch_node_similarity(emb=final_output_g, step=model.task_step, prefix="final_output_g", interval=200)
+
+            # final_output_g = model.aggr_norm(model.aggr_proj(final_output_g))
+            final_output_g = model.aggr_proj(final_output_g)
+
+            y_pred = torch.sum(final_output_g * iid_emb, dim=1)
+            task_loss = (y_pred - y_input.squeeze().float()).square().mean()
+            uni_loss = uniformity_loss(final_output_g, t=2.0)
+
+            return task_loss, model.parallel["uniformity_loss"] * uni_loss
 
             if model.parallel["batch_norm"]:
                 final_output_g = model.ln_g(final_output_g)
@@ -699,25 +721,18 @@ def diffusion_loss_fn_parallel(
 
         if model.aggregation == "aggregation":
             y_pred = torch.sum(final_output * iid_emb, dim=1)
-        elif model.aggregation == "aggregation_ab1":
-            y_pred = torch.sum(final_output_m * iid_emb, dim=1)
-        elif model.aggregation == "aggregation_ab2":
-            y_pred = torch.sum(final_output_g * iid_emb, dim=1)
-
-        model.task_step += 1
 
         # MSE
         task_loss = (y_pred - y_input.squeeze().float()).square().mean()
 
         if model.aggregation == "aggregation":
             if model.parallel["set_aggr"] == "item_iu":
-                return task_loss + model.parallel["mapping_lambda"] * mapping_loss + model.parallel["recon_loss"] * style_recon_loss,  model.parallel["uniformity_loss"] * uni_loss
+                return (
+                    task_loss + model.parallel["mapping_lambda"] * mapping_loss + model.parallel["recon_loss"] * style_recon_loss,
+                    model.parallel["uniformity_loss"] * uni_loss,
+                )
             else:
                 return task_loss, model.parallel["uniformity_loss"] * uni_loss
-        elif model.aggregation == "aggregation_ab1":
-            return model.task_lambda * task_loss, 0 * uni_loss
-        elif model.aggregation == "aggregation_ab2":
-            return model.task_lambda * task_loss, 0 * uni_loss
 
 
 def uniformity_loss(z, t=2.0):
