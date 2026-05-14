@@ -26,42 +26,70 @@ class ResidualQuantizer(nn.Module):
 
     def forward(self, z: torch.Tensor):
         """
-        z: [B, D]
+        z: [B, D] (fixed embedding)
+
         returns:
             quantized: [B, D]
             all_level_vectors: [L, B, D]
-            rq_loss: scalar
+            total_loss: scalar
         """
+
         B, D = z.shape
-        device = z.device
+
+        # encoder 학습 안 하므로 detach
+        z = z.detach()
 
         residual = z
         all_level_vectors = []
+
         rq_loss = 0.0
 
         for l in range(self.num_levels):
-            # [K, D]
-            codebook_l = self.codebooks[l]  # [codebook_size, code_dim]
 
-            # 거리 계산: [B, K]
+            # [K, D]
+            codebook_l = self.codebooks[l]
+
+            # ------------------------
+            # nearest code search
+            # ------------------------
             residual_expanded = residual.unsqueeze(1)  # [B, 1, D]
             codebook_expanded = codebook_l.unsqueeze(0)  # [1, K, D]
+
             dist = torch.sum((residual_expanded - codebook_expanded) ** 2, dim=-1)  # [B, K]
 
-            # 가장 가까운 코드 선택
             idx = torch.argmin(dist, dim=-1)  # [B]
-            chosen = codebook_l[idx]  # [B, D]
 
-            rq_loss = rq_loss + F.mse_loss(chosen, residual.detach())
+            # [B, D]
+            chosen = codebook_l[idx]
 
-            chosen_ste = residual + (chosen - residual).detach()
+            # ------------------------
+            # codebook fitting loss
+            # ------------------------
+            rq_loss = rq_loss + F.mse_loss(chosen, residual)
 
-            all_level_vectors.append(chosen_ste)
+            # 저장
+            all_level_vectors.append(chosen)
 
-            residual = residual - chosen
+            # ------------------------
+            # residual update
+            # ------------------------
+            residual = residual - chosen.detach()
 
-        # [L, B, D]
-        all_level_vectors = torch.stack(all_level_vectors, dim=0)
+        # ------------------------
+        # stack
+        # ------------------------
+        all_level_vectors = torch.stack(all_level_vectors, dim=0)  # [L, B, D]
+
+        # additive reconstruction
         quantized = all_level_vectors.sum(dim=0)  # [B, D]
 
-        return quantized, all_level_vectors, rq_loss
+        # ------------------------
+        # global reconstruction loss
+        # ------------------------
+        recon_loss = F.mse_loss(quantized, z)
+
+        recon_lambda = 1.0
+
+        total_loss = rq_loss + recon_lambda * recon_loss
+
+        return quantized, all_level_vectors, total_loss
