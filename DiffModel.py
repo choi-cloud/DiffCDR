@@ -195,20 +195,20 @@ class DiffParallel(nn.Module):
 
         self.step_mlp = nn.Sequential(
             SinusoidalPositionEmbeddings(self.input_dim),
-            nn.Linear(self.input_dim, self.input_dim * 2),
-            nn.GELU(),
-            nn.Linear(self.input_dim * 2, self.input_dim),
+            # nn.Linear(self.input_dim, self.input_dim),
+            # nn.GELU(),
+            # nn.Linear(self.input_dim * 2, self.input_dim),
         )
 
         # time, condition, noised emb -> reverse 하는 3FC diffusion solver
         self.diff_models = nn.ModuleList()
-        self.cond_emb_linear = nn.ModuleList()
+        # self.cond_emb_linear = nn.ModuleList()
         # self.degree_encoder = nn.Sequential(nn.Linear(1, input_dim), nn.SiLU(), nn.Linear(input_dim, input_dim), nn.LayerNorm(input_dim))
         # self.degree_scale = nn.Parameter(torch.tensor(0.1))
 
         if self.aggregation in ["aggregation", "aggregation_ab1"]:
-            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim)]))
-            self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
+            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim*2, input_dim)]))
+            # self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
             self.mf_proj = nn.Linear(input_dim, input_dim)
             self.mf_norm = nn.LayerNorm(input_dim)
 
@@ -219,8 +219,8 @@ class DiffParallel(nn.Module):
                 self.query_proj = nn.Sequential(nn.Linear(input_dim, input_dim), nn.LayerNorm(input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
 
         if self.aggregation in ["aggregation", "aggregation_ab2"]:
-            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim)]))
-            self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
+            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim*2, input_dim)]))
+            # self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
             self.linear_g = nn.Linear(input_dim, input_dim, False)
             self.aggr_proj = nn.Linear(input_dim, input_dim)
             self.aggr_norm = nn.LayerNorm(input_dim)
@@ -276,9 +276,11 @@ class DiffParallel(nn.Module):
             if zero_cond:
                 cond_embedding = torch.zeros_like(cond_embedding)
 
-            x = torch.cat([t_embedding, cond_emb, x], axis=1)
+            x = torch.cat([x, t_embedding], axis=1)
+            # t_c_emb = t_embedding + cond_emb * cond_mask.unsqueeze(-1)
+            # x = x + t_c_emb
 
-            x = self.diff_models[diff_id][0](x)
+            x = self.diff_models[diff_id][0](x) + cond_emb
 
         return x
 
@@ -448,10 +450,10 @@ def diffusion_loss_fn_parallel(
                     y_pred = torch.sum(x0_pred * iid_emb, dim=1)
                     mae = torch.mean(torch.abs(y_pred - y_input.squeeze().float()))
 
-                    print(f"\n[Step {model.diff_step}] x0_pred Rating MAE")
-                    print(f"MAE : {mae.item():.6f}")
+                    # print(f"\n[Step {model.diff_step}] x0_pred Rating MAE")
+                    # print(f"MAE : {mae.item():.6f}")
 
-                    print_batch_node_similarity(emb=x0_pred, step=model.diff_step, prefix="x0_pred", interval=200)
+                    # print_batch_node_similarity(emb=x0_pred, step=model.diff_step, prefix="x0_pred", interval=200)
 
             return F.smooth_l1_loss(x_0_m, output1)
 
@@ -468,10 +470,10 @@ def diffusion_loss_fn_parallel(
                     y_pred = torch.sum(x0_pred * iid_emb, dim=1)
                     mae = torch.mean(torch.abs(y_pred - y_input.squeeze().float()))
 
-                    print(f"\n[Step {model.diff_step}] x0_pred Rating MAE")
-                    print(f"MAE : {mae.item():.6f}")
+                    # print(f"\n[Step {model.diff_step}] x0_pred Rating MAE")
+                    # print(f"MAE : {mae.item():.6f}")
 
-                    print_batch_node_similarity(emb=x0_pred, step=model.diff_step, prefix="x0_pred", interval=200)
+                    # print_batch_node_similarity(emb=x0_pred, step=model.diff_step, prefix="x0_pred", interval=200)
 
             return F.smooth_l1_loss(x_0_g, output1)
 
@@ -517,7 +519,7 @@ def diffusion_loss_fn_parallel(
         elif model.aggregation == "aggregation_ab1":
             final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
 
-            print_batch_node_similarity(emb=final_output_m, step=model.task_step, prefix="final_output_m", interval=200)
+            # print_batch_node_similarity(emb=final_output_m, step=model.task_step, prefix="final_output_m", interval=200)
 
             # final_output_m = model.mf_norm(model.mf_proj(final_output_m))
             final_output_m = model.mf_proj(final_output_m)
@@ -536,7 +538,7 @@ def diffusion_loss_fn_parallel(
         elif model.aggregation == "aggregation_ab2":
             final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=0)
 
-            print_batch_node_similarity(emb=final_output_g, step=model.task_step, prefix="final_output_g", interval=200)
+            # print_batch_node_similarity(emb=final_output_g, step=model.task_step, prefix="final_output_g", interval=200)
 
             # final_output_g = model.aggr_norm(model.aggr_proj(final_output_g))
             final_output_g = model.aggr_proj(final_output_g)
@@ -667,55 +669,55 @@ def diffusion_loss_fn_parallel(
         # --------------------------------------------------
         # attention logging (dynamic token version)
         # --------------------------------------------------
-        if model.task_step % 200 == 0:
-            with torch.no_grad():
+        # if model.task_step % 200 == 0:
+        #     with torch.no_grad():
 
-                # score/attn: (B, 1, T) -> (B, T)
-                score_log = score.squeeze(1)
-                attn_log = attn.squeeze(1)
+        #         # score/attn: (B, 1, T) -> (B, T)
+        #         score_log = score.squeeze(1)
+        #         attn_log = attn.squeeze(1)
 
-                # token norm: (B, T, D) -> (B, T)
-                token_norms = tokens.norm(dim=-1)
+        #         # token norm: (B, T, D) -> (B, T)
+        #         token_norms = tokens.norm(dim=-1)
 
-                num_tokens = score_log.shape[1]
+        #         num_tokens = score_log.shape[1]
 
-                print(f"\n[Step {model.task_step}] Attention Statistics")
+        #         print(f"\n[Step {model.task_step}] Attention Statistics")
 
-                for token_idx in range(num_tokens):
+        #         for token_idx in range(num_tokens):
 
-                    token_score = score_log[:, token_idx]
-                    token_attn = attn_log[:, token_idx]
-                    token_norm = token_norms[:, token_idx]
+        #             token_score = score_log[:, token_idx]
+        #             token_attn = attn_log[:, token_idx]
+        #             token_norm = token_norms[:, token_idx]
 
-                    print(
-                        f"[TOKEN {token_idx}] "
-                        f"SCORE mean/min/max: "
-                        f"{token_score.mean().item():.6f} / "
-                        f"{token_score.min().item():.6f} / "
-                        f"{token_score.max().item():.6f}"
-                    )
+        #             print(
+        #                 f"[TOKEN {token_idx}] "
+        #                 f"SCORE mean/min/max: "
+        #                 f"{token_score.mean().item():.6f} / "
+        #                 f"{token_score.min().item():.6f} / "
+        #                 f"{token_score.max().item():.6f}"
+        #             )
 
-                    print(
-                        f"[TOKEN {token_idx}] "
-                        f"ATTN mean/std/min/max: "
-                        f"{token_attn.mean().item():.6f} / "
-                        f"{token_attn.std().item():.6f} / "
-                        f"{token_attn.min().item():.6f} / "
-                        f"{token_attn.max().item():.6f}"
-                    )
+        #             print(
+        #                 f"[TOKEN {token_idx}] "
+        #                 f"ATTN mean/std/min/max: "
+        #                 f"{token_attn.mean().item():.6f} / "
+        #                 f"{token_attn.std().item():.6f} / "
+        #                 f"{token_attn.min().item():.6f} / "
+        #                 f"{token_attn.max().item():.6f}"
+        #             )
 
-                    print(
-                        f"[TOKEN {token_idx}] "
-                        f"NORM mean/std/min/max: "
-                        f"{token_norm.mean().item():.6f} / "
-                        f"{token_norm.std().item():.6f} / "
-                        f"{token_norm.min().item():.6f} / "
-                        f"{token_norm.max().item():.6f}"
-                    )
+        #             print(
+        #                 f"[TOKEN {token_idx}] "
+        #                 f"NORM mean/std/min/max: "
+        #                 f"{token_norm.mean().item():.6f} / "
+        #                 f"{token_norm.std().item():.6f} / "
+        #                 f"{token_norm.min().item():.6f} / "
+        #                 f"{token_norm.max().item():.6f}"
+        #             )
 
         final_output = out[:, 0, :]  # (B, D)
 
-        print_batch_node_similarity(emb=final_output, step=model.task_step, prefix="final_output", interval=200)
+        # print_batch_node_similarity(emb=final_output, step=model.task_step, prefix="final_output", interval=200)
 
         uni_loss = uniformity_loss(final_output, t=2.0)
 

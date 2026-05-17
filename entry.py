@@ -49,7 +49,7 @@ def prepare_1():
 
     # RQVAE(code_dim=input_dim, num_levels=4, codebook_size=256)
     parser.add_argument("--codebook_num", type=int, default=4, help="RQVAE 코드북 개수(level)")
-    parser.add_argument("--codebook_size", type=int, default=256, help="RQVAE 코드북 크기")
+    parser.add_argument("--codebook_size", type=int, default=12, help="RQVAE 코드북 크기")
     parser.add_argument("--RQVAE", type=str2bool, default=True, help="rq 사용 여부")
     parser.add_argument("--pretrain_rq", type=str2bool, default=True, help="rqvae pretrain 여부")
     parser.add_argument("--pretrain_epochs", type=int, default=50, help="rqvae pretrain epoch")
