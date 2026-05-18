@@ -506,13 +506,24 @@ def diffusion_loss_fn_parallel(
         if model.aggregation == "aggregation":
             final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
             final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=1)
+            
+            final_output_m = model.mf_proj(final_output_m)
+            final_output_g = model.aggr_proj(final_output_g)
+            
+            if model.parallel["set_aggr"] == "item":
+                final_output = (final_output_m + final_output_g) / 2 
+                uni_loss = uniformity_loss(final_output, t=2.0)
+                y_pred = torch.sum(final_output * iid_emb, dim=1)
+                task_loss = (y_pred - y_input.squeeze().float()).square().mean()
+                return task_loss, model.parallel["uniformity_loss"] * uni_loss
 
-            final_output_m = model.mf_norm(model.mf_proj(final_output_m))
-            final_output_g = model.aggr_norm(model.aggr_proj(final_output_g))
+            final_output_m = model.mf_norm(final_output_m)
+            final_output_g = model.aggr_norm(final_output_g)
 
             if model.parallel["batch_norm"]:
                 final_output_m = model.ln_m(final_output_m)
                 final_output_g = model.ln_g(final_output_g)
+
 
             base_tokens = torch.stack([final_output_m, final_output_g], dim=1)
 
@@ -530,11 +541,6 @@ def diffusion_loss_fn_parallel(
 
             return task_loss, model.parallel["uniformity_loss"] * uni_loss
 
-            if model.parallel["batch_norm"]:
-                final_output_m = model.ln_m(final_output_m)
-
-            base_tokens = torch.stack([final_output_m], dim=1)
-
         elif model.aggregation == "aggregation_ab2":
             final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=0)
 
@@ -548,11 +554,6 @@ def diffusion_loss_fn_parallel(
             uni_loss = uniformity_loss(final_output_g, t=2.0)
 
             return task_loss, model.parallel["uniformity_loss"] * uni_loss
-
-            if model.parallel["batch_norm"]:
-                final_output_g = model.ln_g(final_output_g)
-
-            base_tokens = torch.stack([final_output_g], dim=1)
 
         if model.parallel["set_aggr"] == "item_i":
             iid = iid.squeeze(1)

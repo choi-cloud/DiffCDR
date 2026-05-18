@@ -312,12 +312,22 @@ class MFBasedModel(torch.nn.Module):
                 final_output_m, iid_emb = p_sample(diff_model, cond1, iid_emb, device, diff_id=0)
                 final_output_g, iid_emb = p_sample(diff_model, cond2, iid_emb, device, diff_id=1)
 
-                final_output_m = diff_model.mf_norm(diff_model.mf_proj(final_output_m))
-                final_output_g = diff_model.aggr_norm(diff_model.aggr_proj(final_output_g))
+                final_output_m = diff_model.mf_proj(final_output_m)
+                final_output_g = diff_model.aggr_proj(final_output_g)
+                
+                if diff_model.parallel["set_aggr"] == "item":
+                    final_output = (final_output_m + final_output_g) / 2 
+                    y_pred = torch.sum(final_output * iid_emb, dim=1)
+                    return y_pred
+
+                final_output_m = diff_model.mf_norm(final_output_m)
+                final_output_g = diff_model.aggr_norm(final_output_g)
+
 
                 if diff_model.parallel["batch_norm"]:
                     final_output_m = diff_model.ln_m(final_output_m)
                     final_output_g = diff_model.ln_g(final_output_g)
+
                 base_tokens = torch.stack([final_output_m, final_output_g], dim=1)
 
             elif diff_model.aggregation == "aggregation_ab1":
@@ -328,9 +338,6 @@ class MFBasedModel(torch.nn.Module):
 
                 return torch.sum(final_output_m * iid_emb, dim=1)
 
-                if diff_model.parallel["batch_norm"]:
-                    final_output_m = diff_model.ln_m(final_output_m)
-                base_tokens = torch.stack([final_output_m], dim=1)
 
             elif diff_model.aggregation == "aggregation_ab2":
                 final_output_g, iid_emb = p_sample(diff_model, cond2, iid_emb, device, diff_id=0)
@@ -339,14 +346,7 @@ class MFBasedModel(torch.nn.Module):
 
                 return torch.sum(final_output_g * iid_emb, dim=1)
 
-                if diff_model.parallel["batch_norm"]:
-                    final_output_g = diff_model.ln_m(final_output_g)
-                base_tokens = torch.stack([final_output_g], dim=1)
-
-            if diff_model.parallel["set_aggr"] == "item":
-                tokens = base_tokens
-
-            elif diff_model.parallel["set_aggr"] == "item_i":
+            if diff_model.parallel["set_aggr"] == "item_i":
                 iid = iid_input.squeeze(1)
                 style_tgt_item = diff_model.style_tgt_item.to(start1.device)  # [I_total, F_item]
                 style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
