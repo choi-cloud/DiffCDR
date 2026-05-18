@@ -141,6 +141,9 @@ class Run:
             "freeze_rq": config["freeze_rq"],
             "rqvae_lr": config["rqvae_lr"],
             "cross_cond": config["cross_cond"],
+            "rq_exp": config["rq_exp"],
+            "rq_div": config["rq_div"],
+            "rq_accu": config["rq_accu"]
         }
 
         self.device = "cuda" if config["use_cuda"] else "cpu"

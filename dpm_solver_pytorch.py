@@ -72,18 +72,17 @@ def model_wrapper_hierarchical_cond(
 
     return model_fn
 
+def hierarchical_cond_from_levels(
+    all_level_vectors: torch.Tensor,
+    t_continuous: torch.Tensor,
+    noise_schedule,
+    rq_exp='forward',
+    rq_div='even',
+    rq_accu='sum',
+):
+    
 
-def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous: torch.Tensor, noise_schedule):
-    """
-    all_level_vectors: [L, B, D]
-    t_continuous: [B] or [B, 1]
 
-    high noise -> coarse level only
-    low noise  -> progressively include finer levels
-
-    Hard gating:
-        gate_l = 1 if t_norm >= level_pos_l else 0
-    """
     L, B, D = all_level_vectors.shape
     device = all_level_vectors.device
 
@@ -91,21 +90,45 @@ def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous:
         t_continuous = t_continuous.squeeze(-1)
 
     T = noise_schedule.T
-
-    # high noise: 0, low noise: 1
-    t_norm = 1.0 - t_continuous.float() / T
+    t_norm = 1.0 - t_continuous / T
     t_norm = torch.clamp(t_norm, 0.0, 1.0)  # [B]
 
-    # L=4 -> [0.0, 0.25, 0.5, 0.75]
-    level_pos = torch.arange(L, device=device, dtype=torch.float32) / L  # [L]
+    # ---------------------------
+    # 1) 구간 길이 설정
+    # ---------------------------
+    if rq_div == "even":
+        widths = torch.ones(L, device=device, dtype=torch.float32)
+    elif rq_div == "incre":
+        widths = torch.arange(1, L + 1, device=device, dtype=torch.float32)
+    elif rq_div == "decre":
+        widths = torch.arange(L, 0, -1, device=device, dtype=torch.float32)
 
-    # hard gate: [L, B]
-    gates = (t_norm.unsqueeze(0) >= level_pos.view(L, 1)).float()
+    widths = widths / widths.sum()
+    boundaries = torch.cumsum(widths, dim=0)[:-1]  # [L-1]
 
-    # q1은 항상 켜짐
-    gates[0, :] = 1.0
+    # ---------------------------
+    # 2) 활성 레벨 수 결정
+    # ---------------------------
+    num_active = 1 + (t_norm.unsqueeze(1) >= boundaries.unsqueeze(0)).sum(dim=1)  # [B], 1~L
 
-    cond_emb = (all_level_vectors * gates.unsqueeze(-1)).sum(dim=0)  # [B, D]
+    # rq_exp: reverse면 활성 레벨 수를 반전
+    # normal : t_norm 클수록 num_active 증가 (1→L)
+    # reverse: t_norm 클수록 num_active 감소 (L→1)
+    if rq_exp == "reverse":
+        num_active = L + 1 - num_active  # [B], L~1
+
+    # ---------------------------
+    # 3) conditioning 구성
+    # ---------------------------
+    if rq_accu == "separate":
+        selected_level = num_active - 1  # [B]
+        batch_idx = torch.arange(B, device=device)
+        cond_emb = all_level_vectors[selected_level, batch_idx]  # [B, D]
+    else:
+        level_ids = torch.arange(L, device=device).view(L, 1)           # [L, 1]
+        mask = (level_ids < num_active.view(1, B)).float().unsqueeze(-1) # [L, B, 1]
+        weighted = all_level_vectors * mask                               # [L, B, D]
+        cond_emb = weighted.sum(dim=0)                                    # [B, D]
 
     return cond_emb
 

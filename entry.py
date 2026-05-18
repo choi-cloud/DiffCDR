@@ -57,6 +57,11 @@ def prepare_1():
     parser.add_argument("--cross_cond", type=str2bool, default=False, help="MF vs Aggr 컨디션 교차 여부")
     parser.add_argument("--start_point", default="noise", help="[src_u, quant_u, noise]")
     parser.add_argument("--rqvae_lr", type=float, default=0.001, help="rqvae pretrain lr")
+    parser.add_argument("--rq_exp", type=str, default="forward", help="[forward, same, reverse]")
+    parser.add_argument("--rq_div", type=str, default="even", help="[even, incre, decre]")
+    parser.add_argument("--rq_accu", type=str, default="sum", help="[sum, separate]")
+
+    parser.add_argument("--diff_dim", type=int, default=32, help="diffusiom dimension")
 
     # item cond
     parser.add_argument("--diff_task_lambda", type=float, default=1.0, help="Task loss weight")
@@ -114,6 +119,10 @@ def prepare_2(args, config_path):
         config["zero_cond"] = args.zero_cond
         config["batch_norm"] = args.batch_norm
         config["recon_loss"] = args.recon_loss
+        config["rq_exp"] = args.rq_exp
+        config["rq_div"] = args.rq_div
+        config["rq_accu"] = args.rq_accu
+        config["diff_dim"] = args.diff_dim
 
     return config
 

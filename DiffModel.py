@@ -11,6 +11,330 @@ from rqvae import ResidualQuantizer
 
 noise_schedule = NoiseScheduleVP(schedule="linear")
 
+"""
+Bias-driven Attention Weight Analysis
+--------------------------------------
+AttentionLayer의 return_score=True 옵션을 사용해
+MF vs Aggr 선택 비율이 바이어스 값에 따라 어떻게 달라지는지 분석.
+
+사용법:
+    analyzer = BiasAttnAnalyzer(diff_model)
+
+    for batch in test_loader:
+        uid, iid, y = ...
+        y_pred, attn_weights = analyzer.forward_with_attn(
+            uid, iid, base_tokens, query, iid_emb
+        )
+        analyzer.collect(uid, iid, attn_weights, y_true=y, y_pred=y_pred)
+
+    analyzer.print_summary()
+    analyzer.plot_all()
+"""
+"""
+Bias-driven Attention Weight Analysis
+--------------------------------------
+AttentionLayer의 return_score=True 옵션을 사용해
+MF vs Aggr 선택 비율이 바이어스 값에 따라 어떻게 달라지는지 분석.
+
+사용법:
+    analyzer = BiasAttnAnalyzer(diff_model)
+
+    for batch in test_loader:
+        uid, iid, y = ...
+        y_pred, attn_weights = analyzer.forward_with_attn(
+            uid, iid, base_tokens, query, iid_emb
+        )
+        analyzer.collect(uid, iid, attn_weights, y_true=y, y_pred=y_pred)
+
+    analyzer.print_summary()
+    analyzer.plot_all()
+"""
+
+import torch
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from scipy.stats import spearmanr
+
+
+class BiasAttnAnalyzer:
+    def __init__(self, diff_model, device="cuda"):
+        self.diff_model = diff_model
+        self.device = device
+        self.records = []
+
+    # ─────────────────────────────────────────
+    # 1. return_score=True 로 forward
+    # ─────────────────────────────────────────
+
+    @torch.no_grad()
+    def forward_with_attn(self, base_tokens, query, iid_emb):
+        """
+        기존 테스트 코드에서 아래 두 줄을 교체:
+
+            # 기존
+            out = diff_model.attn_layer(tokens, query=query)
+            final_output = out[:, 0, :]
+
+            # 교체
+            y_pred, attn_weights = analyzer.forward_with_attn(tokens, query, iid_emb)
+
+        Returns
+        -------
+        y_pred       : (B,)   예측 점수
+        attn_weights : (B, 2) [weight_MF, weight_Aggr]
+        """
+        out, score, attn = self.diff_model.attn_layer(
+            base_tokens,       # (B, 2, D)   K/V: [MF token, Aggr token]
+            query=query,       # (B, 1, D)
+            return_score=True,
+        )
+        # attn : (B, 1, 2) → (B, 2)
+        attn_weights = attn[:, 0, :].detach().cpu()
+
+        final_output = out[:, 0, :]                      # (B, D)
+        y_pred = torch.sum(final_output * iid_emb, dim=1)
+
+        return y_pred, attn_weights
+
+    # ─────────────────────────────────────────
+    # 2. 바이어스 + weight 수집
+    # ─────────────────────────────────────────
+
+    def collect(self, uid, iid, attn_weights, y_true=None, y_pred=None):
+        """
+        Parameters
+        ----------
+        uid          : (B,) LongTensor
+        iid          : (B,) LongTensor
+        attn_weights : (B, 2) cpu FloatTensor  [weight_MF, weight_Aggr]
+        y_true       : (B,) optional
+        y_pred       : (B,) optional
+        """
+        dm   = self.diff_model
+        uid  = uid.long().cpu()
+        iid  = iid.long().cpu()
+        w    = attn_weights.numpy()                        # (B, 2)
+
+        u_raw  = dm.style_src[uid][:, :2].cpu().numpy()         # src user [mean, var]
+        tu_raw = dm.style_tgt_user[uid][:, :2].cpu().numpy()    # tgt user [mean, var]
+        i_raw  = dm.style_tgt_item[iid][:, :2].cpu().numpy()    # item [mean, var]
+
+        y_true_np = y_true.cpu().numpy()   if y_true is not None else [None] * len(uid)
+        y_pred_np = y_pred.detach().cpu().numpy() if y_pred is not None else [None] * len(uid)
+
+        for b in range(len(uid)):
+            self.records.append({
+                "uid":         int(uid[b]),
+                "iid":         int(iid[b]),
+                "src_u_mean":  float(u_raw[b, 0]),
+                "src_u_var":   float(u_raw[b, 1]),
+                "tgt_u_mean":  float(tu_raw[b, 0]),
+                "tgt_u_var":   float(tu_raw[b, 1]),
+                "item_mean":   float(i_raw[b, 0]),
+                "item_var":    float(i_raw[b, 1]),
+                "weight_MF":   float(w[b, 0]),
+                "weight_Aggr": float(w[b, 1]),
+                "y_true": float(y_true_np[b]) if y_true_np[b] is not None else None,
+                "y_pred": float(y_pred_np[b]) if y_pred_np[b] is not None else None,
+            })
+
+    def to_df(self):
+        df = pd.DataFrame(self.records)
+        df["w_diff"] = df["weight_MF"] - df["weight_Aggr"]  # 양수=MF우세
+        return df
+
+    # ─────────────────────────────────────────
+    # 3. 요약 출력
+    # ─────────────────────────────────────────
+
+    def print_summary(self):
+        df = self.to_df()
+        print("=" * 55)
+        print("   MF vs Aggr Attention Weight Summary")
+        print("=" * 55)
+        print(f"  샘플 수              : {len(df):,}")
+        print(f"  weight_MF  평균      : {df['weight_MF'].mean():.4f}")
+        print(f"  weight_Aggr 평균     : {df['weight_Aggr'].mean():.4f}")
+        print(f"  MF dominant  (>0.5)  : {(df['weight_MF'] > 0.5).mean()*100:.1f}%")
+        print(f"  Aggr dominant (>0.5) : {(df['weight_Aggr'] > 0.5).mean()*100:.1f}%")
+        print()
+        print("  Spearman ρ  vs  weight_MF")
+        feats = [
+            ("src_u_mean",  "소스 유저 평균 바이어스"),
+            ("src_u_var",   "소스 유저 분산 바이어스"),
+            ("item_mean",   "타겟 아이템 평균 바이어스"),
+            ("item_var",    "타겟 아이템 분산 바이어스"),
+            ("tgt_u_mean",  "타겟 유저 평균 바이어스"),
+        ]
+        for col, label in feats:
+            r, p = spearmanr(df[col], df["weight_MF"])
+            sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
+            print(f"    {label:<24} ρ={r:+.4f}  {sig}")
+        print("=" * 55)
+
+    # ─────────────────────────────────────────
+    # 4. 시각화
+    # ─────────────────────────────────────────
+
+    def plot_all(self, save_path="attn_bias_analysis.png"):
+        df = self.to_df()
+        fig = plt.figure(figsize=(20, 16))
+        fig.suptitle("MF vs Aggr Attention Weight Analysis", fontsize=15, y=1.01)
+        gs = gridspec.GridSpec(3, 3, figure=fig, hspace=0.45, wspace=0.35)
+
+        # (A) weight_MF 분포
+        ax = fig.add_subplot(gs[0, 0])
+        ax.hist(df["weight_MF"], bins=60, color="steelblue", edgecolor="white", alpha=0.85)
+        ax.axvline(0.5, color="red", linestyle="--", linewidth=1.5)
+        pct = (df["weight_MF"] > 0.5).mean() * 100
+        ax.set_title("(A) weight_MF Distribution")
+        ax.set_xlabel("weight_MF")
+        ax.set_ylabel("Count")
+        ax.annotate(f"MF dominant: {pct:.1f}%", xy=(0.55, 0.88),
+                    xycoords="axes fraction", fontsize=9, color="red")
+
+        # (B) src_u_mean → weight_MF  (색=item_var)
+        ax = fig.add_subplot(gs[0, 1])
+        sc = ax.scatter(df["src_u_mean"], df["weight_MF"],
+                        c=df["item_var"], cmap="coolwarm", alpha=0.35, s=7)
+        plt.colorbar(sc, ax=ax, label="item_var")
+        r, p = spearmanr(df["src_u_mean"], df["weight_MF"])
+        ax.set_title(f"(B) src_u_mean → weight_MF\n(ρ={r:+.3f}{'***' if p<0.001 else ''})")
+        ax.set_xlabel("src_u_mean")
+        ax.set_ylabel("weight_MF")
+        _trend(ax, df["src_u_mean"], df["weight_MF"])
+
+        # (C) item_var → weight_MF  (색=src_u_mean)
+        ax = fig.add_subplot(gs[0, 2])
+        sc = ax.scatter(df["item_var"], df["weight_MF"],
+                        c=df["src_u_mean"], cmap="RdYlGn", alpha=0.35, s=7)
+        plt.colorbar(sc, ax=ax, label="src_u_mean")
+        r, p = spearmanr(df["item_var"], df["weight_MF"])
+        ax.set_title(f"(C) item_var → weight_MF\n(ρ={r:+.3f}{'***' if p<0.001 else ''})")
+        ax.set_xlabel("item_var")
+        ax.set_ylabel("weight_MF")
+        _trend(ax, df["item_var"], df["weight_MF"])
+
+        # (D) item_mean → weight_MF
+        ax = fig.add_subplot(gs[1, 0])
+        sc = ax.scatter(df["item_mean"], df["weight_MF"],
+                        c=df["item_var"], cmap="coolwarm", alpha=0.35, s=7)
+        plt.colorbar(sc, ax=ax, label="item_var")
+        r, p = spearmanr(df["item_mean"], df["weight_MF"])
+        ax.set_title(f"(D) item_mean → weight_MF\n(ρ={r:+.3f}{'***' if p<0.001 else ''})")
+        ax.set_xlabel("item_mean")
+        ax.set_ylabel("weight_MF")
+        _trend(ax, df["item_mean"], df["weight_MF"])
+
+        # (E) 히트맵: src_u_mean Q × item_var Q
+        ax = fig.add_subplot(gs[1, 1])
+        df["u_q"]  = pd.qcut(df["src_u_mean"], 4, labels=["Q1", "Q2", "Q3", "Q4"])
+        df["iv_q"] = pd.qcut(df["item_var"],   4, labels=["Q1", "Q2", "Q3", "Q4"])
+        hm = df.groupby(["u_q", "iv_q"], observed=True)["weight_MF"].mean().unstack()
+        sns.heatmap(hm, ax=ax, annot=True, fmt=".3f", cmap="RdYlBu_r",
+                    vmin=0.3, vmax=0.7, cbar_kws={"label": "avg weight_MF"})
+        ax.set_title("(E) avg weight_MF\n[src_u_mean Q × item_var Q]")
+        ax.set_xlabel("item_var quartile →")
+        ax.set_ylabel("src_u_mean quartile →")
+
+        # (F) 히트맵: src_u_mean Q × item_mean Q
+        ax = fig.add_subplot(gs[1, 2])
+        df["im_q"] = pd.qcut(df["item_mean"], 4, labels=["Q1", "Q2", "Q3", "Q4"])
+        hm2 = df.groupby(["u_q", "im_q"], observed=True)["weight_MF"].mean().unstack()
+        sns.heatmap(hm2, ax=ax, annot=True, fmt=".3f", cmap="RdYlBu_r",
+                    vmin=0.3, vmax=0.7, cbar_kws={"label": "avg weight_MF"})
+        ax.set_title("(F) avg weight_MF\n[src_u_mean Q × item_mean Q]")
+        ax.set_xlabel("item_mean quartile →")
+        ax.set_ylabel("src_u_mean quartile →")
+
+        # (G) Spearman ρ 요약 바 차트
+        ax = fig.add_subplot(gs[2, :2])
+        feats = ["src_u_mean", "src_u_var", "item_mean", "item_var", "tgt_u_mean", "tgt_u_var"]
+        rs, ps = [], []
+        for f in feats:
+            r, p = spearmanr(df[f], df["weight_MF"])
+            rs.append(r); ps.append(p)
+        colors = ["#e74c3c" if r > 0 else "#3498db" for r in rs]
+        bars = ax.barh(feats, rs, color=colors, alpha=0.85, edgecolor="white")
+        ax.axvline(0, color="black", linewidth=0.8)
+        for bar, r, p in zip(bars, rs, ps):
+            sig = "***" if p < 0.001 else ("**" if p < 0.01 else ("*" if p < 0.05 else "ns"))
+            xpos = r + 0.008 if r >= 0 else r - 0.008
+            ax.text(xpos, bar.get_y() + bar.get_height() / 2,
+                    f"{r:+.3f} {sig}", va="center",
+                    ha="left" if r >= 0 else "right", fontsize=9)
+        ax.set_title("(G) Spearman ρ with weight_MF  (red=MF↑ / blue=Aggr↑)")
+        ax.set_xlabel("Spearman ρ")
+        ax.set_xlim(-0.65, 0.65)
+
+        # (H) weight_MF 구간별 MAE
+        ax = fig.add_subplot(gs[2, 2])
+        if df["y_true"].notna().any() and df["y_pred"].notna().any():
+            df["abs_err"] = (df["y_pred"] - df["y_true"]).abs()
+            df["w_bin"] = pd.cut(df["weight_MF"], 5)
+            err = df.groupby("w_bin", observed=True)["abs_err"].mean()
+            err.plot(kind="bar", ax=ax, color="mediumpurple", alpha=0.85, edgecolor="white")
+            ax.set_title("(H) MAE by weight_MF bin")
+            ax.set_xlabel("weight_MF range")
+            ax.set_ylabel("MAE")
+            ax.tick_params(axis="x", rotation=30)
+        else:
+            ax.text(0.5, 0.5, "y_true / y_pred 없음", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=11, color="gray")
+            ax.set_title("(H) MAE by weight_MF bin")
+
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.show()
+        print(f"✅ 저장: {save_path}")
+
+
+# ─────────────────────────────────────────────
+# Helper
+# ─────────────────────────────────────────────
+
+def _trend(ax, x, y):
+    try:
+        z = np.polyfit(x, y, 1)
+        xline = np.linspace(x.min(), x.max(), 100)
+        ax.plot(xline, np.poly1d(z)(xline), "r--", linewidth=1.5, alpha=0.8)
+    except Exception:
+        pass
+
+def _heatmap(ax, data, title, xlabel, ylabel):
+    import matplotlib.colors as mcolors
+    cmap = plt.cm.RdYlBu_r
+    vmin, vmax = 0.3, 0.7
+    im = ax.imshow(data.values, cmap=cmap, vmin=vmin, vmax=vmax, aspect="auto")
+    plt.colorbar(im, ax=ax, label="avg weight_MF")
+    ax.set_xticks(range(data.shape[1]))
+    ax.set_xticklabels(data.columns)
+    ax.set_yticks(range(data.shape[0]))
+    ax.set_yticklabels(data.index)
+    for i in range(data.shape[0]):
+        for j in range(data.shape[1]):
+            val = data.values[i, j]
+            color = "white" if val < 0.45 or val > 0.62 else "black"
+            ax.text(j, i, f"{val:.3f}", ha="center", va="center",
+                    fontsize=9, color=color)
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+
+
+# ─────────────────────────────────────────────
+# Helper
+# ─────────────────────────────────────────────
+
+def _trend(ax, x, y):
+    try:
+        z = np.polyfit(x, y, 1)
+        xline = np.linspace(x.min(), x.max(), 100)
+        ax.plot(xline, np.poly1d(z)(xline), "r--", linewidth=1.5, alpha=0.8)
+    except Exception:
+        pass
 
 def get_timestep_embedding(timesteps, embedding_dim: int):
     """
@@ -205,6 +529,12 @@ class DiffParallel(nn.Module):
         self.cond_emb_linear = nn.ModuleList()
         # self.degree_encoder = nn.Sequential(nn.Linear(1, input_dim), nn.SiLU(), nn.Linear(input_dim, input_dim), nn.LayerNorm(input_dim))
         # self.degree_scale = nn.Parameter(torch.tensor(0.1))
+
+        self.mf_proj = nn.Linear(input_dim, input_dim)
+        self.aggr_proj = nn.Linear(input_dim, input_dim)
+        self.mf_norm = nn.LayerNorm(input_dim)
+        self.aggr_norm = nn.LayerNorm(input_dim)
+        self.query_proj = nn.Sequential(nn.Linear(input_dim, input_dim), nn.LayerNorm(input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
 
         if self.aggregation in ["aggregation", "aggregation_ab1"]:
             self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim)]))
@@ -422,9 +752,10 @@ def diffusion_loss_fn_parallel(
         if model.rqvae["RQVAE"] == True and q_embs1 is not None:
             ns = NoiseScheduleVP(schedule="linear")
             t_cont = t.squeeze(-1).float() / model.num_steps
-            c1 = hierarchical_cond_from_levels(q_embs1, t_cont, ns)
-            c2 = hierarchical_cond_from_levels(q_embs2, t_cont, ns) if q_embs2 is not None else cond_emb2
-
+            c1 = hierarchical_cond_from_levels(q_embs1, t_cont, ns, rq_exp=model.rqvae["rq_exp"], rq_div=model.rqvae["rq_div"], rq_accu=model.rqvae["rq_accu"])
+            c2 = hierarchical_cond_from_levels(q_embs2, t_cont, ns, rq_exp=model.rqvae["rq_exp"], rq_div=model.rqvae["rq_div"], rq_accu=model.rqvae["rq_accu"])
+        elif model.rqvae["RQVAE"] == True and model.rqvae["rq_exp"] == 'same': 
+            c1, c2  = Q_emb1, Q_emb2 # 전체 양자화 결과만 사용 (e1+e2+e3+e4)
         else:
             c1, c2 = cond_emb1, cond_emb2
 
@@ -437,42 +768,10 @@ def diffusion_loss_fn_parallel(
 
         elif model.aggregation == "aggregation_ab1":
             output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)
-
-            # -------------------------------------------------
-            # debug: x0_pred rating MAE + batch similarity
-            # -------------------------------------------------
-            if model.diff_step % 200 == 0:
-                with torch.no_grad():
-                    x0_pred = output1
-
-                    y_pred = torch.sum(x0_pred * iid_emb, dim=1)
-                    mae = torch.mean(torch.abs(y_pred - y_input.squeeze().float()))
-
-                    print(f"\n[Step {model.diff_step}] x0_pred Rating MAE")
-                    print(f"MAE : {mae.item():.6f}")
-
-                    print_batch_node_similarity(emb=x0_pred, step=model.diff_step, prefix="x0_pred", interval=200)
-
             return F.smooth_l1_loss(x_0_m, output1)
 
         elif model.aggregation == "aggregation_ab2":
             output1 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=0)
-
-            # -------------------------------------------------
-            # debug: x0_pred rating MAE + batch similarity
-            # -------------------------------------------------
-            if model.diff_step % 200 == 0:
-                with torch.no_grad():
-                    x0_pred = output1
-
-                    y_pred = torch.sum(x0_pred * iid_emb, dim=1)
-                    mae = torch.mean(torch.abs(y_pred - y_input.squeeze().float()))
-
-                    print(f"\n[Step {model.diff_step}] x0_pred Rating MAE")
-                    print(f"MAE : {mae.item():.6f}")
-
-                    print_batch_node_similarity(emb=x0_pred, step=model.diff_step, prefix="x0_pred", interval=200)
-
             return F.smooth_l1_loss(x_0_g, output1)
 
     elif is_task:
@@ -485,8 +784,11 @@ def diffusion_loss_fn_parallel(
         elif model.rqvae["start_point"] == "noise":
             start1, start2 = torch.randn_like(cond_emb1), torch.randn_like(cond_emb2)
 
-        if model.rqvae["RQVAE"] == True:
+        if model.rqvae["RQVAE"] == True and model.rqvae["rq_exp"] != 'same':
             cond1, cond2 = q_embs1, q_embs2
+            p_sample = p_sample_loop_x0_solver
+        elif model.rqvae["RQVAE"] == True and model.rqvae["rq_exp"] == 'same':
+            cond1, cond2 = Q_emb1, Q_emb1
             p_sample = p_sample_loop_x0_solver
         else:
             cond1, cond2 = cond_emb1, cond_emb2
@@ -502,8 +804,8 @@ def diffusion_loss_fn_parallel(
                 query = iid_emb.unsqueeze(1)
 
         if model.aggregation == "aggregation":
-            final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
-            final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=1)
+            final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0)
+            final_output_g, iid_emb = p_sample(model, start2, cond2, iid_emb, device, diff_id=1)
 
             final_output_m = model.mf_norm(model.mf_proj(final_output_m))
             final_output_g = model.aggr_norm(model.aggr_proj(final_output_g))
@@ -512,10 +814,19 @@ def diffusion_loss_fn_parallel(
                 final_output_m = model.ln_m(final_output_m)
                 final_output_g = model.ln_g(final_output_g)
 
+            if model.parallel["set_aggr"] == "item": 
+                final_output = (final_output_m + final_output_g) / 2
+                y_pred = torch.sum(final_output * iid_emb, dim=1)
+
+                # MSE
+                task_loss = (y_pred - y_input.squeeze().float()).square().mean()
+                uni_loss = uniformity_loss(final_output, t=2.0)
+                return task_loss, model.parallel["uniformity_loss"] * uni_loss
+
             base_tokens = torch.stack([final_output_m, final_output_g], dim=1)
 
         elif model.aggregation == "aggregation_ab1":
-            final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
+            final_output_m, iid_emb = p_sample(model, start1, cond1, iid_emb, device, diff_id=0)
 
             print_batch_node_similarity(emb=final_output_m, step=model.task_step, prefix="final_output_m", interval=200)
 
@@ -534,7 +845,7 @@ def diffusion_loss_fn_parallel(
             base_tokens = torch.stack([final_output_m], dim=1)
 
         elif model.aggregation == "aggregation_ab2":
-            final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=0)
+            final_output_g, iid_emb = p_sample(model, start2, cond2, iid_emb, device, diff_id=0)
 
             print_batch_node_similarity(emb=final_output_g, step=model.task_step, prefix="final_output_g", interval=200)
 
@@ -662,62 +973,25 @@ def diffusion_loss_fn_parallel(
         elif model.parallel["set_aggr"] == "item":
             tokens = base_tokens
 
-        out, score, attn = model.attn_layer(tokens, query=query, return_score=True)  # (B, 1, D)
+        analyzer = BiasAttnAnalyzer(model)
 
-        # --------------------------------------------------
-        # attention logging (dynamic token version)
-        # --------------------------------------------------
-        if model.task_step % 200 == 0:
-            with torch.no_grad():
+        y_pred, attn_weights = analyzer.forward_with_attn(tokens, query, iid_emb)
 
-                # score/attn: (B, 1, T) -> (B, T)
-                score_log = score.squeeze(1)
-                attn_log = attn.squeeze(1)
+        # 수집
+        analyzer.collect(tgt_uid, iid_input.squeeze(1), attn_weights,
+                        y_true=rating, y_pred=y_pred)
 
-                # token norm: (B, T, D) -> (B, T)
-                token_norms = tokens.norm(dim=-1)
+        # ── 루프 끝난 후 ───────────────────────────────────
+        analyzer.print_summary()
+        analyzer.plot_all("attn_bias_analysis.png")
 
-                num_tokens = score_log.shape[1]
+        return y_pred
 
-                print(f"\n[Step {model.task_step}] Attention Statistics")
+        # out, score, attn = model.attn_layer(tokens, query=query, return_score=True)  # (B, 1, D)
 
-                for token_idx in range(num_tokens):
+        # final_output = out[:, 0, :]  # (B, D)
 
-                    token_score = score_log[:, token_idx]
-                    token_attn = attn_log[:, token_idx]
-                    token_norm = token_norms[:, token_idx]
-
-                    print(
-                        f"[TOKEN {token_idx}] "
-                        f"SCORE mean/min/max: "
-                        f"{token_score.mean().item():.6f} / "
-                        f"{token_score.min().item():.6f} / "
-                        f"{token_score.max().item():.6f}"
-                    )
-
-                    print(
-                        f"[TOKEN {token_idx}] "
-                        f"ATTN mean/std/min/max: "
-                        f"{token_attn.mean().item():.6f} / "
-                        f"{token_attn.std().item():.6f} / "
-                        f"{token_attn.min().item():.6f} / "
-                        f"{token_attn.max().item():.6f}"
-                    )
-
-                    print(
-                        f"[TOKEN {token_idx}] "
-                        f"NORM mean/std/min/max: "
-                        f"{token_norm.mean().item():.6f} / "
-                        f"{token_norm.std().item():.6f} / "
-                        f"{token_norm.min().item():.6f} / "
-                        f"{token_norm.max().item():.6f}"
-                    )
-
-        final_output = out[:, 0, :]  # (B, D)
-
-        print_batch_node_similarity(emb=final_output, step=model.task_step, prefix="final_output", interval=200)
-
-        uni_loss = uniformity_loss(final_output, t=2.0)
+        # uni_loss = uniformity_loss(final_output, t=2.0)
 
         if model.aggregation == "aggregation":
             y_pred = torch.sum(final_output * iid_emb, dim=1)
@@ -838,7 +1112,7 @@ def make_ddim_timesteps(num_steps, sample_steps, device):
 
 
 @torch.no_grad()
-def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise", sample_steps=20, eta=0.0, diff_id=0):
+def p_sample_loop_x0_solver(model, start, cond_emb, iid_emb, device, start_mode="noise", sample_steps=20, eta=0.0, diff_id=0):
     """
     solver-style sampling for x0-prediction model
 
@@ -853,20 +1127,10 @@ def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise"
         0.0 -> deterministic DDIM / ODE-like
         >0  -> stochastic DDIM
     """
-    if model.rqvae["RQVAE"]:  # cond_emb:  [L, B, D]
+    if model.rqvae["RQVAE"] and model.rqvae["rq_exp"] != 'same':  # cond_emb:  [L, B, D]
         q_embs = cond_emb  # [L, B, D] 원본 보존
-        x_init = cond_emb[0]  # [B, D]
-    else:  # cond_emb: [B, D]
-        x_init = cond_emb
-
-    batch_size = x_init.shape[0]
-
-    if start_mode == "noise":
-        x_t = torch.randn_like(x_init).to(device)  # [B, D]
-    elif start_mode == "cond":
-        x_t = x_init.clone().to(device)
-    else:
-        raise ValueError(f"Unknown start_mode: {start_mode}")
+    batch_size = start.shape[0]
+    x_t = start
 
     cond_mask = torch.ones(batch_size, device=device, dtype=torch.int)
 
@@ -878,10 +1142,10 @@ def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise"
         t = torch.full((batch_size,), timesteps[i].item(), device=device, dtype=torch.long)
         t_prev = torch.full((batch_size,), timesteps[i + 1].item(), device=device, dtype=torch.long)
 
-        if model.rqvae["RQVAE"]:
+        if model.rqvae["RQVAE"] and model.rqvae["rq_exp"] != 'same':
             ns = NoiseScheduleVP(schedule="linear")
             t_cont = t.float() / model.num_steps
-            cond_emb = hierarchical_cond_from_levels(q_embs, t_cont, ns)  # [L, B, D] -> [B, D]
+            cond_emb = hierarchical_cond_from_levels(q_embs, t_cont, ns, rq_exp=model.rqvae["rq_exp"], rq_div=model.rqvae["rq_div"], rq_accu=model.rqvae["rq_accu"])  # [L, B, D] -> [B, D]
 
         x_t, x0_pred = ddim_step_from_x0(
             model=model, x_t=x_t, t=t, t_prev=t_prev, cond_emb=cond_emb, device=device, cond_mask=cond_mask, eta=eta, diff_id=diff_id
@@ -891,10 +1155,10 @@ def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise"
     # 마지막 t=0에서 한 번 더 x0 prediction 정리
     t0 = torch.zeros(batch_size, device=device, dtype=torch.long)
 
-    if model.rqvae["RQVAE"]:
+    if model.rqvae["RQVAE"] and model.rqvae['rq_exp'] != 'same':
         ns = NoiseScheduleVP(schedule="linear")
         t_cont = t0.float() / model.num_steps
-        cond_emb = hierarchical_cond_from_levels(q_embs, t_cont, ns)  # [L, B, D] -> [B, D]
+        cond_emb = hierarchical_cond_from_levels(q_embs, t_cont, ns, rq_exp=model.rqvae["rq_exp"], rq_div=model.rqvae["rq_div"], rq_accu=model.rqvae["rq_accu"])  # [L, B, D] -> [B, D]
 
     if model.parallel["zero_cond"]:
         final_x0_pred = model(x_t, t0, cond_emb, cond_mask, diff_id=diff_id, zero_cond=True)
