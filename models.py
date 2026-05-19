@@ -314,15 +314,14 @@ class MFBasedModel(torch.nn.Module):
 
                 final_output_m = diff_model.mf_proj(final_output_m)
                 final_output_g = diff_model.aggr_proj(final_output_g)
-                
+
                 if diff_model.parallel["set_aggr"] == "item":
-                    final_output = (final_output_m + final_output_g) / 2 
+                    final_output = (final_output_m + final_output_g) / 2
                     y_pred = torch.sum(final_output * iid_emb, dim=1)
                     return y_pred
 
                 final_output_m = diff_model.mf_norm(final_output_m)
                 final_output_g = diff_model.aggr_norm(final_output_g)
-
 
                 if diff_model.parallel["batch_norm"]:
                     final_output_m = diff_model.ln_m(final_output_m)
@@ -337,7 +336,6 @@ class MFBasedModel(torch.nn.Module):
                 final_output_m = diff_model.mf_proj(final_output_m)
 
                 return torch.sum(final_output_m * iid_emb, dim=1)
-
 
             elif diff_model.aggregation == "aggregation_ab2":
                 final_output_g, iid_emb = p_sample(diff_model, cond2, iid_emb, device, diff_id=0)

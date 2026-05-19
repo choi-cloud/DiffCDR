@@ -59,7 +59,6 @@ def prepare_1():
     parser.add_argument("--rqvae_lr", type=float, default=0.001, help="rqvae pretrain lr")
     parser.add_argument("--rq_num", type=int, default=0, help="bias reconstruction loss")
 
-
     # item cond
     parser.add_argument("--diff_task_lambda", type=float, default=1.0, help="Task loss weight")
     parser.add_argument("--diff_scale", type=float, default=0.5, help="Classifier-free guidance scale")
@@ -181,5 +180,8 @@ if __name__ == "__main__":
     write(f"🍏 bias mapping : {args.bias_mapping}")
 
     if not args.process_data_mid and not args.process_data_ready:
-        Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth" if args.seed == 1 else  f"{args.save_path}_{args.seed}_{args.task}_{args.ratio}.pth")
+        Run(config).main(
+            args.exp_part,
+            f"{args.save_path}_{args.task}_{args.ratio}.pth" if args.seed == 1 else f"{args.save_path}_{args.seed}_{args.task}_{args.ratio}.pth",
+        )
         write(f"{'':=^{30}}")
