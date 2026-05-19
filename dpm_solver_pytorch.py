@@ -73,7 +73,7 @@ def model_wrapper_hierarchical_cond(
     return model_fn
 
 
-def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous: torch.Tensor, noise_schedule):
+def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous: torch.Tensor, noise_schedule, rq_num=0):
     """
     all_level_vectors: [L, B, D]
     t_continuous: [B] or [B, 1]
@@ -104,6 +104,10 @@ def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous:
 
     # q1은 항상 켜짐
     gates[0, :] = 1.0
+
+    if rq_num != 0: 
+        # q1만 키기 
+        gates[:rq_num, :] = 1.0
 
     cond_emb = (all_level_vectors * gates.unsqueeze(-1)).sum(dim=0)  # [B, D]
 

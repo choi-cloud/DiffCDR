@@ -98,7 +98,7 @@ class Run:
             + "_tgt_"
             + self.tgt
             + "MF_MLP"
-            +"" if self.seed == 1 else str(self.seed)
+            +"" if self.seed == 1 else (str(self.seed) + "0518")
         )
 
         self.results = {
@@ -141,6 +141,7 @@ class Run:
             "freeze_rq": config["freeze_rq"],
             "rqvae_lr": config["rqvae_lr"],
             "cross_cond": config["cross_cond"],
+            "rq_num": config["rq_num"]
         }
 
         self.device = "cuda" if config["use_cuda"] else "cpu"
