@@ -193,12 +193,14 @@ class DiffParallel(nn.Module):
         # RQVAE setting
         self.rqvae = rqvae
 
-        self.step_mlp = nn.Sequential(
-            SinusoidalPositionEmbeddings(self.input_dim),
-            # nn.Linear(self.input_dim, self.input_dim),
-            # nn.GELU(),
-            # nn.Linear(self.input_dim * 2, self.input_dim),
-        )
+        # self.step_mlp = nn.Sequential(
+        #     SinusoidalPositionEmbeddings(self.input_dim),
+        #     nn.Linear(self.input_dim, self.input_dim),
+        #     nn.GELU(),
+        #     nn.Linear(self.input_dim * 2, self.input_dim),
+        # )
+
+        self.t_proj = nn.Sequential(nn.Linear(1, 10, bias=False))
 
         # time, condition, noised emb -> reverse 하는 3FC diffusion solver
         self.diff_models = nn.ModuleList()
@@ -207,7 +209,7 @@ class DiffParallel(nn.Module):
         # self.degree_scale = nn.Parameter(torch.tensor(0.1))
 
         if self.aggregation in ["aggregation", "aggregation_ab1"]:
-            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 2, input_dim)]))
+            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim, bias=False)]))
             self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
             self.mf_proj = nn.Linear(input_dim, input_dim)
             self.mf_norm = nn.LayerNorm(input_dim)
@@ -219,7 +221,7 @@ class DiffParallel(nn.Module):
                 self.query_proj = nn.Sequential(nn.Linear(input_dim, input_dim), nn.LayerNorm(input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
 
         if self.aggregation in ["aggregation", "aggregation_ab2"]:
-            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 2, input_dim)]))
+            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim, bias=False)]))
             self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
             self.linear_g = nn.Linear(input_dim, input_dim, False)
             self.aggr_proj = nn.Linear(input_dim, input_dim)
@@ -269,18 +271,21 @@ class DiffParallel(nn.Module):
     def forward(self, x, t, cond_emb, cond_mask, diff_id=0, zero_cond=None):
 
         for idx in range(self.num_layers):
-            t_embedding = self.step_mlp(t)
+            # t_embedding = self.step_mlp(t)
+            t = t.float().unsqueeze(-1) / self.num_steps  # [B, 1], normalize
+            t_embedding = self.t_proj(t)  # [B, 10]
 
             cond_embedding = self.cond_emb_linear[diff_id](cond_emb)
+            # cond_embedding = torch.zeros_like(cond_embedding)
 
             if zero_cond:
                 cond_embedding = torch.zeros_like(cond_embedding)
 
-            x = torch.cat([x, t_embedding], axis=1)
+            x = torch.cat([x, t_embedding, cond_embedding], axis=1)
             # t_c_emb = t_embedding + cond_emb * cond_mask.unsqueeze(-1)
             # x = x + t_c_emb
 
-            x = self.diff_models[diff_id][0](x) + cond_embedding
+            x = self.diff_models[diff_id][0](x)
 
         return x
 

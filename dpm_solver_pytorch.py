@@ -73,43 +73,34 @@ def model_wrapper_hierarchical_cond(
     return model_fn
 
 
-def hierarchical_cond_from_levels(all_level_vectors: torch.Tensor, t_continuous: torch.Tensor, noise_schedule, rq_num=0):
-    """
-    all_level_vectors: [L, B, D]
-    t_continuous: [B] or [B, 1]
-
-    high noise -> coarse level only
-    low noise  -> progressively include finer levels
-
-    Hard gating:
-        gate_l = 1 if t_norm >= level_pos_l else 0
-    """
+def hierarchical_cond_from_levels(all_level_vectors, t_continuous, noise_schedule, rq_num=0):
     L, B, D = all_level_vectors.shape
     device = all_level_vectors.device
 
+    # rq_num > 0: fixed qsum
+    # rq_num=1 -> q1
+    # rq_num=2 -> q1+q2
+    # rq_num=4 -> q1+q2+q3+q4
+    if rq_num > 0:
+        rq_num = min(rq_num, L)
+        gates = torch.zeros(L, B, device=device)
+        gates[:rq_num, :] = 1.0
+        return (all_level_vectors * gates.unsqueeze(-1)).sum(dim=0)
+
+    # rq_num=0: original time-dependent hierarchical gating
     if t_continuous.dim() == 2:
         t_continuous = t_continuous.squeeze(-1)
 
     T = noise_schedule.T
-
-    # high noise: 0, low noise: 1
     t_norm = 1.0 - t_continuous.float() / T
-    t_norm = torch.clamp(t_norm, 0.0, 1.0)  # [B]
+    t_norm = torch.clamp(t_norm, 0.0, 1.0)
 
-    # L=4 -> [0.0, 0.25, 0.5, 0.75]
-    level_pos = torch.arange(L, device=device, dtype=torch.float32) / L  # [L]
+    level_pos = torch.arange(L, device=device, dtype=torch.float32) / L
 
-    # hard gate: [L, B]
     gates = (t_norm.unsqueeze(0) >= level_pos.view(L, 1)).float()
-
-    # q1은 항상 켜짐
     gates[0, :] = 1.0
 
-    if rq_num != 0: 
-        # q1만 키기 
-        gates[:rq_num, :] = 1.0
-
-    cond_emb = (all_level_vectors * gates.unsqueeze(-1)).sum(dim=0)  # [B, D]
+    cond_emb = (all_level_vectors * gates.unsqueeze(-1)).sum(dim=0)
 
     return cond_emb
 
