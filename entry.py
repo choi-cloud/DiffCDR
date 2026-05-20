@@ -181,5 +181,5 @@ if __name__ == "__main__":
     write(f"🍏 bias mapping : {args.bias_mapping}")
 
     if not args.process_data_mid and not args.process_data_ready:
-        Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth" if args.seed == 1 else  f"{args.save_path}_{args.seed}_{args.task}_{args.ratio}.pth")
+        Run(config).main(args.exp_part, f"{args.save_path}_{args.task}_{args.ratio}.pth")
         write(f"{'':=^{30}}")

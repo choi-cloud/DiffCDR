@@ -71,7 +71,7 @@ class Run:
 
         self.csvfile = config["csvfile"]
         self.seed = config["seed"]
-
+        
         isResidual = "residual"
         aggregaion_name = str(True)
         self.rqvae_ckpt_root = (
@@ -98,9 +98,9 @@ class Run:
             + "_tgt_"
             + self.tgt
             + "MF_MLP"
-            +"" if self.seed == 1 else (str(self.seed) + "0518")
+            # +("" if self.seed == 1 else (str(self.seed) + "0518"))
         )
-
+        # print(self.rqvae_ckpt_root)
         self.results = {
             "tgt_mae": 10,
             "tgt_rmse": 10,
@@ -617,15 +617,15 @@ class Run:
                 degree_all = torch.cat(degree_all)
 
                 df_score_summary = mae_summary_by_score(y_all.numpy(), mae_all.numpy())
-                print(df_score_summary)
+                write(df_score_summary)
 
-                df_sparsity_summary = mae_rmse_summary_by_sparsity(y_true=y_all, y_pred=pred_all, user_degree=degree_all, user_uid=uid_all, n_bins=5)
-                print(df_sparsity_summary)
+                # df_sparsity_summary = mae_rmse_summary_by_sparsity(y_true=y_all, y_pred=pred_all, user_degree=degree_all, user_uid=uid_all, n_bins=5)
+                # print(df_sparsity_summary)
 
-                df_pop_summary = mae_rmse_summary_by_pop_group(
-                    y_true=y_all, y_pred=pred_all, user_uid=uid_all, test_users_pop_group=test_users_pop_group
-                )
-                print(df_pop_summary)
+                # df_pop_summary = mae_rmse_summary_by_pop_group(
+                #     y_true=y_all, y_pred=pred_all, user_uid=uid_all, test_users_pop_group=test_users_pop_group
+                # )
+                # print(df_pop_summary)
 
             elif stage in ("test_ss"):
                 for X, y in tqdm.tqdm(data_loader, smoothing=0, mininterval=1.0):
