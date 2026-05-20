@@ -309,11 +309,21 @@ class MFBasedModel(torch.nn.Module):
                 query = iid_emb.unsqueeze(1)
 
             if diff_model.aggregation == "aggregation":
+
+                # -----------------------------------
+                # mean item embedding
+                # -----------------------------------
+                # iid_emb_mean = iid_emb.mean(dim=0, keepdim=True)
+                # iid_emb_mean = iid_emb_mean.expand_as(iid_emb)
+
                 final_output_m, iid_emb = p_sample(diff_model, cond1, iid_emb, device, diff_id=0)
                 final_output_g, iid_emb = p_sample(diff_model, cond2, iid_emb, device, diff_id=1)
 
-                final_output_m = diff_model.mf_proj(final_output_m)
-                final_output_g = diff_model.aggr_proj(final_output_g)
+                # final_output_m = torch.randn_like(final_output_m).to(device)
+                # final_output_g = torch.randn_like(final_output_g).to(device)
+
+                # final_output_m = diff_model.mf_proj(final_output_m)
+                # final_output_g = diff_model.aggr_proj(final_output_g)
 
                 if diff_model.parallel["set_aggr"] == "item":
                     final_output = (final_output_m + final_output_g) / 2
@@ -333,7 +343,7 @@ class MFBasedModel(torch.nn.Module):
                 # cond1 = torch.zeros_like(cond1)
                 final_output_m, iid_emb = p_sample(diff_model, cond1, iid_emb, device, diff_id=0)
 
-                final_output_m = diff_model.mf_proj(final_output_m)
+                # final_output_m = diff_model.mf_proj(final_output_m)
 
                 return torch.sum(final_output_m * iid_emb, dim=1)
 
@@ -444,7 +454,9 @@ class MFBasedModel(torch.nn.Module):
                 tokens = torch.cat([base_tokens, style_tok_u.unsqueeze(1)], dim=1)
 
             out = diff_model.attn_layer(tokens, query=query)  # (B, 1, D)
-            final_output = out[:, 0, :]  # (B, D)
+            # final_output = out[:, 0, :]  # (B, D)
+
+            final_output = (final_output_m + final_output_g) / 2
 
             if diff_model.aggregation == "aggregation":
                 y_pred = torch.sum(final_output * iid_emb, dim=1)

@@ -81,10 +81,30 @@ def hierarchical_cond_from_levels(all_level_vectors, t_continuous, noise_schedul
     # rq_num=1 -> q1
     # rq_num=2 -> q1+q2
     # rq_num=4 -> q1+q2+q3+q4
-    if rq_num > 0:
+    if rq_num > 0 and rq_num <= L:
         rq_num = min(rq_num, L)
         gates = torch.zeros(L, B, device=device)
         gates[:rq_num, :] = 1.0
+        return (all_level_vectors * gates.unsqueeze(-1)).sum(dim=0)
+
+    # rq_num=5 -> q2+q3+q4
+    if rq_num == 5:
+        gates = torch.zeros(L, B, device=device)
+
+        if L > 1:
+            gates[1:, :] = 1.0
+
+        return (all_level_vectors * gates.unsqueeze(-1)).sum(dim=0)
+
+    # rq_num=7 -> q1+q2
+    if rq_num == 7:
+        gates = torch.zeros(L, B, device=device)
+
+        if L > 1:
+            gates[0:2, :] = 1.0
+        else:
+            gates[0, :] = 1.0
+
         return (all_level_vectors * gates.unsqueeze(-1)).sum(dim=0)
 
     # rq_num=0: original time-dependent hierarchical gating
@@ -93,6 +113,7 @@ def hierarchical_cond_from_levels(all_level_vectors, t_continuous, noise_schedul
 
     T = noise_schedule.T
     t_norm = 1.0 - t_continuous.float() / T
+    # t_norm = t_continuous.float() / T
     t_norm = torch.clamp(t_norm, 0.0, 1.0)
 
     level_pos = torch.arange(L, device=device, dtype=torch.float32) / L

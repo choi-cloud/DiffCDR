@@ -210,55 +210,60 @@ class DiffParallel(nn.Module):
 
         if self.aggregation in ["aggregation", "aggregation_ab1"]:
             self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim, bias=False)]))
-            self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
-            self.mf_proj = nn.Linear(input_dim, input_dim)
-            self.mf_norm = nn.LayerNorm(input_dim)
+            self.cond_emb_linear.append(nn.Linear(input_dim, input_dim, bias=False))
+            self.mf_proj = nn.Linear(input_dim, input_dim, bias=False)
+            self.mf_norm = nn.LayerNorm(input_dim, elementwise_affine=False)
 
             if self.parallel["batch_norm"]:
                 self.ln_m = nn.BatchNorm1d(input_dim)
 
             if self.aggregation == "aggregation":
-                self.query_proj = nn.Sequential(nn.Linear(input_dim, input_dim), nn.LayerNorm(input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
+                self.query_proj = nn.Sequential(
+                    nn.Linear(input_dim, input_dim, bias=False),
+                    nn.LayerNorm(input_dim, elementwise_affine=False),
+                    nn.ReLU(),
+                    nn.Linear(input_dim, input_dim, bias=False),
+                )
 
         if self.aggregation in ["aggregation", "aggregation_ab2"]:
             self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim, bias=False)]))
-            self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
+            self.cond_emb_linear.append(nn.Linear(input_dim, input_dim, bias=False))
             self.linear_g = nn.Linear(input_dim, input_dim, False)
-            self.aggr_proj = nn.Linear(input_dim, input_dim)
-            self.aggr_norm = nn.LayerNorm(input_dim)
+            self.aggr_proj = nn.Linear(input_dim, input_dim, bias=False)
+            self.aggr_norm = nn.LayerNorm(input_dim, elementwise_affine=False)
 
             if self.parallel["batch_norm"]:
-                self.ln_g = nn.BatchNorm1d(input_dim)
+                self.ln_g = nn.BatchNorm1d(input_dim, elementwise_affine=False)
 
         self.num_layers = 1
         if self.parallel["batch_norm"]:
-            self.ln_iid = nn.BatchNorm1d(input_dim)
+            self.ln_iid = nn.BatchNorm1d(input_dim, elementwise_affine=False)
 
         self.attn_layer = AttentionLayer(in_dim=input_dim, out_dim=input_dim)
 
         if self.parallel["bias_mapping"] == "user":
-            self.user_style_mapper = nn.Sequential(nn.Linear(2, 2))
+            self.user_style_mapper = nn.Sequential(nn.Linear(2, 2, bias=False))
 
         if self.parallel["set_aggr"] == "item_i":
-            self.item_style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
-            self.item_style_ln = nn.LayerNorm(input_dim)
+            self.item_style_encoder = nn.Sequential(nn.Linear(2, input_dim, bias=False), nn.ReLU(), nn.Linear(input_dim, input_dim, bias=False))
+            self.item_style_ln = nn.LayerNorm(input_dim, elementwise_affine=False)
             self.item_style_scale = nn.Parameter(torch.tensor(0.1))
 
         elif self.parallel["set_aggr"] == "item_iu":
-            self.style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
-            self.style_ln = nn.LayerNorm(input_dim)
+            self.style_encoder = nn.Sequential(nn.Linear(2, input_dim, bias=False), nn.ReLU(), nn.Linear(input_dim, input_dim, bias=False))
+            self.style_ln = nn.LayerNorm(input_dim, elementwise_affine=False)
             self.style_scale = nn.Parameter(torch.tensor(0.1))
 
-            self.item_style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
-            self.item_style_ln = nn.LayerNorm(input_dim)
+            self.item_style_encoder = nn.Sequential(nn.Linear(2, input_dim, bias=False), nn.ReLU(), nn.Linear(input_dim, input_dim, bias=False))
+            self.item_style_ln = nn.LayerNorm(input_dim, elementwise_affine=False)
             self.item_style_scale = nn.Parameter(torch.tensor(0.1))
 
-            self.style_decoder = nn.Linear(input_dim, 2)
-            self.item_style_decoder = nn.Linear(input_dim, 2)
+            self.style_decoder = nn.Linear(input_dim, 2, bias=False)
+            self.item_style_decoder = nn.Linear(input_dim, 2, bias=False)
 
         elif self.parallel["set_aggr"] == "item_u":
-            self.style_encoder = nn.Sequential(nn.Linear(2, input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
-            self.style_ln = nn.LayerNorm(input_dim)
+            self.style_encoder = nn.Sequential(nn.Linear(2, input_dim, bias=False), nn.ReLU(), nn.Linear(input_dim, input_dim, bias=False))
+            self.style_ln = nn.LayerNorm(input_dim, elementwise_affine=False)
             self.style_scale = nn.Parameter(torch.tensor(0.1))
 
         elif self.parallel["set_aggr"] == "item":
@@ -274,6 +279,7 @@ class DiffParallel(nn.Module):
             # t_embedding = self.step_mlp(t)
             t = t.float().unsqueeze(-1) / self.num_steps  # [B, 1], normalize
             t_embedding = self.t_proj(t)  # [B, 10]
+            t_embedding = torch.zeros_like(t_embedding)
 
             cond_embedding = self.cond_emb_linear[diff_id](cond_emb)
             # cond_embedding = torch.zeros_like(cond_embedding)
@@ -512,18 +518,60 @@ def diffusion_loss_fn_parallel(
             final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
             final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=1)
 
-            final_output_m = model.mf_proj(final_output_m)
-            final_output_g = model.aggr_proj(final_output_g)
+            # final_output_m = model.mf_proj(final_output_m)
+            # final_output_g = model.aggr_proj(final_output_g)
 
             if model.parallel["set_aggr"] == "item":
                 final_output = (final_output_m + final_output_g) / 2
+
+                if model.task_step % 500 == 0:
+                    with torch.no_grad():
+                        z = final_output.detach()
+
+                        z_norm = F.normalize(z, dim=1)
+                        cos_mat = z_norm @ z_norm.t()
+
+                        dist_mat = torch.cdist(z, z, p=2)
+                        norm = z.norm(dim=1)
+
+                        B = z.size(0)
+                        mask = ~torch.eye(B, dtype=torch.bool, device=z.device)
+
+                        cos_vals = cos_mat[mask]
+                        dist_vals = dist_mat[mask]
+
+                        print(f"\n========== Final Output Geometry @ step {model.task_step} ==========")
+
+                        print(
+                            f"cosine | mean: {cos_vals.mean().item():.4f} "
+                            f"| std: {cos_vals.std(unbiased=False).item():.4f} "
+                            f"| min: {cos_vals.min().item():.4f} "
+                            f"| max: {cos_vals.max().item():.4f}"
+                        )
+
+                        print(
+                            f"distance | mean: {dist_vals.mean().item():.4f} "
+                            f"| std: {dist_vals.std(unbiased=False).item():.4f} "
+                            f"| min: {dist_vals.min().item():.4f} "
+                            f"| max: {dist_vals.max().item():.4f}"
+                        )
+
+                        print(
+                            f"norm | mean: {norm.mean().item():.4f} "
+                            f"| std: {norm.std(unbiased=False).item():.4f} "
+                            f"| min: {norm.min().item():.4f} "
+                            f"| max: {norm.max().item():.4f}"
+                        )
+
+                        print("============================================================\n")
+
                 uni_loss = uniformity_loss(final_output, t=2.0)
                 y_pred = torch.sum(final_output * iid_emb, dim=1)
                 task_loss = (y_pred - y_input.squeeze().float()).square().mean()
                 return task_loss, model.parallel["uniformity_loss"] * uni_loss
 
-            final_output_m = model.mf_norm(final_output_m)
-            final_output_g = model.aggr_norm(final_output_g)
+            # final_output_m = model.mf_norm(final_output_m)
+            # final_output_g = model.aggr_norm(final_output_g)
 
             if model.parallel["batch_norm"]:
                 final_output_m = model.ln_m(final_output_m)
@@ -533,7 +581,8 @@ def diffusion_loss_fn_parallel(
 
         elif model.aggregation == "aggregation_ab1":
             final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
-            final_output_m = model.mf_proj(final_output_m)
+
+            # final_output_m = model.mf_proj(final_output_m)
 
             y_pred = torch.sum(final_output_m * iid_emb, dim=1)
             task_loss = (y_pred - y_input.squeeze().float()).square().mean()
@@ -667,56 +716,9 @@ def diffusion_loss_fn_parallel(
 
         out, score, attn = model.attn_layer(tokens, query=query, return_score=True)  # (B, 1, D)
 
-        # --------------------------------------------------
-        # attention logging (dynamic token version)
-        # --------------------------------------------------
-        # if model.task_step % 200 == 0:
-        #     with torch.no_grad():
+        # final_output = out[:, 0, :]  # (B, D)
 
-        #         # score/attn: (B, 1, T) -> (B, T)
-        #         score_log = score.squeeze(1)
-        #         attn_log = attn.squeeze(1)
-
-        #         # token norm: (B, T, D) -> (B, T)
-        #         token_norms = tokens.norm(dim=-1)
-
-        #         num_tokens = score_log.shape[1]
-
-        #         print(f"\n[Step {model.task_step}] Attention Statistics")
-
-        #         for token_idx in range(num_tokens):
-
-        #             token_score = score_log[:, token_idx]
-        #             token_attn = attn_log[:, token_idx]
-        #             token_norm = token_norms[:, token_idx]
-
-        #             print(
-        #                 f"[TOKEN {token_idx}] "
-        #                 f"SCORE mean/min/max: "
-        #                 f"{token_score.mean().item():.6f} / "
-        #                 f"{token_score.min().item():.6f} / "
-        #                 f"{token_score.max().item():.6f}"
-        #             )
-
-        #             print(
-        #                 f"[TOKEN {token_idx}] "
-        #                 f"ATTN mean/std/min/max: "
-        #                 f"{token_attn.mean().item():.6f} / "
-        #                 f"{token_attn.std().item():.6f} / "
-        #                 f"{token_attn.min().item():.6f} / "
-        #                 f"{token_attn.max().item():.6f}"
-        #             )
-
-        #             print(
-        #                 f"[TOKEN {token_idx}] "
-        #                 f"NORM mean/std/min/max: "
-        #                 f"{token_norm.mean().item():.6f} / "
-        #                 f"{token_norm.std().item():.6f} / "
-        #                 f"{token_norm.min().item():.6f} / "
-        #                 f"{token_norm.max().item():.6f}"
-        #             )
-
-        final_output = out[:, 0, :]  # (B, D)
+        final_output = (final_output_m + final_output_g) / 2
 
         # print_batch_node_similarity(emb=final_output, step=model.task_step, prefix="final_output", interval=200)
 
@@ -865,9 +867,16 @@ def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise"
     batch_size = x_init.shape[0]
 
     if start_mode == "noise":
-        x_t = torch.randn_like(x_init).to(device)  # [B, D]
+
+        # 모든 배치 노드가 같은 noise에서 시작
+        shared_noise = torch.randn(1, x_init.shape[1], device=device)
+
+        x_t = shared_noise.expand_as(x_init).clone()
+
     elif start_mode == "cond":
+
         x_t = x_init.clone().to(device)
+
     else:
         raise ValueError(f"Unknown start_mode: {start_mode}")
 

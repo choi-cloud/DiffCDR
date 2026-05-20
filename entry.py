@@ -178,6 +178,7 @@ if __name__ == "__main__":
 
     write(f"🍏 cross cond   : {args.cross_cond}")
     write(f"🍏 bias mapping : {args.bias_mapping}")
+    write(f"🍏 rq_num : {args.rq_num}")
 
     if not args.process_data_mid and not args.process_data_ready:
         Run(config).main(
