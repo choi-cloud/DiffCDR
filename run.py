@@ -76,7 +76,7 @@ class Run:
         aggregaion_name = str(True)
         self.rqvae_ckpt_root = (
             self.root
-            + "rqvae_ckpt2/"
+            + "rqvae_ckpt_0520/"
             + self.src
             + "_"
             + str(int(self.ratio[0] * 10))
@@ -98,7 +98,7 @@ class Run:
             + "_tgt_"
             + self.tgt
             + "MF_MLP"
-            +"" if self.seed == 1 else (str(self.seed) + "0518")
+            +"prog" if self.seed == 1 else (str(self.seed) + "0518")
         )
 
         self.results = {

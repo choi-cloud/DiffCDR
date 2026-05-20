@@ -11,6 +11,26 @@ from rqvae import ResidualQuantizer
 
 noise_schedule = NoiseScheduleVP(schedule="linear")
 
+def get_expert_id_from_t(t, num_steps):
+    """
+    t: [B]
+    return: [B] expert id
+
+    expert 0: high noise
+    expert 1: mid-high noise
+    expert 2: mid-low noise
+    expert 3: low noise
+    """
+    ratio = t.float() / num_steps
+
+    expert_id = torch.zeros_like(t, dtype=torch.long)
+
+    expert_id[ratio >= 0.75] = 0
+    expert_id[(ratio >= 0.50) & (ratio < 0.75)] = 1
+    expert_id[(ratio >= 0.25) & (ratio < 0.50)] = 2
+    expert_id[ratio < 0.25] = 3
+
+    return expert_id
 
 def get_timestep_embedding(timesteps, embedding_dim: int):
     """
@@ -205,11 +225,17 @@ class DiffParallel(nn.Module):
         # time, condition, noised emb -> reverse 하는 3FC diffusion solver
         self.diff_models = nn.ModuleList()
         self.cond_emb_linear = nn.ModuleList()
+        self.num_experts = 4
         # self.degree_encoder = nn.Sequential(nn.Linear(1, input_dim), nn.SiLU(), nn.Linear(input_dim, input_dim), nn.LayerNorm(input_dim))
         # self.degree_scale = nn.Parameter(torch.tensor(0.1))
 
         if self.aggregation in ["aggregation", "aggregation_ab1"]:
-            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim, bias=False)]))
+            self.diff_models.append(
+                nn.ModuleList([
+                    nn.Linear(input_dim * 3, input_dim, bias=False)
+                    for _ in range(self.num_experts)
+                ])
+            )
             self.cond_emb_linear.append(nn.Linear(input_dim, input_dim, bias=False))
             self.mf_proj = nn.Linear(input_dim, input_dim, bias=False)
             self.mf_norm = nn.LayerNorm(input_dim, elementwise_affine=False)
@@ -226,7 +252,12 @@ class DiffParallel(nn.Module):
                 )
 
         if self.aggregation in ["aggregation", "aggregation_ab2"]:
-            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim, bias=False)]))
+            self.diff_models.append(
+                nn.ModuleList([
+                    nn.Linear(input_dim * 3, input_dim, bias=False)
+                    for _ in range(self.num_experts)
+                ])
+            )
             self.cond_emb_linear.append(nn.Linear(input_dim, input_dim, bias=False))
             self.linear_g = nn.Linear(input_dim, input_dim, False)
             self.aggr_proj = nn.Linear(input_dim, input_dim, bias=False)
@@ -272,26 +303,40 @@ class DiffParallel(nn.Module):
         if self.rqvae["RQVAE"]:
             self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
             self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
-
+    
     def forward(self, x, t, cond_emb, cond_mask, diff_id=0, zero_cond=None):
 
         for idx in range(self.num_layers):
-            # t_embedding = self.step_mlp(t)
-            t = t.float().unsqueeze(-1) / self.num_steps  # [B, 1], normalize
-            t_embedding = self.t_proj(t)  # [B, 10]
-            t_embedding = torch.zeros_like(t_embedding)
+
+            # 기존 구조 그대로 유지
+            t_input = t.float().unsqueeze(-1) / self.num_steps  # [B, 1]
+            t_embedding = self.t_proj(t_input)                  # [B, 10]
+            t_embedding = torch.zeros_like(t_embedding)         # 현재 실험 설정 유지
 
             cond_embedding = self.cond_emb_linear[diff_id](cond_emb)
-            # cond_embedding = torch.zeros_like(cond_embedding)
 
             if zero_cond:
                 cond_embedding = torch.zeros_like(cond_embedding)
 
-            x = torch.cat([x, t_embedding, cond_embedding], axis=1)
-            # t_c_emb = t_embedding + cond_emb * cond_mask.unsqueeze(-1)
-            # x = x + t_c_emb
+            h = torch.cat([x, t_embedding, cond_embedding], dim=1)  # [B, 3D]
 
-            x = self.diff_models[diff_id][0](x)
+            # timestep별 expert 선택
+            expert_ids = get_expert_id_from_t(t, self.num_steps)
+
+            out = torch.zeros(
+                x.size(0),
+                self.input_dim,
+                device=x.device,
+                dtype=x.dtype
+            )
+
+            for expert_id in range(self.num_experts):
+                mask = expert_ids == expert_id
+
+                if mask.any():
+                    out[mask] = self.diff_models[diff_id][expert_id](h[mask])
+
+            x = out
 
         return x
 
@@ -395,20 +440,26 @@ def diffusion_loss_fn_parallel(
         # cond_emb 의존도를 높이기 위해 noisy timestep을 더 많이 샘플링
         # -------------------------------------------------
         if model.aggregation in ["aggregation"]:
-            high_ratio = 0.7
-            high_start = int(num_steps * 0.6)
+            # high_ratio = 0.7
+            # high_start = int(num_steps * 0.6)
 
-            num_high = int(batch_size * high_ratio)
-            num_rand = batch_size - num_high
+            # num_high = int(batch_size * high_ratio)
+            # num_rand = batch_size - num_high
 
-            t_high = torch.randint(low=high_start, high=num_steps, size=(num_high,), device=device)
+            # t_high = torch.randint(low=high_start, high=num_steps, size=(num_high,), device=device)
 
-            t_rand = torch.randint(low=0, high=num_steps, size=(num_rand,), device=device)
+            # t_rand = torch.randint(low=0, high=num_steps, size=(num_rand,), device=device)
 
-            t = torch.cat([t_high, t_rand], dim=0)
+            # t = torch.cat([t_high, t_rand], dim=0)
 
+            # t = t.unsqueeze(-1)
+            t = torch.randint(
+                low=0,
+                high=num_steps,
+                size=(batch_size,),
+                device=device
+            )
             t = t.unsqueeze(-1)
-
         if model.aggregation in ["aggregation_ab1", "aggregation_ab2"]:
             batch_size = x_0_m.shape[0]
 

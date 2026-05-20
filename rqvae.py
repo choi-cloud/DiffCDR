@@ -49,11 +49,23 @@ class ResidualQuantizer(nn.Module):
             # [K, D]
             codebook_l = self.codebooks[l]
 
+            # -------------------------------------------------
+            # 각 level은 현재 residual의 50%를 담당하도록 유도
+            # L1 ≈ 50%
+            # L2 ≈ 25%
+            # L3 ≈ 12.5%
+            # L4 ≈ 12.5%
+            # -------------------------------------------------
+            target = 0.5 * residual
+            if l == 3:
+                target = residual
+
+
             # ------------------------
             # nearest code search
             # ------------------------
-            residual_expanded = residual.unsqueeze(1)  # [B, 1, D]
-            codebook_expanded = codebook_l.unsqueeze(0)  # [1, K, D]
+            residual_expanded = target.unsqueeze(1)          # [B, 1, D]
+            codebook_expanded = codebook_l.unsqueeze(0)    # [1, K, D]
 
             dist = torch.sum((residual_expanded - codebook_expanded) ** 2, dim=-1)  # [B, K]
 
