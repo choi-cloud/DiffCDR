@@ -98,7 +98,7 @@ class Run:
             + "_tgt_"
             + self.tgt
             + "MF_MLP"
-            +"" if self.seed == 1 else (str(self.seed) + "0518")
+            +("" if self.seed == 1 else (str(self.seed) + "0518"))
         )
 
         self.results = {

@@ -209,8 +209,11 @@ class DiffParallel(nn.Module):
         # self.degree_scale = nn.Parameter(torch.tensor(0.1))
 
         if self.aggregation in ["aggregation", "aggregation_ab1"]:
-            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim, bias=False)]))
-            self.cond_emb_linear.append(nn.Linear(input_dim, input_dim, bias=False))
+            _num_levels = rqvae["codebook_num"] if rqvae.get("RQVAE", False) else 1
+            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim, bias=False) for _ in range(_num_levels)]))
+            # self.diff_models.append(nn.ModuleList([nn.Sequential(nn.Linear(input_dim * 3, input_dim, bias=False), nn.ReLU(), nn.Linear(input_dim, input_dim, bias=False), nn.ReLU(), nn.Linear(input_dim, input_dim, bias=False)) for _ in range(_num_levels)]))
+            # self.cond_emb_linear.append(nn.Linear(input_dim, input_dim, bias=False))
+            self.cond_emb_linear.append(nn.ModuleList(nn.Linear(input_dim, input_dim, bias=False) for _ in range(_num_levels)))
             self.mf_proj = nn.Linear(input_dim, input_dim, bias=False)
             self.mf_norm = nn.LayerNorm(input_dim, elementwise_affine=False)
 
@@ -226,8 +229,11 @@ class DiffParallel(nn.Module):
                 )
 
         if self.aggregation in ["aggregation", "aggregation_ab2"]:
-            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim, bias=False)]))
-            self.cond_emb_linear.append(nn.Linear(input_dim, input_dim, bias=False))
+            _num_levels = rqvae["codebook_num"] if rqvae.get("RQVAE", False) else 1
+            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim, bias=False) for _ in range(_num_levels)]))
+            # self.diff_models.append(nn.ModuleList([nn.Sequential(nn.Linear(input_dim * 3, input_dim, bias=False), nn.ReLU(), nn.Linear(input_dim, input_dim, bias=False), nn.ReLU(), nn.Linear(input_dim, input_dim, bias=False)) for _ in range(_num_levels)]))
+            # self.cond_emb_linear.append(nn.Linear(input_dim, input_dim, bias=False))
+            self.cond_emb_linear.append(nn.ModuleList(nn.Linear(input_dim, input_dim, bias=False) for _ in range(_num_levels)))
             self.linear_g = nn.Linear(input_dim, input_dim, False)
             self.aggr_proj = nn.Linear(input_dim, input_dim, bias=False)
             self.aggr_norm = nn.LayerNorm(input_dim, elementwise_affine=False)
@@ -260,6 +266,7 @@ class DiffParallel(nn.Module):
 
             self.style_decoder = nn.Linear(input_dim, 2, bias=False)
             self.item_style_decoder = nn.Linear(input_dim, 2, bias=False)
+        
 
         elif self.parallel["set_aggr"] == "item_u":
             self.style_encoder = nn.Sequential(nn.Linear(2, input_dim, bias=False), nn.ReLU(), nn.Linear(input_dim, input_dim, bias=False))
@@ -273,25 +280,47 @@ class DiffParallel(nn.Module):
             self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
             self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
 
-    def forward(self, x, t, cond_emb, cond_mask, diff_id=0, zero_cond=None):
+    def forward(self, x, t, cond_emb, cond_mask, diff_id=0, zero_cond=None, n_active=None):
 
-        for idx in range(self.num_layers):
-            # t_embedding = self.step_mlp(t)
-            t = t.float().unsqueeze(-1) / self.num_steps  # [B, 1], normalize
-            t_embedding = self.t_proj(t)  # [B, 10]
-            t_embedding = torch.zeros_like(t_embedding)
+        t = t.float().unsqueeze(-1) / self.num_steps  # [B, 1]
+        t_embedding = self.t_proj(t)
+        t_embedding = torch.zeros_like(t_embedding)
 
-            cond_embedding = self.cond_emb_linear[diff_id](cond_emb)
-            # cond_embedding = torch.zeros_like(cond_embedding)
+        # if zero_cond:
+        #         cond_embedding = torch.zeros_like(cond_embedding)
 
-            if zero_cond:
-                cond_embedding = torch.zeros_like(cond_embedding)
+        # cond_embedding = self.cond_emb_linear[diff_id](cond_emb)
 
-            x = torch.cat([x, t_embedding, cond_embedding], axis=1)
-            # t_c_emb = t_embedding + cond_emb * cond_mask.unsqueeze(-1)
-            # x = x + t_c_emb
+        num_models = len(self.diff_models[diff_id])
+        if n_active is None or num_models == 1:
+            cond_embedding = self.cond_emb_linear[diff_id][0](cond_emb)
+            
+            x_cat = torch.cat([x, t_embedding, cond_embedding], axis=1)
 
-            x = self.diff_models[diff_id][0](x)
+            x = self.diff_models[diff_id][0](x_cat)
+        else:
+            # per-sample routing: n_active[b] in [1..L] -> diff_models[diff_id][n-1]
+            out = torch.zeros(x.shape[0], self.input_dim, device=x.device, dtype=x.dtype)
+            # cond_embedding = torch.zeros(cond_emb.shape[0], self.input_dim, device=x.device, dtype=x.dtype)
+            for n in range(1, num_models + 1):
+                mask = (n_active == n)
+                if mask.any():
+                    
+                    # diff_models, cond emb 둘 다 따로 
+                    c = self.cond_emb_linear[diff_id][n - 1](cond_emb[mask])
+                    x_cat = torch.cat([x[mask], t_embedding[mask], c], axis=1)
+                    out[mask] = self.diff_models[diff_id][n - 1](x_cat)
+                    
+                    # cond emb 따로 
+                    # c = self.cond_emb_linear[diff_id][n - 1](cond_emb[mask])
+                    # x_cat = torch.cat([x[mask], t_embedding[mask], c], axis=1)
+                    # out[mask] = self.diff_models[diff_id][0](x_cat)
+
+                    # diff_models 따로 
+                    # x_cat = torch.cat([x, t_embedding, cond_embedding], axis=1)
+                    # out[mask] = self.diff_models[diff_id][n - 1](x_cat[mask])
+                    
+            x = out
 
         return x
 
@@ -435,21 +464,22 @@ def diffusion_loss_fn_parallel(
         if model.rqvae["RQVAE"] == True and q_embs1 is not None:
             ns = NoiseScheduleVP(schedule="linear")
             t_cont = t.squeeze(-1).float() / model.num_steps
-            c1 = hierarchical_cond_from_levels(q_embs1, t_cont, ns, model.rqvae["rq_num"])
-            c2 = hierarchical_cond_from_levels(q_embs2, t_cont, ns, model.rqvae["rq_num"]) if q_embs2 is not None else cond_emb2
+            c1, n_active1 = hierarchical_cond_from_levels(q_embs1, t_cont, ns, model.rqvae["rq_num"])
+            c2, n_active2 = hierarchical_cond_from_levels(q_embs2, t_cont, ns, model.rqvae["rq_num"]) if q_embs2 is not None else (cond_emb2, None)
 
         else:
             c1, c2 = cond_emb1, cond_emb2
+            n_active1 = n_active2 = None
 
         model.diff_step += 1
 
         if model.aggregation == "aggregation":
-            output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)
-            output2 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=1)
+            output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0, n_active=n_active1)
+            output2 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=1, n_active=n_active2)
             return F.smooth_l1_loss(x_0_m, output1) + F.smooth_l1_loss(x_0_g, output2)
 
         elif model.aggregation == "aggregation_ab1":
-            output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)
+            output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0, n_active=n_active1)
 
             # -------------------------------------------------
             # debug: x0_pred rating MAE + batch similarity
@@ -469,7 +499,7 @@ def diffusion_loss_fn_parallel(
             return F.smooth_l1_loss(x_0_m, output1)
 
         elif model.aggregation == "aggregation_ab2":
-            output1 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=0)
+            output1 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=0, n_active=n_active2)
 
             # -------------------------------------------------
             # debug: x0_pred rating MAE + batch similarity
@@ -518,8 +548,8 @@ def diffusion_loss_fn_parallel(
             final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
             final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=1)
 
-            # final_output_m = model.mf_proj(final_output_m)
-            # final_output_g = model.aggr_proj(final_output_g)
+            final_output_m = model.mf_proj(final_output_m)
+            final_output_g = model.aggr_proj(final_output_g)
 
             if model.parallel["set_aggr"] == "item":
                 final_output = (final_output_m + final_output_g) / 2
@@ -570,8 +600,8 @@ def diffusion_loss_fn_parallel(
                 task_loss = (y_pred - y_input.squeeze().float()).square().mean()
                 return task_loss, model.parallel["uniformity_loss"] * uni_loss
 
-            # final_output_m = model.mf_norm(final_output_m)
-            # final_output_g = model.aggr_norm(final_output_g)
+            final_output_m = model.mf_norm(final_output_m)
+            final_output_g = model.aggr_norm(final_output_g)
 
             if model.parallel["batch_norm"]:
                 final_output_m = model.ln_m(final_output_m)
@@ -716,9 +746,9 @@ def diffusion_loss_fn_parallel(
 
         out, score, attn = model.attn_layer(tokens, query=query, return_score=True)  # (B, 1, D)
 
-        # final_output = out[:, 0, :]  # (B, D)
+        final_output = out[:, 0, :]  # (B, D)
 
-        final_output = (final_output_m + final_output_g) / 2
+        # final_output = (final_output_m + final_output_g) / 2
 
         # print_batch_node_similarity(emb=final_output, step=model.task_step, prefix="final_output", interval=200)
 
@@ -773,7 +803,7 @@ def extract(a, t, x_shape):
     return out.view(t.shape[0], *([1] * (len(x_shape) - 1)))
 
 
-def predict_eps_from_x0(model, x_t, t, cond_emb, device, cond_mask=None, diff_id=None):
+def predict_eps_from_x0(model, x_t, t, cond_emb, device, cond_mask=None, diff_id=None, n_active=None):
     """
     model predicts x0, then convert to eps
 
@@ -786,9 +816,9 @@ def predict_eps_from_x0(model, x_t, t, cond_emb, device, cond_mask=None, diff_id
     alpha_bar_t = extract(model.alphas_prod.to(device), t, x_t.shape)
 
     if model.parallel["zero_cond"]:
-        x0_pred = model(x_t, t, cond_emb, cond_mask, diff_id=diff_id, zero_cond=True)
+        x0_pred = model(x_t, t, cond_emb, cond_mask, diff_id=diff_id, zero_cond=True, n_active=n_active)
     else:
-        x0_pred = model(x_t, t, cond_emb, cond_mask, diff_id=diff_id)
+        x0_pred = model(x_t, t, cond_emb, cond_mask, diff_id=diff_id, n_active=n_active)
 
     eps_pred = (x_t - torch.sqrt(alpha_bar_t) * x0_pred) / (torch.sqrt(1.0 - alpha_bar_t) + 1e-8)
 
@@ -796,7 +826,7 @@ def predict_eps_from_x0(model, x_t, t, cond_emb, device, cond_mask=None, diff_id
 
 
 @torch.no_grad()
-def ddim_step_from_x0(model, x_t, t, t_prev, cond_emb, device, cond_mask=None, eta=0.0, diff_id=None):
+def ddim_step_from_x0(model, x_t, t, t_prev, cond_emb, device, cond_mask=None, eta=0.0, diff_id=None, n_active=None):
     """
     x0-prediction model + DDIM step
 
@@ -806,7 +836,7 @@ def ddim_step_from_x0(model, x_t, t, t_prev, cond_emb, device, cond_mask=None, e
     if cond_mask is None:
         cond_mask = torch.ones(x_t.shape[0], device=device, dtype=torch.int)
 
-    x0_pred, eps_pred = predict_eps_from_x0(model, x_t, t, cond_emb, device, cond_mask, diff_id=diff_id)
+    x0_pred, eps_pred = predict_eps_from_x0(model, x_t, t, cond_emb, device, cond_mask, diff_id=diff_id, n_active=n_active)
 
     alpha_bar_t = extract(model.alphas_prod.to(device), t, x_t.shape)
     alpha_bar_prev = extract(model.alphas_prod.to(device), t_prev, x_t.shape)
@@ -890,28 +920,30 @@ def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise"
         t = torch.full((batch_size,), timesteps[i].item(), device=device, dtype=torch.long)
         t_prev = torch.full((batch_size,), timesteps[i + 1].item(), device=device, dtype=torch.long)
 
+        n_active = None
         if model.rqvae["RQVAE"]:
             ns = NoiseScheduleVP(schedule="linear")
             t_cont = t.float() / model.num_steps
-            cond_emb = hierarchical_cond_from_levels(q_embs, t_cont, ns, model.rqvae["rq_num"])  # [L, B, D] -> [B, D]
+            cond_emb, n_active = hierarchical_cond_from_levels(q_embs, t_cont, ns, model.rqvae["rq_num"])  # [L, B, D] -> [B, D]
 
         x_t, x0_pred = ddim_step_from_x0(
-            model=model, x_t=x_t, t=t, t_prev=t_prev, cond_emb=cond_emb, device=device, cond_mask=cond_mask, eta=eta, diff_id=diff_id
+            model=model, x_t=x_t, t=t, t_prev=t_prev, cond_emb=cond_emb, device=device, cond_mask=cond_mask, eta=eta, diff_id=diff_id, n_active=n_active
         )
         final_x0_pred = x0_pred
 
     # 마지막 t=0에서 한 번 더 x0 prediction 정리
     t0 = torch.zeros(batch_size, device=device, dtype=torch.long)
 
+    n_active_t0 = None
     if model.rqvae["RQVAE"]:
         ns = NoiseScheduleVP(schedule="linear")
         t_cont = t0.float() / model.num_steps
-        cond_emb = hierarchical_cond_from_levels(q_embs, t_cont, ns, model.rqvae["rq_num"])  # [L, B, D] -> [B, D]
+        cond_emb, n_active_t0 = hierarchical_cond_from_levels(q_embs, t_cont, ns, model.rqvae["rq_num"])  # [L, B, D] -> [B, D]
 
     if model.parallel["zero_cond"]:
-        final_x0_pred = model(x_t, t0, cond_emb, cond_mask, diff_id=diff_id, zero_cond=True)
+        final_x0_pred = model(x_t, t0, cond_emb, cond_mask, diff_id=diff_id, zero_cond=True, n_active=n_active_t0)
     else:
-        final_x0_pred = model(x_t, t0, cond_emb, cond_mask, diff_id=diff_id)
+        final_x0_pred = model(x_t, t0, cond_emb, cond_mask, diff_id=diff_id, n_active=n_active_t0)
 
     return final_x0_pred, iid_emb
 

@@ -228,8 +228,7 @@ class MFBasedModel(torch.nn.Module):
                 quantized1, quantized2 = None, None
 
             # is_task=False: 노이즈 예측 , is_task=True: ALS + task 로스
-            if is_task == False:
-                loss = Diff.diffusion_loss_fn_parallel(
+            return Diff.diffusion_loss_fn_parallel(
                     diff_model,
                     tgt_emb1,
                     tgt_emb2,
@@ -247,27 +246,6 @@ class MFBasedModel(torch.nn.Module):
                     Q_emb1=quantized1,
                     Q_emb2=quantized2,
                 )
-                return loss
-            else:
-                task_loss, uni_loss = Diff.diffusion_loss_fn_parallel(
-                    diff_model,
-                    tgt_emb1,
-                    tgt_emb2,
-                    src_uid_emb1,
-                    src_uid_emb2,
-                    iid_emb,
-                    y_input,
-                    device,
-                    is_task,
-                    q_embs1=all_level_vectors1,
-                    q_embs2=all_level_vectors2,
-                    style_src=style_src,
-                    uid=tgt_uid,
-                    iid=iid_input,
-                    Q_emb1=quantized1,
-                    Q_emb2=quantized2,
-                )
-                return task_loss, uni_loss
 
         elif stage == "test_diff_parallel":  # DiffParallel - test
 
@@ -322,8 +300,8 @@ class MFBasedModel(torch.nn.Module):
                 # final_output_m = torch.randn_like(final_output_m).to(device)
                 # final_output_g = torch.randn_like(final_output_g).to(device)
 
-                # final_output_m = diff_model.mf_proj(final_output_m)
-                # final_output_g = diff_model.aggr_proj(final_output_g)
+                final_output_m = diff_model.mf_proj(final_output_m)
+                final_output_g = diff_model.aggr_proj(final_output_g)
 
                 if diff_model.parallel["set_aggr"] == "item":
                     final_output = (final_output_m + final_output_g) / 2
@@ -454,9 +432,9 @@ class MFBasedModel(torch.nn.Module):
                 tokens = torch.cat([base_tokens, style_tok_u.unsqueeze(1)], dim=1)
 
             out = diff_model.attn_layer(tokens, query=query)  # (B, 1, D)
-            # final_output = out[:, 0, :]  # (B, D)
+            final_output = out[:, 0, :]  # (B, D)
 
-            final_output = (final_output_m + final_output_g) / 2
+            # final_output = (final_output_m + final_output_g) / 2
 
             if diff_model.aggregation == "aggregation":
                 y_pred = torch.sum(final_output * iid_emb, dim=1)
