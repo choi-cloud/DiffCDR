@@ -204,13 +204,13 @@ class DiffParallel(nn.Module):
         self.diff_models = nn.ModuleList()
         self.step_emb_linear = nn.ModuleList([nn.Linear(1, input_dim, bias=False)])
 
-        # self.cond_emb_linear = nn.ModuleList()
+        self.cond_emb_linear = nn.ModuleList()
         # self.degree_encoder = nn.Sequential(nn.Linear(1, input_dim), nn.SiLU(), nn.Linear(input_dim, input_dim), nn.LayerNorm(input_dim))
         # self.degree_scale = nn.Parameter(torch.tensor(0.1))
 
         if self.aggregation in ["aggregation", "aggregation_ab1"]:
-            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 2, input_dim, bias=False)]))
-            # self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
+            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim, bias=False)]))
+            self.cond_emb_linear.append(nn.Linear(input_dim, input_dim, bias=False))
             self.mf_proj = nn.Linear(input_dim, input_dim)
             self.mf_norm = nn.LayerNorm(input_dim)
 
@@ -221,8 +221,8 @@ class DiffParallel(nn.Module):
                 self.query_proj = nn.Sequential(nn.Linear(input_dim, input_dim), nn.LayerNorm(input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
 
         if self.aggregation in ["aggregation", "aggregation_ab2"]:
-            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 2, input_dim, bias=False)]))
-            # self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
+            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 3, input_dim, bias=False)]))
+            self.cond_emb_linear.append(nn.Linear(input_dim, input_dim, bias=False))
             self.linear_g = nn.Linear(input_dim, input_dim, False)
             self.aggr_proj = nn.Linear(input_dim, input_dim)
             self.aggr_norm = nn.LayerNorm(input_dim)
@@ -275,13 +275,13 @@ class DiffParallel(nn.Module):
             t_embedding = t.float().unsqueeze(-1) / self.num_steps
             t_embedding = self.step_emb_linear[idx](t_embedding)
 
-            # cond_embedding = self.cond_emb_linear[diff_id](cond_emb)
+            cond_embedding = self.cond_emb_linear[diff_id](cond_emb)
 
-            cond_emb = torch.zeros_like(cond_emb)
+            # cond_embedding = torch.zeros_like(cond_embedding)
 
-            x = torch.cat([x, t_embedding], axis=1)
+            x = torch.cat([x, t_embedding, cond_embedding], axis=1)
 
-            x = self.diff_models[diff_id][0](x) + cond_emb
+            x = self.diff_models[diff_id][0](x)
 
         return x
 
@@ -520,7 +520,7 @@ def diffusion_loss_fn_parallel(
                 log_embedding_geometry(name="final_output_m", emb=final_output_m, target_emb=x_0_m, step=model.task_step)
 
             # final_output_m = model.mf_norm(model.mf_proj(final_output_m))
-            final_output_m = model.mf_proj(final_output_m)
+            # final_output_m = model.mf_proj(final_output_m)
 
             y_pred = torch.sum(final_output_m * iid_emb, dim=1)
             task_loss = (y_pred - y_input.squeeze().float()).square().mean()
