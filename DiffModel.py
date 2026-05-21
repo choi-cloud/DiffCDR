@@ -202,6 +202,8 @@ class DiffParallel(nn.Module):
 
         # time, condition, noised emb -> reverse 하는 3FC diffusion solver
         self.diff_models = nn.ModuleList()
+        self.step_emb_linear = nn.ModuleList([nn.Linear(1, input_dim, bias=False)])
+
         # self.cond_emb_linear = nn.ModuleList()
         # self.degree_encoder = nn.Sequential(nn.Linear(1, input_dim), nn.SiLU(), nn.Linear(input_dim, input_dim), nn.LayerNorm(input_dim))
         # self.degree_scale = nn.Parameter(torch.tensor(0.1))
@@ -269,7 +271,9 @@ class DiffParallel(nn.Module):
     def forward(self, x, t, cond_emb, cond_mask, diff_id=0, zero_cond=None):
 
         for idx in range(self.num_layers):
-            t_embedding = self.step_mlp(t)
+
+            t_embedding = t.float().unsqueeze(-1) / self.num_steps
+            t_embedding = self.step_emb_linear[idx](t_embedding)
 
             # cond_embedding = self.cond_emb_linear[diff_id](cond_emb)
 
