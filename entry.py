@@ -38,8 +38,9 @@ def prepare_1():
 
     parser.add_argument("--root", default="./")
     parser.add_argument("--exp_part", default="None_CDR")
-    parser.add_argument("--save_path", default="/home/shared/cjp/model_save_default_10/model_mlp")
+    # parser.add_argument("--save_path", default="/home/shared/cjp/model_save_default_10/model_mlp")
     # parser.add_argument("--save_path", default="/home/schoi/DiffCDR/model_save_default/model_mlp")
+    parser.add_argument("--save_path", default="./model_save_default/model_mlp_reg")
     parser.add_argument("--use_cuda", default=1)
     parser.add_argument("--experiment", default="0414_uni23")
 
@@ -58,7 +59,6 @@ def prepare_1():
     parser.add_argument("--start_point", default="noise", help="[src_u, quant_u, noise]")
     parser.add_argument("--rqvae_lr", type=float, default=0.001, help="rqvae pretrain lr")
     parser.add_argument("--rq_num", type=int, default=0, help="bias reconstruction loss")
-
 
     # item cond
     parser.add_argument("--diff_task_lambda", type=float, default=1.0, help="Task loss weight")

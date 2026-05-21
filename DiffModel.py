@@ -207,7 +207,7 @@ class DiffParallel(nn.Module):
         # self.degree_scale = nn.Parameter(torch.tensor(0.1))
 
         if self.aggregation in ["aggregation", "aggregation_ab1"]:
-            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim*2, input_dim)]))
+            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 2, input_dim, bias=False)]))
             # self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
             self.mf_proj = nn.Linear(input_dim, input_dim)
             self.mf_norm = nn.LayerNorm(input_dim)
@@ -219,7 +219,7 @@ class DiffParallel(nn.Module):
                 self.query_proj = nn.Sequential(nn.Linear(input_dim, input_dim), nn.LayerNorm(input_dim), nn.ReLU(), nn.Linear(input_dim, input_dim))
 
         if self.aggregation in ["aggregation", "aggregation_ab2"]:
-            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim*2, input_dim)]))
+            self.diff_models.append(nn.ModuleList([nn.Linear(input_dim * 2, input_dim, bias=False)]))
             # self.cond_emb_linear.append(nn.Linear(input_dim, input_dim))
             self.linear_g = nn.Linear(input_dim, input_dim, False)
             self.aggr_proj = nn.Linear(input_dim, input_dim)
@@ -273,12 +273,9 @@ class DiffParallel(nn.Module):
 
             # cond_embedding = self.cond_emb_linear[diff_id](cond_emb)
 
-            if zero_cond:
-                cond_embedding = torch.zeros_like(cond_embedding)
+            cond_emb = torch.zeros_like(cond_emb)
 
             x = torch.cat([x, t_embedding], axis=1)
-            # t_c_emb = t_embedding + cond_emb * cond_mask.unsqueeze(-1)
-            # x = x + t_c_emb
 
             x = self.diff_models[diff_id][0](x) + cond_emb
 
@@ -440,21 +437,6 @@ def diffusion_loss_fn_parallel(
         elif model.aggregation == "aggregation_ab1":
             output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)
 
-            # -------------------------------------------------
-            # debug: x0_pred rating MAE + batch similarity
-            # -------------------------------------------------
-            if model.diff_step % 200 == 0:
-                with torch.no_grad():
-                    x0_pred = output1
-
-                    y_pred = torch.sum(x0_pred * iid_emb, dim=1)
-                    mae = torch.mean(torch.abs(y_pred - y_input.squeeze().float()))
-
-                    # print(f"\n[Step {model.diff_step}] x0_pred Rating MAE")
-                    # print(f"MAE : {mae.item():.6f}")
-
-                    # print_batch_node_similarity(emb=x0_pred, step=model.diff_step, prefix="x0_pred", interval=200)
-
             return F.smooth_l1_loss(x_0_m, output1)
 
         elif model.aggregation == "aggregation_ab2":
@@ -506,12 +488,12 @@ def diffusion_loss_fn_parallel(
         if model.aggregation == "aggregation":
             final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
             final_output_g, iid_emb = p_sample(model, cond2, iid_emb, device, diff_id=1)
-            
+
             final_output_m = model.mf_proj(final_output_m)
             final_output_g = model.aggr_proj(final_output_g)
-            
+
             if model.parallel["set_aggr"] == "item":
-                final_output = (final_output_m + final_output_g) / 2 
+                final_output = (final_output_m + final_output_g) / 2
                 uni_loss = uniformity_loss(final_output, t=2.0)
                 y_pred = torch.sum(final_output * iid_emb, dim=1)
                 task_loss = (y_pred - y_input.squeeze().float()).square().mean()
@@ -524,13 +506,14 @@ def diffusion_loss_fn_parallel(
                 final_output_m = model.ln_m(final_output_m)
                 final_output_g = model.ln_g(final_output_g)
 
-
             base_tokens = torch.stack([final_output_m, final_output_g], dim=1)
 
         elif model.aggregation == "aggregation_ab1":
             final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
 
-            # print_batch_node_similarity(emb=final_output_m, step=model.task_step, prefix="final_output_m", interval=200)
+            if model.task_step % 500 == 0:
+
+                log_embedding_geometry(name="final_output_m", emb=final_output_m, target_emb=x_0_m, step=model.task_step)
 
             # final_output_m = model.mf_norm(model.mf_proj(final_output_m))
             final_output_m = model.mf_proj(final_output_m)
@@ -666,55 +649,6 @@ def diffusion_loss_fn_parallel(
             tokens = base_tokens
 
         out, score, attn = model.attn_layer(tokens, query=query, return_score=True)  # (B, 1, D)
-
-        # --------------------------------------------------
-        # attention logging (dynamic token version)
-        # --------------------------------------------------
-        # if model.task_step % 200 == 0:
-        #     with torch.no_grad():
-
-        #         # score/attn: (B, 1, T) -> (B, T)
-        #         score_log = score.squeeze(1)
-        #         attn_log = attn.squeeze(1)
-
-        #         # token norm: (B, T, D) -> (B, T)
-        #         token_norms = tokens.norm(dim=-1)
-
-        #         num_tokens = score_log.shape[1]
-
-        #         print(f"\n[Step {model.task_step}] Attention Statistics")
-
-        #         for token_idx in range(num_tokens):
-
-        #             token_score = score_log[:, token_idx]
-        #             token_attn = attn_log[:, token_idx]
-        #             token_norm = token_norms[:, token_idx]
-
-        #             print(
-        #                 f"[TOKEN {token_idx}] "
-        #                 f"SCORE mean/min/max: "
-        #                 f"{token_score.mean().item():.6f} / "
-        #                 f"{token_score.min().item():.6f} / "
-        #                 f"{token_score.max().item():.6f}"
-        #             )
-
-        #             print(
-        #                 f"[TOKEN {token_idx}] "
-        #                 f"ATTN mean/std/min/max: "
-        #                 f"{token_attn.mean().item():.6f} / "
-        #                 f"{token_attn.std().item():.6f} / "
-        #                 f"{token_attn.min().item():.6f} / "
-        #                 f"{token_attn.max().item():.6f}"
-        #             )
-
-        #             print(
-        #                 f"[TOKEN {token_idx}] "
-        #                 f"NORM mean/std/min/max: "
-        #                 f"{token_norm.mean().item():.6f} / "
-        #                 f"{token_norm.std().item():.6f} / "
-        #                 f"{token_norm.min().item():.6f} / "
-        #                 f"{token_norm.max().item():.6f}"
-        #             )
 
         final_output = out[:, 0, :]  # (B, D)
 
@@ -1000,3 +934,90 @@ def print_batch_node_similarity(emb, step, prefix="Embedding", interval=200):
         print(f"Std  : {sims.std().item():.6f}")
         print(f"Min  : {sims.min().item():.6f}")
         print(f"Max  : {sims.max().item():.6f}")
+
+
+def log_embedding_geometry(name, emb, target_emb=None, step=None):
+    """
+    emb: [B, D]
+    target_emb: [B, D] or None
+    """
+
+    with torch.no_grad():
+
+        emb = emb.detach()
+
+        # -------------------------------------------------
+        # node-node cosine
+        # -------------------------------------------------
+        emb_normed = F.normalize(emb, p=2, dim=1)
+
+        sim_mat = emb_normed @ emb_normed.t()
+
+        B = sim_mat.size(0)
+
+        mask = ~torch.eye(B, dtype=torch.bool, device=emb.device)
+
+        off_diag_sim = sim_mat[mask]
+
+        # -------------------------------------------------
+        # norm
+        # -------------------------------------------------
+        emb_norm = emb.norm(dim=1)
+
+        print("\n" + "=" * 60)
+        print(f"{name} Geometry Check")
+        print("=" * 60)
+
+        if step is not None:
+            print(f"step : {step}")
+
+        # -------------------------------------------------
+        # target cosine
+        # -------------------------------------------------
+        if target_emb is not None:
+
+            target_emb = target_emb.detach()
+
+            cos_sim = F.cosine_similarity(emb, target_emb, dim=1)
+
+            target_norm = target_emb.norm(dim=1)
+
+            print(
+                f"cosine({name}, target) | "
+                f"mean: {cos_sim.mean().item():.6f} | "
+                f"std : {cos_sim.std().item():.6f} | "
+                f"min : {cos_sim.min().item():.6f} | "
+                f"max : {cos_sim.max().item():.6f}"
+            )
+
+            print(
+                "target norm | "
+                f"mean: {target_norm.mean().item():.6f} | "
+                f"std : {target_norm.std().item():.6f} | "
+                f"min : {target_norm.min().item():.6f} | "
+                f"max : {target_norm.max().item():.6f}"
+            )
+
+        # -------------------------------------------------
+        # node-node cosine
+        # -------------------------------------------------
+        print(
+            f"{name} node-node cosine | "
+            f"mean: {off_diag_sim.mean().item():.6f} | "
+            f"std : {off_diag_sim.std().item():.6f} | "
+            f"min : {off_diag_sim.min().item():.6f} | "
+            f"max : {off_diag_sim.max().item():.6f}"
+        )
+
+        # -------------------------------------------------
+        # emb norm
+        # -------------------------------------------------
+        print(
+            f"{name} norm | "
+            f"mean: {emb_norm.mean().item():.6f} | "
+            f"std : {emb_norm.std().item():.6f} | "
+            f"min : {emb_norm.min().item():.6f} | "
+            f"max : {emb_norm.max().item():.6f}"
+        )
+
+        print("=" * 60)
