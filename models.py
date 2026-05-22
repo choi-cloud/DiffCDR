@@ -11,43 +11,104 @@ from utils import AttentionLayer
 from utils import log_batch_similarity_stats
 
 
-class LookupEmbedding(nn.Module):
+def uniformity_loss(x, t=2.0, eps=1e-8):
+    """
+    x: [B, D]
+    구 위에서 방향을 퍼뜨리는 loss.
+    값이 작아질수록 더 uniform.
+    """
+    x = F.normalize(x, dim=1, eps=eps)
 
-    def __init__(self, uid_all, iid_all, emb_dim, hidden_dim=64, out_dim=10, uni_lambda=0.1):
+    if x.size(0) <= 1:
+        return x.new_tensor(0.0)
+
+    sq_pdist = torch.pdist(x, p=2).pow(2)
+    return torch.log(torch.exp(-t * sq_pdist).mean() + eps)
+
+
+def sphere_norm_loss(x, target_norm=2.5):
+    """
+    embedding norm을 target_norm 근처로 유지.
+    """
+    norm = x.norm(dim=1)
+    return ((norm - target_norm) ** 2).mean()
+
+
+class LookupEmbedding(torch.nn.Module):
+
+    def __init__(
+        self,
+        uid_all,
+        iid_all,
+        emb_dim,
+        uni_user_weight=0.01,
+        uni_item_weight=0.005,
+        norm_user_weight=0.01,
+        norm_item_weight=0.01,
+        target_user_norm=2.5,
+        target_item_norm=2.5,
+    ):
         super().__init__()
-        self.uid_embedding = nn.Embedding(uid_all, emb_dim)
-        self.iid_embedding = nn.Embedding(iid_all + 1, emb_dim)
 
-        # user mlp
-        self.user_mlp = nn.Sequential(nn.Linear(emb_dim, hidden_dim), nn.ReLU(inplace=True), nn.Linear(hidden_dim, out_dim))
+        self.uid_embedding = torch.nn.Embedding(uid_all, emb_dim)
+        self.iid_embedding = torch.nn.Embedding(iid_all + 1, emb_dim)
 
-        # item mlp
-        self.item_mlp = nn.Sequential(nn.Linear(emb_dim, hidden_dim), nn.ReLU(inplace=True), nn.Linear(hidden_dim, out_dim))
+        # user MLP
+        self.uid_mlp = torch.nn.Sequential(
+            torch.nn.Linear(emb_dim, emb_dim),
+            torch.nn.GELU(),
+            torch.nn.Linear(emb_dim, emb_dim),
+        )
 
-        self.uni_lambda = uni_lambda
+        # item MLP
+        self.iid_mlp = torch.nn.Sequential(
+            torch.nn.Linear(emb_dim, emb_dim),
+            torch.nn.GELU(),
+            torch.nn.Linear(emb_dim, emb_dim),
+        )
 
-    def uniformity_loss(self, z, t=2.0):
-        z = F.normalize(z, dim=1)
-        sq_pdist = torch.pdist(z, p=2).pow(2)
-        return torch.log(torch.exp(-t * sq_pdist).mean() + 1e-8)
+        self.uni_user_weight = uni_user_weight
+        self.uni_item_weight = uni_item_weight
+        self.norm_user_weight = norm_user_weight
+        self.norm_item_weight = norm_item_weight
+        self.target_user_norm = target_user_norm
+        self.target_item_norm = target_item_norm
 
-    def forward(self, x, return_loss=False):
-        uid_emb = self.uid_embedding(x[:, 0])  # [B, D]
-        iid_emb = self.iid_embedding(x[:, 1])  # [B, D]
+    def forward(self, x):
+        # -------------------------------------------------
+        # lookup
+        # -------------------------------------------------
+        uid_emb_raw = self.uid_embedding(x[:, 0])  # [B, D]
+        iid_emb_raw = self.iid_embedding(x[:, 1])  # [B, D]
 
-        user_vec = self.user_mlp(uid_emb)  # [B, d]
-        item_vec = self.item_mlp(iid_emb)  # [B, d]
+        # -------------------------------------------------
+        # MLP projection
+        # -------------------------------------------------
+        uid_emb = self.uid_mlp(uid_emb_raw)  # [B, D]
+        iid_emb = self.iid_mlp(iid_emb_raw)  # [B, D]
 
-        emb = torch.stack([user_vec, item_vec], dim=1)  # [B, 2, d]
+        # -------------------------------------------------
+        # concat
+        # -------------------------------------------------
+        emb = torch.stack([uid_emb, iid_emb], dim=1)  # [B, 2, D]
 
-        if return_loss:
-            user_uni = self.uniformity_loss(user_vec)
-            item_uni = self.uniformity_loss(item_vec)
+        # -------------------------------------------------
+        # geometry regularization
+        # -------------------------------------------------
+        uid_uni_loss = uniformity_loss(uid_emb)
+        iid_uni_loss = uniformity_loss(iid_emb)
 
-            uni_loss = self.uni_lambda * (user_uni + item_uni)
-            return emb, uni_loss
+        uid_norm_loss = sphere_norm_loss(uid_emb, target_norm=self.target_user_norm)
+        iid_norm_loss = sphere_norm_loss(iid_emb, target_norm=self.target_item_norm)
 
-        return emb
+        reg_loss = (
+            self.uni_user_weight * uid_uni_loss
+            + self.uni_item_weight * iid_uni_loss
+            + self.norm_user_weight * uid_norm_loss
+            + self.norm_item_weight * iid_norm_loss
+        )
+
+        return emb, reg_loss
 
 
 class MetaNet(torch.nn.Module):
@@ -203,10 +264,10 @@ class MFBasedModel(torch.nn.Module):
 
             tgt_uid, iid_input, y_input = x
             tgt_emb1 = self.tgt_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
-            tgt_emb1 = self.tgt_model.user_mlp(tgt_emb1)
+            tgt_emb1 = self.tgt_model.uid_mlp(tgt_emb1)
 
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
-            src_uid_emb1 = self.src_model.user_mlp(src_uid_emb1)
+            src_uid_emb1 = self.src_model.uid_mlp(src_uid_emb1)
 
             tgt_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=True)  # Aggr
             src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)  # Aggr
@@ -215,7 +276,7 @@ class MFBasedModel(torch.nn.Module):
             cond_emb2 = src_uid_emb2
 
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
-            iid_emb = self.tgt_model.item_mlp(iid_emb)
+            iid_emb = self.tgt_model.iid_mlp(iid_emb)
 
             # ! mf 임베딩과 aggr 임베딩 양자화
             if diff_model.rqvae["RQVAE"] == True:
@@ -274,14 +335,14 @@ class MFBasedModel(torch.nn.Module):
             tgt_uid, iid_input, _ = x
 
             src_uid_emb1 = self.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()  # MF
-            src_uid_emb1 = self.src_model.user_mlp(src_uid_emb1)
+            src_uid_emb1 = self.src_model.uid_mlp(src_uid_emb1)
 
             src_uid_emb2 = self._fetch_vbge_user_embedding(diff_model, tgt_uid, use_target=False)
 
             cond_emb1 = src_uid_emb1
             cond_emb2 = src_uid_emb2
             iid_emb = self.tgt_model.iid_embedding(iid_input.unsqueeze(1)).squeeze()
-            iid_emb = self.tgt_model.item_mlp(iid_emb)
+            iid_emb = self.tgt_model.iid_mlp(iid_emb)
 
             if diff_model.rqvae["RQVAE"] == True:
                 quantized1, all_level_vectors1, _ = diff_model.rq_mf(cond_emb1)  # [L, B, D]

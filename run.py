@@ -76,7 +76,7 @@ class Run:
         aggregaion_name = str(True)
         self.rqvae_ckpt_root = (
             self.root
-            + "rqvae_ckpt_mlp_reg/"
+            + "rqvae_ckpt_mlp_reg2/"
             + self.src
             + "_"
             + str(int(self.ratio[0] * 10))
@@ -462,7 +462,7 @@ class Run:
             all_uid = torch.arange(model.uid_embedding.num_embeddings, device=self.device)
 
             raw_user_feat = model.uid_embedding(all_uid)
-            user_feat = model.user_mlp(raw_user_feat).detach().cpu()
+            user_feat = model.uid_mlp(raw_user_feat).detach().cpu()
 
             # --------------------------------------------------
             # 2-hop aggregation
@@ -1100,7 +1100,7 @@ class Run:
                 name="rq_mf",
                 quantizer=diff_model.rq_mf,
                 # embed_fetch_fn=lambda tgt_uid: model.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze(),
-                embed_fetch_fn=lambda tgt_uid: model.src_model.user_mlp(model.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()),
+                embed_fetch_fn=lambda tgt_uid: model.src_model.uid_mlp(model.src_model.uid_embedding(tgt_uid.unsqueeze(1)).squeeze()),
                 data_diff=data_diff,
             )
 
