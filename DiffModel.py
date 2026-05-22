@@ -266,12 +266,45 @@ class DiffParallel(nn.Module):
             pass
 
         if self.rqvae["RQVAE"]:
-            self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
-            self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
+            self.rq_mf = ResidualQuantizer(
+                code_dim=input_dim,
+                num_levels=rqvae["codebook_num"],
+                codebook_size=rqvae["codebook_size"],
+                level_loss_weights=[0.25, 1.0, 1.0, 1.0],
+                recon_lambda=1.0,
+            )
+            self.rq_aggr = ResidualQuantizer(
+                code_dim=input_dim,
+                num_levels=rqvae["codebook_num"],
+                codebook_size=rqvae["codebook_size"],
+                level_loss_weights=[0.25, 1.0, 1.0, 1.0],
+                recon_lambda=1.0,
+            )
 
         self.cond_scale = 1.0
 
     def forward(self, x, t, cond_emb, cond_mask, diff_id=0, zero_cond=None):
+
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+
+        if cond_emb.dim() == 1:
+            cond_emb = cond_emb.unsqueeze(0)
+
+        if t.dim() == 0:
+            t = t.unsqueeze(0)
+
+        if cond_mask is not None and cond_mask.dim() == 0:
+            cond_mask = cond_mask.unsqueeze(0)
+
+        if x.dim() != 2:
+            raise ValueError(f"x must be [B,D], got {tuple(x.shape)}")
+
+        if cond_emb.dim() != 2:
+            raise ValueError(f"cond_emb must be [B,D], got {tuple(cond_emb.shape)}")
+
+        if x.size(0) != cond_emb.size(0):
+            raise ValueError(f"batch mismatch: x {tuple(x.shape)}, cond_emb {tuple(cond_emb.shape)}")
 
         # if zero_cond is True:
         #     cond_emb = torch.zeros_like(cond_emb)
@@ -535,43 +568,66 @@ def diffusion_loss_fn_parallel(
             base_tokens = torch.stack([final_output_m, final_output_g], dim=1)
 
         elif model.aggregation == "aggregation_ab1":
+
             # -------------------------------------------------
-            # original condition
+            # raw condition
             # -------------------------------------------------
-            final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
+            out_raw, iid_emb = p_sample(model, cond_emb1, iid_emb, device, diff_id=0)  # raw cond
+
+            # -------------------------------------------------
+            # q1 condition
+            # -------------------------------------------------
+            # all_level_vectors가 [L, B, D]일 때만 q1 추출
+            if q_embs1.dim() == 3:
+                q1_cond = q_embs1[0]  # [B, D]
+            else:
+                raise ValueError(f"Expected q_embs1 [L,B,D], got {tuple(q_embs1.shape)}")
+
+            out_q1, _ = p_sample(model, q1_cond, iid_emb, device, diff_id=0)
 
             if model.task_step % 500 == 0:
 
-                # log_embedding_geometry(name="final_output_m", emb=final_output_m, target_emb=x_0_m, step=model.task_step)
+                print("\n" + "=" * 80)
+                print(f"Raw Cond vs Q1 Cond Check @ step {model.task_step}")
+                print("=" * 80)
 
-                # rating_mae_rmse(name="original cond", out=final_output_m, iid_emb=iid_emb, y_true=y_input)
+                # 1. condition 자체 비교
+                print_geometry("raw_cond", cond_emb1, task_step=model.task_step)
+                print_geometry("q1_cond", q1_cond, task_step=model.task_step)
+                print_geometry("raw_minus_q1", cond_emb1 - q1_cond, task_step=model.task_step)
 
-                # -------------------------------------------------
-                # zero condition
-                # -------------------------------------------------
-                zero_cond1 = torch.zeros_like(cond1)
+                print_cross_cos("q1_cond vs raw_cond", q1_cond, cond_emb1, task_step=model.task_step)
 
-                final_output_zero, _ = p_sample(model, zero_cond1, iid_emb, device, diff_id=0)
+                # 2. output 비교
+                print_geometry("out_raw", out_raw, task_step=model.task_step)
+                print_geometry("out_q1", out_q1, task_step=model.task_step)
+                print_geometry("out_raw_minus_out_q1", out_raw - out_q1, task_step=model.task_step)
 
-                # log_embedding_geometry(name="final_output_zero_cond", emb=final_output_zero, target_emb=x_0_m, step=model.task_step)
+                print_cross_cos("out_raw vs out_q1", out_raw, out_q1, task_step=model.task_step)
 
-                # rating_mae_rmse(name="zero cond", out=final_output_zero, iid_emb=iid_emb, y_true=y_input)
+                # 3. rating prediction 차이
+                y_raw = torch.sum(out_raw * iid_emb, dim=1)
+                y_q1 = torch.sum(out_q1 * iid_emb, dim=1)
 
-                # -------------------------------------------------
-                # shuffled condition
-                # -------------------------------------------------
-                perm = torch.randperm(cond1.size(0), device=cond1.device)
-                shuffle_cond1 = cond1[perm]
+                print("-" * 80)
+                print(
+                    f"[pred raw vs q1] "
+                    f"diff_MAE={(y_raw - y_q1).abs().mean().item():.6f} | "
+                    f"raw_mean={y_raw.mean().item():.6f} | "
+                    f"raw_std={y_raw.std(unbiased=False).item():.6f} | "
+                    f"q1_mean={y_q1.mean().item():.6f} | "
+                    f"q1_std={y_q1.std(unbiased=False).item():.6f}"
+                )
 
-                final_output_shuffle, _ = p_sample(model, shuffle_cond1, iid_emb, device, diff_id=0)
+                rating_mae_rmse("raw cond", out_raw, iid_emb, y_input)
+                rating_mae_rmse("q1 cond", out_q1, iid_emb, y_input)
 
-                # log_embedding_geometry(name="final_output_shuffle_cond", emb=final_output_shuffle, target_emb=x_0_m, step=model.task_step)
-
-                # rating_mae_rmse(name="shuffle cond", out=final_output_shuffle, iid_emb=iid_emb, y_true=y_input)
+                print("=" * 80 + "\n")
 
             # final_output_m = model.mf_norm(model.mf_proj(final_output_m))
             # final_output_m = model.mf_proj(final_output_m)
 
+            final_output_m = out_raw
             y_pred = torch.sum(final_output_m * iid_emb, dim=1)
             task_loss = (y_pred - y_input.squeeze().float()).square().mean()
             uni_loss = uniformity_loss(final_output_m, t=2.0)
@@ -800,11 +856,21 @@ def make_ddim_timesteps(num_steps, sample_steps, device):
 @torch.no_grad()
 def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise", sample_steps=20, eta=0.0, diff_id=0):
 
-    if model.rqvae["RQVAE"]:  # cond_emb:  [L, B, D]
-        q_embs = cond_emb  # [L, B, D] 원본 보존
-        x_init = cond_emb[0]  # [B, D]
-    else:  # cond_emb: [B, D]
+    # if model.rqvae["RQVAE"]:  # cond_emb:  [L, B, D]
+    #     q_embs = cond_emb  # [L, B, D] 원본 보존
+    #     x_init = cond_emb[0]  # [B, D]
+    # else:  # cond_emb: [B, D]
+    #     x_init = cond_emb
+
+    # 올바른 처리
+    if cond_emb.dim() == 3:
+        # RQ: [L, B, D]
+        x_init = cond_emb[0]  # q1, [B, D]
+    elif cond_emb.dim() == 2:
+        # raw or q1 condition: [B, D]
         x_init = cond_emb
+    else:
+        raise ValueError(f"bad cond_emb shape: {tuple(cond_emb.shape)}")
 
     batch_size = x_init.shape[0]
 
@@ -828,10 +894,22 @@ def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise"
         if model.rqvae["RQVAE"]:
             ns = NoiseScheduleVP(schedule="linear")
             t_cont = t.float() / model.num_steps
-            cond_emb = hierarchical_cond_from_levels(q_embs, t_cont, ns, model.rqvae["rq_num"])  # [L, B, D] -> [B, D]
+        #     cond_emb = hierarchical_cond_from_levels(q_embs, t_cont, ns, model.rqvae["rq_num"])  # [L, B, D] -> [B, D]
+
+        if cond_emb.dim() == 3:
+            # RQ condition: [L, B, D]
+            q_embs = cond_emb
+            cond_emb_step = hierarchical_cond_from_levels(q_embs, t_cont, ns, model.rqvae["rq_num"])  # [B, D]
+
+        elif cond_emb.dim() == 2:
+            # raw condition: [B, D]
+            cond_emb_step = cond_emb
+
+        else:
+            raise ValueError(f"Unexpected cond_emb shape: {tuple(cond_emb.shape)}")
 
         x_t, x0_pred = ddim_step_from_x0(
-            model=model, x_t=x_t, t=t, t_prev=t_prev, cond_emb=cond_emb, device=device, cond_mask=cond_mask, eta=eta, diff_id=diff_id
+            model=model, x_t=x_t, t=t, t_prev=t_prev, cond_emb=cond_emb_step, device=device, cond_mask=cond_mask, eta=eta, diff_id=diff_id
         )
         final_x0_pred = x_t
 
@@ -1069,4 +1147,85 @@ def rating_mae_rmse(name, out, iid_emb, y_true):
         f"pred_mean={y_pred.mean().item():.6f} | "
         f"pred_std={y_pred.std(unbiased=False).item():.6f} | "
         f"true_mean={y_true.mean().item():.6f}"
+    )
+
+
+@torch.no_grad()
+def print_geometry(name, x, task_step=None):
+    """
+    x: [B, D]
+    batch 내 node-node cosine과 norm 통계 출력
+    """
+    if x is None:
+        return
+
+    x = x.detach()
+
+    if x.dim() != 2:
+        print(f"[{name}] skip: expected [B, D], got {tuple(x.shape)}")
+        return
+
+    bsz = x.size(0)
+    norm = x.norm(dim=1)
+
+    x_n = F.normalize(x, dim=1, eps=1e-8)
+    sim = x_n @ x_n.t()
+
+    if bsz > 1:
+        mask = ~torch.eye(bsz, dtype=torch.bool, device=x.device)
+        vals = sim[mask]
+    else:
+        vals = sim.reshape(-1)
+
+    step_str = f" @ task_step {task_step}" if task_step is not None else ""
+
+    print("-" * 80)
+    print(f"[Geometry] {name}{step_str}")
+    print(
+        f"node-node cosine | "
+        f"mean={vals.mean().item():.6f} | "
+        f"std={vals.std(unbiased=False).item():.6f} | "
+        f"min={vals.min().item():.6f} | "
+        f"max={vals.max().item():.6f}"
+    )
+    print(
+        f"norm             | "
+        f"mean={norm.mean().item():.6f} | "
+        f"std={norm.std(unbiased=False).item():.6f} | "
+        f"min={norm.min().item():.6f} | "
+        f"max={norm.max().item():.6f}"
+    )
+
+
+@torch.no_grad()
+def print_cross_cos(name, a, b, task_step=None):
+    """
+    a, b: [B, D]
+    같은 index끼리 cosine similarity 출력
+    """
+    if a is None or b is None:
+        return
+
+    a = a.detach()
+    b = b.detach()
+
+    if a.dim() != 2 or b.dim() != 2:
+        print(f"[{name}] skip: expected [B, D], got {tuple(a.shape)} and {tuple(b.shape)}")
+        return
+
+    if a.shape != b.shape:
+        print(f"[{name}] skip: shape mismatch {tuple(a.shape)} vs {tuple(b.shape)}")
+        return
+
+    cos = F.cosine_similarity(a, b, dim=1, eps=1e-8)
+
+    step_str = f" @ task_step {task_step}" if task_step is not None else ""
+
+    print("-" * 80)
+    print(f"[Cross Cos] {name}{step_str}")
+    print(
+        f"mean={cos.mean().item():.6f} | "
+        f"std={cos.std(unbiased=False).item():.6f} | "
+        f"min={cos.min().item():.6f} | "
+        f"max={cos.max().item():.6f}"
     )

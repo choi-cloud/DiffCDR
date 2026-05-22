@@ -76,7 +76,7 @@ class Run:
         aggregaion_name = str(True)
         self.rqvae_ckpt_root = (
             self.root
-            + "rqvae_ckpt_mlp_reg2/"
+            + "rqvae_ckpt_mlp_reg3/"
             + self.src
             + "_"
             + str(int(self.ratio[0] * 10))

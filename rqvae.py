@@ -1,95 +1,100 @@
-# rqvae.py
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 class ResidualQuantizer(nn.Module):
-    """
-    아주 간단한 RQ-VAE 스타일 residual quantizer.
-    - 입력: z [B, D] (여기서는 src uid embedding)
-    - 출력:
-        quantized: [B, D]        (모든 레벨 합친 최종 벡터)
-        all_level_vectors: [L, B, D]  (레벨별 코드벡터)
-        rq_loss: scalar (코드북 학습용 loss)
-    """
-
-    def __init__(self, code_dim: int, num_levels: int = 4, codebook_size: int = 256):
+    def __init__(self, code_dim: int, num_levels: int = 4, codebook_size=None, level_loss_weights=None, recon_lambda=1.0):
         super().__init__()
+
         self.code_dim = code_dim
         self.num_levels = num_levels
-        self.codebook_size = codebook_size
+        self.recon_lambda = recon_lambda
 
-        # [num_levels, codebook_size, code_dim]
-        self.codebooks = nn.Parameter(torch.randn(num_levels, codebook_size, code_dim) * 0.1)
+        # -------------------------------------------------
+        # codebook size parsing
+        # -------------------------------------------------
+        if codebook_size is None:
+            codebook_size = [4, 16, 16, 16]
+
+        # argparse string 처리
+        if isinstance(codebook_size, str):
+            codebook_size = eval(codebook_size)
+
+        # int면 모든 level 동일하게
+        if isinstance(codebook_size, int):
+            codebook_size = [codebook_size] * num_levels
+
+        assert len(codebook_size) == num_levels
+
+        self.codebook_sizes = codebook_size
+
+        # -------------------------------------------------
+        # level weights
+        # -------------------------------------------------
+        if level_loss_weights is None:
+            level_loss_weights = [0.25, 1.0, 1.0, 1.0]
+
+        if isinstance(level_loss_weights, str):
+            level_loss_weights = eval(level_loss_weights)
+
+        assert len(level_loss_weights) == num_levels
+
+        self.register_buffer(
+            "level_loss_weights",
+            torch.tensor(level_loss_weights, dtype=torch.float32),
+        )
+
+        # -------------------------------------------------
+        # codebooks
+        # -------------------------------------------------
+        self.codebooks = nn.ParameterList([nn.Parameter(torch.randn(k, code_dim) * 0.1) for k in codebook_size])
 
     def forward(self, z: torch.Tensor):
         """
-        z: [B, D] (fixed embedding)
+        z: [B, D]
 
         returns:
             quantized: [B, D]
             all_level_vectors: [L, B, D]
             total_loss: scalar
         """
-
         B, D = z.shape
 
-        # encoder 학습 안 하므로 detach
         z = z.detach()
 
         residual = z
         all_level_vectors = []
 
-        rq_loss = 0.0
+        rq_loss = z.new_tensor(0.0)
 
         for l in range(self.num_levels):
+            codebook_l = self.codebooks[l]  # [K_l, D]
 
-            # [K, D]
-            codebook_l = self.codebooks[l]
-
-            # ------------------------
-            # nearest code search
-            # ------------------------
-            residual_expanded = residual.unsqueeze(1)  # [B, 1, D]
-            codebook_expanded = codebook_l.unsqueeze(0)  # [1, K, D]
-
-            dist = torch.sum((residual_expanded - codebook_expanded) ** 2, dim=-1)  # [B, K]
+            dist = (
+                torch.cdist(
+                    residual.unsqueeze(0),
+                    codebook_l.unsqueeze(0),
+                    p=2,
+                ).squeeze(0)
+                ** 2
+            )  # [B, K_l]
 
             idx = torch.argmin(dist, dim=-1)  # [B]
+            chosen = codebook_l[idx]  # [B, D]
 
-            # [B, D]
-            chosen = codebook_l[idx]
+            level_loss = F.mse_loss(chosen, residual.detach())
+            rq_loss = rq_loss + self.level_loss_weights[l] * level_loss
 
-            # ------------------------
-            # codebook fitting loss
-            # ------------------------
-            rq_loss = rq_loss + F.mse_loss(chosen, residual)
-
-            # 저장
             all_level_vectors.append(chosen)
 
-            # ------------------------
-            # residual update
-            # ------------------------
             residual = residual - chosen.detach()
 
-        # ------------------------
-        # stack
-        # ------------------------
         all_level_vectors = torch.stack(all_level_vectors, dim=0)  # [L, B, D]
-
-        # additive reconstruction
         quantized = all_level_vectors.sum(dim=0)  # [B, D]
 
-        # ------------------------
-        # global reconstruction loss
-        # ------------------------
         recon_loss = F.mse_loss(quantized, z)
 
-        recon_lambda = 1.0
-
-        total_loss = rq_loss + recon_lambda * recon_loss
+        total_loss = rq_loss + self.recon_lambda * recon_loss
 
         return quantized, all_level_vectors, total_loss
