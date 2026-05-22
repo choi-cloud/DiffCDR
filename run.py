@@ -71,12 +71,12 @@ class Run:
 
         self.csvfile = config["csvfile"]
         self.seed = config["seed"]
-        
+
         isResidual = "residual"
         aggregaion_name = str(True)
         self.rqvae_ckpt_root = (
             self.root
-            + "rqvae_ckpt2/"
+            + "rqvae_ckpt_mlp_reg/"
             + self.src
             + "_"
             + str(int(self.ratio[0] * 10))
@@ -128,7 +128,7 @@ class Run:
             "uniformity_loss": config["uniformity_loss"],
             "zero_cond": config["zero_cond"],
             "batch_norm": config["batch_norm"],
-            "recon_loss": config["recon_loss"]
+            "recon_loss": config["recon_loss"],
         }
 
         self.rqvae_setting = {
@@ -141,7 +141,7 @@ class Run:
             "freeze_rq": config["freeze_rq"],
             "rqvae_lr": config["rqvae_lr"],
             "cross_cond": config["cross_cond"],
-            "rq_num": config["rq_num"]
+            "rq_num": config["rq_num"],
         }
 
         self.device = "cuda" if config["use_cuda"] else "cpu"
@@ -1199,21 +1199,13 @@ class Run:
         print_str = ""
         for p in phase:
             write(f"⬇️ Eval {p}: MAE & RMSE ")
-            with open(self.csvfile, 'a', newline='') as f:
+            with open(self.csvfile, "a", newline="") as f:
                 writer = csv.writer(f)
                 for m in ["_mae", "_rmse"]:
                     metric_name = p + m
                     print_str += metric_name + ": {:.6f} ".format(self.results[metric_name])
                     write(f"{self.results[metric_name]:.6f}")
-                    writer.writerow([
-                        self.seed,
-                        p,
-                        self.task,
-                        self.ratio[0] * 10, 
-                        self.ratio[1] * 10,
-                        m.strip("_"),
-                        self.results[metric_name]
-                    ])
+                    writer.writerow([self.seed, p, self.task, self.ratio[0] * 10, self.ratio[1] * 10, m.strip("_"), self.results[metric_name]])
 
     def main(self, exp_part="None_CDR", save_path=None):
         # exp_part 에 따라 모델, 옵티마이져 초기화하고 학습.
@@ -1316,7 +1308,7 @@ class Run:
             if self.base_model == "CMF":
                 self.DataAug(model, data_aug, data_test, criterion, optimizer_aug)
                 self.result_print(["CMF", "aug"], exp_part)
-            else: 
+            else:
                 self.result_print(["tgt"], exp_part)
             self.model_save(model, path=save_path)
 
