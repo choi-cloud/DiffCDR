@@ -231,6 +231,7 @@ class DiffParallel(nn.Module):
                 self.ln_g = nn.BatchNorm1d(input_dim)
 
         self.num_layers = 1
+
         if self.parallel["batch_norm"]:
             self.ln_iid = nn.BatchNorm1d(input_dim)
 
@@ -268,7 +269,15 @@ class DiffParallel(nn.Module):
             self.rq_mf = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
             self.rq_aggr = ResidualQuantizer(code_dim=input_dim, num_levels=rqvae["codebook_num"], codebook_size=rqvae["codebook_size"])
 
+        self.cond_scale = 1.0
+
     def forward(self, x, t, cond_emb, cond_mask, diff_id=0, zero_cond=None):
+
+        # if zero_cond is True:
+        #     cond_emb = torch.zeros_like(cond_emb)
+
+        # if cond_mask is not None:
+        #     cond_emb = cond_emb * cond_mask.float().view(-1, 1)
 
         for idx in range(self.num_layers):
 
@@ -277,11 +286,16 @@ class DiffParallel(nn.Module):
 
             cond_embedding = self.cond_emb_linear[diff_id](cond_emb)
 
+            if hasattr(self, "cond_scale"):
+                cond_embedding = self.cond_scale * cond_embedding
+
             # cond_embedding = torch.zeros_like(cond_embedding)
+            # perm = torch.randperm(cond_emb.size(0), device=cond_emb.device)
+            # cond_emb = cond_emb[perm]
 
-            x = torch.cat([x, t_embedding, cond_embedding], axis=1)
+            x = torch.cat([x, t_embedding, cond_embedding], dim=1)
 
-            x = self.diff_models[diff_id][0](x)
+            x = self.diff_models[diff_id][idx](x)
 
         return x
 
@@ -450,7 +464,27 @@ def diffusion_loss_fn_parallel(
 
             norm_loss = sphere_match_norm_loss(output1, x_0_m)
 
-            loss = rec_loss + 0.3 * cos_align_loss + 0.7 * geo_loss + 0.3 * norm_loss
+            # -------------------------------------------------
+            # shuffled condition negative
+            # -------------------------------------------------
+            perm = torch.randperm(c1.size(0), device=c1.device)
+            c1_shuffle = c1[perm]
+
+            output_neg = model(
+                x_m,
+                t.squeeze(-1),
+                c1_shuffle,
+                cond_mask1,
+                diff_id=0,
+            )
+
+            pos_dist = 1.0 - F.cosine_similarity(output1, x_0_m, dim=1, eps=1e-8)
+
+            neg_dist = 1.0 - F.cosine_similarity(output_neg, x_0_m, dim=1, eps=1e-8)
+
+            margin_loss = F.relu(0.1 + pos_dist - neg_dist).mean()
+
+            loss = rec_loss + 0.3 * cos_align_loss + 0.7 * geo_loss + 0.3 * norm_loss + 0.1 * margin_loss
 
             return loss
 
@@ -501,11 +535,39 @@ def diffusion_loss_fn_parallel(
             base_tokens = torch.stack([final_output_m, final_output_g], dim=1)
 
         elif model.aggregation == "aggregation_ab1":
+            # -------------------------------------------------
+            # original condition
+            # -------------------------------------------------
             final_output_m, iid_emb = p_sample(model, cond1, iid_emb, device, diff_id=0)
 
             if model.task_step % 500 == 0:
 
-                log_embedding_geometry(name="final_output_m", emb=final_output_m, target_emb=x_0_m, step=model.task_step)
+                # log_embedding_geometry(name="final_output_m", emb=final_output_m, target_emb=x_0_m, step=model.task_step)
+
+                # rating_mae_rmse(name="original cond", out=final_output_m, iid_emb=iid_emb, y_true=y_input)
+
+                # -------------------------------------------------
+                # zero condition
+                # -------------------------------------------------
+                zero_cond1 = torch.zeros_like(cond1)
+
+                final_output_zero, _ = p_sample(model, zero_cond1, iid_emb, device, diff_id=0)
+
+                # log_embedding_geometry(name="final_output_zero_cond", emb=final_output_zero, target_emb=x_0_m, step=model.task_step)
+
+                # rating_mae_rmse(name="zero cond", out=final_output_zero, iid_emb=iid_emb, y_true=y_input)
+
+                # -------------------------------------------------
+                # shuffled condition
+                # -------------------------------------------------
+                perm = torch.randperm(cond1.size(0), device=cond1.device)
+                shuffle_cond1 = cond1[perm]
+
+                final_output_shuffle, _ = p_sample(model, shuffle_cond1, iid_emb, device, diff_id=0)
+
+                # log_embedding_geometry(name="final_output_shuffle_cond", emb=final_output_shuffle, target_emb=x_0_m, step=model.task_step)
+
+                # rating_mae_rmse(name="shuffle cond", out=final_output_shuffle, iid_emb=iid_emb, y_true=y_input)
 
             # final_output_m = model.mf_norm(model.mf_proj(final_output_m))
             # final_output_m = model.mf_proj(final_output_m)
@@ -990,3 +1052,21 @@ def sphere_match_norm_loss(pred, target):
     pred_norm = pred.norm(dim=1)
     target_norm = target.norm(dim=1)
     return F.smooth_l1_loss(pred_norm, target_norm)
+
+
+@torch.no_grad()
+def rating_mae_rmse(name, out, iid_emb, y_true):
+    y_true = y_true.view(-1).to(out.device).float()
+    y_pred = torch.sum(out * iid_emb, dim=1)
+
+    mae = torch.mean(torch.abs(y_pred - y_true))
+    rmse = torch.sqrt(torch.mean((y_pred - y_true) ** 2))
+
+    print(
+        f"[{name}] "
+        f"MAE={mae.item():.6f} | "
+        f"RMSE={rmse.item():.6f} | "
+        f"pred_mean={y_pred.mean().item():.6f} | "
+        f"pred_std={y_pred.std(unbiased=False).item():.6f} | "
+        f"true_mean={y_true.mean().item():.6f}"
+    )
