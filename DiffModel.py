@@ -378,6 +378,8 @@ def diffusion_loss_fn_parallel(
     mask_rate = model.mask_rate
     if is_task == False:  # DIM loss 먼저
 
+        model.diff_step += 1
+
         batch_size = x_0_m.shape[0]
 
         # -------------------------------------------------
@@ -412,6 +414,7 @@ def diffusion_loss_fn_parallel(
 
         if model.aggregation in ["aggregation", "aggregation_ab1"]:
             x_m, e_m = q_x_fn(model, x_0_m, t, device)
+
         if model.aggregation in ["aggregation", "aggregation_ab2"]:
             x_g, e_g = q_x_fn(model, x_0_g, t, device)
 
@@ -431,8 +434,6 @@ def diffusion_loss_fn_parallel(
         else:
             c1, c2 = cond_emb1, cond_emb2
 
-        model.diff_step += 1
-
         if model.aggregation == "aggregation":
             output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)
             output2 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=1)
@@ -440,38 +441,14 @@ def diffusion_loss_fn_parallel(
 
         elif model.aggregation == "aggregation_ab1":
             output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)
-
             return F.smooth_l1_loss(x_0_m, output1)
 
         elif model.aggregation == "aggregation_ab2":
             output1 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=0)
-
-            # -------------------------------------------------
-            # debug: x0_pred rating MAE + batch similarity
-            # -------------------------------------------------
-            if model.diff_step % 200 == 0:
-                with torch.no_grad():
-                    x0_pred = output1
-
-                    y_pred = torch.sum(x0_pred * iid_emb, dim=1)
-                    mae = torch.mean(torch.abs(y_pred - y_input.squeeze().float()))
-
-                    # print(f"\n[Step {model.diff_step}] x0_pred Rating MAE")
-                    # print(f"MAE : {mae.item():.6f}")
-
-                    # print_batch_node_similarity(emb=x0_pred, step=model.diff_step, prefix="x0_pred", interval=200)
-
             return F.smooth_l1_loss(x_0_g, output1)
 
     elif is_task:
         model.task_step += 1
-
-        if model.rqvae["start_point"] == "src_u":
-            start1, start2 = cond_emb1, cond_emb2
-        elif model.rqvae["start_point"] == "quant_u":
-            start1, start2 = Q_emb1, Q_emb2
-        elif model.rqvae["start_point"] == "noise":
-            start1, start2 = torch.randn_like(cond_emb1), torch.randn_like(cond_emb2)
 
         if model.rqvae["RQVAE"] == True:
             cond1, cond2 = q_embs1, q_embs2
@@ -542,18 +519,7 @@ def diffusion_loss_fn_parallel(
 
             return task_loss, model.parallel["uniformity_loss"] * uni_loss
 
-        if model.parallel["set_aggr"] == "item_i":
-            iid = iid.squeeze(1)
-
-            style_tgt_item = model.style_tgt_item.to(base_tokens.device)  # [I_total, F_item]
-            style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
-            item_style_tok = model.item_style_encoder(style_i)  # (B, D)
-            item_style_tok = model.item_style_ln(item_style_tok)  # (B, D)
-            item_style_tok = model.item_style_scale * item_style_tok  # (B, D)
-
-            tokens = torch.cat([base_tokens, item_style_tok.unsqueeze(1)], dim=1)
-
-        elif model.parallel["set_aggr"] == "item_iu":
+        if model.parallel["set_aggr"] == "item_iu":
             uid = uid.long()  # (B,)
             iid = iid.squeeze(1)
 
@@ -631,26 +597,6 @@ def diffusion_loss_fn_parallel(
             query_bias = style_tok_u + item_style_tok  # (B, D)
 
             query = model.query_proj(query_bias).unsqueeze(1)  # (B, 1, D)
-
-        elif model.parallel["set_aggr"] == "item_u":
-            uid = uid.long()  # (B,)
-
-            style_src = style_src.to(base_tokens.device)
-            style_u = style_src[uid][:, :2]  # (B, F)
-
-            if model.parallel["bias_mapping"] == "user":
-                style_u = model.user_style_mapper(style_u)
-                mapping_loss = F.mse_loss(style_u, model.style_tgt_user[uid, :2])
-                style_u = style_u.detach()
-
-            style_tok = model.style_encoder(style_u)  # (B, D)
-            style_tok = model.style_ln(style_tok)  # (B, D)
-            style_tok_u = model.style_scale * style_tok  # (B, D)
-
-            tokens = torch.cat([base_tokens, style_tok_u.unsqueeze(1)], dim=1)
-
-        elif model.parallel["set_aggr"] == "item":
-            tokens = base_tokens
 
         out, score, attn = model.attn_layer(tokens, query=query, return_score=True)  # (B, 1, D)
 
@@ -780,20 +726,7 @@ def make_ddim_timesteps(num_steps, sample_steps, device):
 
 @torch.no_grad()
 def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise", sample_steps=20, eta=0.0, diff_id=0):
-    """
-    solver-style sampling for x0-prediction model
 
-    start_mode:
-        - "noise": pure Gaussian에서 시작
-        - "cond" : cond_emb에서 시작
-
-    sample_steps:
-        전체 diffusion step(num_steps)보다 적게 두면 빠른 샘플링 가능
-
-    eta:
-        0.0 -> deterministic DDIM / ODE-like
-        >0  -> stochastic DDIM
-    """
     if model.rqvae["RQVAE"]:  # cond_emb:  [L, B, D]
         q_embs = cond_emb  # [L, B, D] 원본 보존
         x_init = cond_emb[0]  # [B, D]
@@ -827,20 +760,19 @@ def p_sample_loop_x0_solver(model, cond_emb, iid_emb, device, start_mode="noise"
         x_t, x0_pred = ddim_step_from_x0(
             model=model, x_t=x_t, t=t, t_prev=t_prev, cond_emb=cond_emb, device=device, cond_mask=cond_mask, eta=eta, diff_id=diff_id
         )
-        final_x0_pred = x0_pred
+        final_x0_pred = x_t
 
-    # 마지막 t=0에서 한 번 더 x0 prediction 정리
     t0 = torch.zeros(batch_size, device=device, dtype=torch.long)
 
-    if model.rqvae["RQVAE"]:
-        ns = NoiseScheduleVP(schedule="linear")
-        t_cont = t0.float() / model.num_steps
-        cond_emb = hierarchical_cond_from_levels(q_embs, t_cont, ns, model.rqvae["rq_num"])  # [L, B, D] -> [B, D]
+    # if model.rqvae["RQVAE"]:
+    #     ns = NoiseScheduleVP(schedule="linear")
+    #     t_cont = t0.float() / model.num_steps
+    #     cond_emb = hierarchical_cond_from_levels(q_embs, t_cont, ns, model.rqvae["rq_num"])  # [L, B, D] -> [B, D]
 
-    if model.parallel["zero_cond"]:
-        final_x0_pred = model(x_t, t0, cond_emb, cond_mask, diff_id=diff_id, zero_cond=True)
-    else:
-        final_x0_pred = model(x_t, t0, cond_emb, cond_mask, diff_id=diff_id)
+    # if model.parallel["zero_cond"]:
+    #     final_x0_pred = model(x_t, t0, cond_emb, cond_mask, diff_id=diff_id, zero_cond=True)
+    # else:
+    #     final_x0_pred = model(x_t, t0, cond_emb, cond_mask, diff_id=diff_id)
 
     return final_x0_pred, iid_emb
 

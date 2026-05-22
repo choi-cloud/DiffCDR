@@ -355,15 +355,6 @@ class MFBasedModel(torch.nn.Module):
                 cond1, cond2 = src_uid_emb1, src_uid_emb2
                 p_sample = Diff.p_sample_loop_x0_solver
 
-            if diff_model.rqvae["start_point"] == "src_u":
-                start1, start2 = src_uid_emb1, src_uid_emb2
-            elif diff_model.rqvae["start_point"] == "quant_u":
-                start1, start2 = quantized1, quantized2
-            elif diff_model.rqvae["start_point"] == "noise":
-                start1, start2 = torch.randn_like(src_uid_emb1), torch.randn_like(src_uid_emb2)
-            if diff_model.parallel["batch_norm"]:
-                iid_emb = diff_model.ln_iid(iid_emb)
-
             if diff_model.aggregation == "aggregation":
                 query = diff_model.query_proj(iid_emb).unsqueeze(1)
             else:
@@ -404,17 +395,7 @@ class MFBasedModel(torch.nn.Module):
 
                 return torch.sum(final_output_g * iid_emb, dim=1)
 
-            if diff_model.parallel["set_aggr"] == "item_i":
-                iid = iid_input.squeeze(1)
-                style_tgt_item = diff_model.style_tgt_item.to(start1.device)  # [I_total, F_item]
-                style_i = style_tgt_item[iid][:, :2]  # (B, F_item)
-                item_style_tok = diff_model.item_style_encoder(style_i)  # (B, D)
-                item_style_tok = diff_model.item_style_ln(item_style_tok)  # (B, D)
-                item_style_tok = diff_model.item_style_scale * item_style_tok  # (B, D)
-
-                tokens = torch.cat([base_tokens, item_style_tok.unsqueeze(1)], dim=1)
-
-            elif diff_model.parallel["set_aggr"] == "item_iu":
+            if diff_model.parallel["set_aggr"] == "item_iu":
                 uid = tgt_uid.long()  # (B,)
                 iid = iid_input.squeeze(1)
 
@@ -487,21 +468,6 @@ class MFBasedModel(torch.nn.Module):
                 query_bias = style_tok_u + item_style_tok  # (B, D)
 
                 query = diff_model.query_proj(query_bias).unsqueeze(1)  # (B, 1, D)
-
-            elif diff_model.parallel["set_aggr"] == "item_u":
-                uid = tgt_uid.long()  # (B,)
-                style_src = style_src.to(start1.device)
-                style_u = style_src[uid][:, :2]  # (B, F)
-
-                if diff_model.parallel["bias_mapping"] == "user":
-                    style_u = diff_model.user_style_mapper(style_u)
-                    style_u = style_u.detach()
-
-                style_tok = diff_model.style_encoder(style_u)  # (B, D)
-                style_tok = diff_model.style_ln(style_tok)  # (B, D)
-                style_tok_u = diff_model.style_scale * style_tok  # (B, D)
-
-                tokens = torch.cat([base_tokens, style_tok_u.unsqueeze(1)], dim=1)
 
             out = diff_model.attn_layer(tokens, query=query)  # (B, 1, D)
             final_output = out[:, 0, :]  # (B, D)
