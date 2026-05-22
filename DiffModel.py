@@ -441,7 +441,18 @@ def diffusion_loss_fn_parallel(
 
         elif model.aggregation == "aggregation_ab1":
             output1 = model(x_m, t.squeeze(-1), c1, cond_mask1, diff_id=0)
-            return F.smooth_l1_loss(x_0_m, output1)
+
+            rec_loss = F.smooth_l1_loss(output1, x_0_m)
+
+            cos_align_loss = 1.0 - F.cosine_similarity(output1, x_0_m, dim=1, eps=1e-8).mean()
+
+            geo_loss = batch_cosine_matrix_loss(output1, x_0_m)
+
+            norm_loss = sphere_match_norm_loss(output1, x_0_m)
+
+            loss = rec_loss + 0.3 * cos_align_loss + 0.7 * geo_loss + 0.3 * norm_loss
+
+            return loss
 
         elif model.aggregation == "aggregation_ab2":
             output1 = model(x_g, t.squeeze(-1), c2, cond_mask2, diff_id=0)
@@ -957,3 +968,25 @@ def log_embedding_geometry(name, emb, target_emb=None, step=None):
         )
 
         print("=" * 60)
+
+
+def batch_cosine_matrix_loss(pred, target):
+    pred_n = F.normalize(pred, dim=1, eps=1e-8)
+    target_n = F.normalize(target, dim=1, eps=1e-8)
+
+    pred_sim = pred_n @ pred_n.t()
+    target_sim = target_n @ target_n.t()
+
+    bsz = pred.size(0)
+    if bsz <= 1:
+        return pred.new_tensor(0.0)
+
+    mask = ~torch.eye(bsz, dtype=torch.bool, device=pred.device)
+
+    return F.smooth_l1_loss(pred_sim[mask], target_sim[mask])
+
+
+def sphere_match_norm_loss(pred, target):
+    pred_norm = pred.norm(dim=1)
+    target_norm = target.norm(dim=1)
+    return F.smooth_l1_loss(pred_norm, target_norm)
